@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.cache
+
+2d_resistivity_model/
+models_1year_1day/
+.codex/
+.agents/
+
+1_forward_1year.ipynb
+1_forward_t04368_deepert.py
+2_single_inversion_t04368_deepert.py
+2_single_inversion_t04368.ipynb
+2_timelapsedERT_inversion_deepert.py
+2_timelapsedERT_inversion.ipynb
