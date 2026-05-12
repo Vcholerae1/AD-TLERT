@@ -80,6 +80,17 @@ class SourcePositionInversionCase:
 
 
 @dataclass(frozen=True)
+class TerrainForwardData:
+    """ERT data parsed from a notebook-style terrain forward ``.dat`` file."""
+
+    rhoa: np.ndarray
+    measurements: np.ndarray
+    elec_x: np.ndarray
+    elec_z: np.ndarray
+    err: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
 class TerrainForwardRecord:
     """Manifest row for one terrain-forward timestep."""
 
@@ -274,24 +285,288 @@ def build_wenner_alpha_measurements(electrode_count: int) -> np.ndarray:
     return np.asarray(measurements, dtype=np.int32)
 
 
-def _source_depth_levels(max_depth: float, electrode_spacing: float, depth_levels: int) -> np.ndarray:
-    if depth_levels < 2:
-        raise ValueError("depth_levels must be >= 2")
-    if not np.isfinite(max_depth) or max_depth <= 0.0:
-        raise ValueError("max_depth must be positive")
-    if not np.isfinite(electrode_spacing) or electrode_spacing <= 0.0:
-        raise ValueError("electrode_spacing must be positive")
+def load_terrain_forward_dat(path: str | Path) -> TerrainForwardData:
+    """Read the notebook ERT ``.dat`` format without external ERT loaders."""
 
-    if depth_levels == 2:
-        return np.asarray([0.0, max_depth], dtype=float)
+    dat_path = Path(path)
+    lines = [line.strip() for line in dat_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(lines) < 4:
+        raise ValueError(f"{dat_path} is too short to be an ERT .dat file")
 
-    first_depth = max(electrode_spacing * 0.5, max_depth * 0.02)
-    if first_depth >= max_depth:
-        return np.linspace(0.0, max_depth, depth_levels, dtype=float)
+    cursor = 0
+    try:
+        sensor_count = int(lines[cursor])
+    except ValueError as exc:
+        raise ValueError(f"{dat_path}: first line must be sensor count") from exc
+    cursor += 1
+    while cursor < len(lines) and lines[cursor].startswith("#"):
+        cursor += 1
 
-    levels = np.concatenate(([0.0], np.geomspace(first_depth, max_depth, depth_levels - 1)))
-    levels[-1] = max_depth
-    return levels.astype(float, copy=False)
+    if cursor + sensor_count > len(lines):
+        raise ValueError(f"{dat_path}: sensor table is truncated")
+    sensors = np.asarray(
+        [[float(part) for part in lines[cursor + index].split()[:3]] for index in range(sensor_count)],
+        dtype=float,
+    )
+    sensors = _gimli_round(sensors, 1.0e-12)
+    cursor += sensor_count
+
+    while cursor < len(lines) and lines[cursor].startswith("#"):
+        cursor += 1
+    if cursor >= len(lines):
+        raise ValueError(f"{dat_path}: missing measurement count")
+    try:
+        data_count = int(lines[cursor])
+    except ValueError as exc:
+        raise ValueError(f"{dat_path}: measurement count must be an integer") from exc
+    cursor += 1
+
+    header: list[str] | None = None
+    while cursor < len(lines) and lines[cursor].startswith("#"):
+        header = lines[cursor].lstrip("#").split()
+        cursor += 1
+    if header is None:
+        raise ValueError(f"{dat_path}: missing measurement header")
+    if cursor + data_count > len(lines):
+        raise ValueError(f"{dat_path}: measurement table is truncated")
+
+    columns = {name: index for index, name in enumerate(header)}
+    required = ("a", "b", "m", "n", "rhoa")
+    missing = [name for name in required if name not in columns]
+    if missing:
+        raise ValueError(f"{dat_path}: missing required measurement columns {missing}")
+
+    values = np.asarray(
+        [[float(part) for part in lines[cursor + index].split()] for index in range(data_count)],
+        dtype=float,
+    )
+    if values.shape[1] < len(header):
+        raise ValueError(f"{dat_path}: measurement rows have fewer columns than the header")
+
+    measurements = np.column_stack(
+        (
+            values[:, columns["a"]],
+            values[:, columns["b"]],
+            values[:, columns["m"]],
+            values[:, columns["n"]],
+        )
+    ).astype(np.int32)
+    measurements -= 1
+    err = np.asarray(values[:, columns["err"]], dtype=float) if "err" in columns else None
+    return TerrainForwardData(
+        rhoa=np.asarray(values[:, columns["rhoa"]], dtype=float),
+        measurements=measurements,
+        elec_x=np.asarray(sensors[:, 0], dtype=float),
+        elec_z=np.asarray(sensors[:, 1], dtype=float),
+        err=err,
+    )
+
+
+def _gimli_round(values: np.ndarray, tolerance: float) -> np.ndarray:
+    """Match GIMLi's tolerance rounding, which rounds after division by tol."""
+
+    return np.rint(np.asarray(values, dtype=float) / tolerance) * tolerance
+
+
+def _triangle_node_adjacency(cells: np.ndarray, node_count: int) -> list[np.ndarray]:
+    adjacency = [set() for _ in range(node_count)]
+    for cell in cells:
+        a, b, c = (int(cell[0]), int(cell[1]), int(cell[2]))
+        adjacency[a].update((b, c))
+        adjacency[b].update((a, c))
+        adjacency[c].update((a, b))
+    return [np.asarray(sorted(neighbors), dtype=np.int32) for neighbors in adjacency]
+
+
+def _triangle_smoothing_fixed_mask(
+    cells: np.ndarray,
+    markers: np.ndarray,
+    node_count: int,
+    plc_node_count: int,
+) -> np.ndarray:
+    fixed = np.zeros(node_count, dtype=bool)
+    fixed[: min(max(int(plc_node_count), 0), node_count)] = True
+
+    edge_counts: dict[tuple[int, int], int] = {}
+    edge_markers: dict[tuple[int, int], set[int]] = {}
+    for cell, marker in zip(cells, markers, strict=True):
+        a, b, c = (int(cell[0]), int(cell[1]), int(cell[2]))
+        cell_edges = (
+            (min(a, b), max(a, b)),
+            (min(b, c), max(b, c)),
+            (min(c, a), max(c, a)),
+        )
+        marker_id = int(marker)
+        for edge in cell_edges:
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+            edge_markers.setdefault(edge, set()).add(marker_id)
+
+    for edge, count in edge_counts.items():
+        if count == 1 or len(edge_markers[edge]) > 1:
+            fixed[list(edge)] = True
+    return fixed
+
+
+def _smooth_triangle_nodes(
+    nodes: np.ndarray,
+    cells: np.ndarray,
+    markers: np.ndarray,
+    *,
+    plc_node_count: int,
+    iterations: int,
+) -> np.ndarray:
+    """Replicate pyGIMLi's Triangle mesh smoothing for region-marked PLC meshes."""
+
+    if iterations < 0:
+        raise ValueError("smoothing iterations must be non-negative")
+    nodes_array = np.asarray(nodes, dtype=float)
+    if iterations == 0:
+        return nodes_array.copy()
+
+    cells_array = np.asarray(cells, dtype=np.int32)
+    markers_array = np.asarray(markers, dtype=np.int32).reshape(-1)
+    if cells_array.ndim != 2 or cells_array.shape[1] != 3:
+        raise ValueError("triangle cells must have shape (n_cells, 3)")
+    if markers_array.shape[0] != cells_array.shape[0]:
+        raise ValueError("triangle markers must have one value per cell")
+
+    smoothed = nodes_array.copy()
+    adjacency = _triangle_node_adjacency(cells_array, smoothed.shape[0])
+    fixed = _triangle_smoothing_fixed_mask(cells_array, markers_array, smoothed.shape[0], plc_node_count)
+    for _ in range(iterations):
+        for node_id, neighbors in enumerate(adjacency):
+            if fixed[node_id] or neighbors.size == 0:
+                continue
+            smoothed[node_id] = (smoothed[node_id] + smoothed[neighbors].sum(axis=0)) / (neighbors.size + 1)
+    return smoothed
+
+
+def _source_position_triangle_arrays(
+    elec_x: np.ndarray,
+    elec_z: np.ndarray,
+    *,
+    quality: float,
+    smoothing_iterations: int = 10,
+) -> tuple[np.ndarray, np.ndarray]:
+    try:
+        import triangle as triangle_lib
+    except ImportError as exc:
+        raise ImportError(
+            "Building the source-position inversion mesh requires "
+            "the optional `triangle` package. Run this example with "
+            "`uv run --with triangle ...`."
+        ) from exc
+
+    if quality <= 0.0:
+        raise ValueError("quality must be positive")
+
+    sensors = np.column_stack((elec_x, elec_z))
+    electrode_spacing = float(np.linalg.norm(sensors[1] - sensors[0]))
+    x_min = float(np.min(elec_x))
+    x_max = float(np.max(elec_x))
+    para_bound = electrode_spacing * 2.0
+    para_depth = 0.4 * (x_max - x_min)
+    x_start = x_min - para_bound
+    x_end = x_max + para_bound
+    bottom_y = min(float(elec_z[0] - para_depth), float(elec_z[-1] - para_depth))
+    boundary_scale = 4.0
+    outer_bound = abs(x_max - x_min) * boundary_scale
+
+    vertices: list[list[float]] = []
+    segments: list[list[int]] = []
+    regions: list[list[float]] = []
+
+    def add_node(x_coord: float, y_coord: float) -> int:
+        vertices.append([float(x_coord), float(y_coord)])
+        return len(vertices) - 1
+
+    def add_segment(start: int, stop: int) -> None:
+        segments.append([start, stop])
+
+    n1 = add_node(x_start, float(elec_z[0]))
+    n2 = add_node(x_start, bottom_y)
+    n3 = add_node(x_end, bottom_y)
+    n4 = add_node(x_end, float(elec_z[-1]))
+
+    if outer_bound > para_bound:
+        n11 = add_node(vertices[n1][0] - outer_bound, vertices[n1][1])
+        n12 = add_node(vertices[n11][0], vertices[n11][1] - (outer_bound + para_depth))
+        n14 = add_node(vertices[n4][0] + outer_bound, vertices[n4][1])
+        n13 = add_node(vertices[n14][0], vertices[n14][1] - (outer_bound + para_depth))
+        add_segment(n1, n11)
+        add_segment(n11, n12)
+        add_segment(n12, n13)
+        add_segment(n13, n14)
+        add_segment(n14, n4)
+        regions.append([vertices[n12][0] + 1.0e-3, vertices[n12][1] + 1.0e-3, 1.0, 0.0])
+
+    add_segment(n1, n2)
+    add_segment(n2, n3)
+    add_segment(n3, n4)
+    regions.append([vertices[n2][0] + 1.0e-3, vertices[n2][1] + 1.0e-3, 2.0, 0.0])
+
+    surface = [n1]
+    for index, (x_coord, z_coord) in enumerate(sensors):
+        surface.append(add_node(float(x_coord), float(z_coord)))
+        if index < sensors.shape[0] - 1:
+            next_x, next_z = sensors[index + 1]
+            surface.append(add_node(float((x_coord + next_x) * 0.5), float((z_coord + next_z) * 0.5)))
+    surface.append(n4)
+
+    seen: set[int] = set()
+    surface = [node_id for node_id in surface if not (node_id in seen or seen.add(node_id))]
+    surface.sort(key=lambda node_id: vertices[node_id][0])
+    for index in range(len(surface) - 1, 0, -1):
+        add_segment(surface[index], surface[index - 1])
+
+    triangle_input = {
+        "vertices": np.asarray(vertices, dtype=float),
+        "segments": np.asarray(segments, dtype=np.int32),
+        "regions": np.asarray(regions, dtype=float),
+    }
+    triangle_mesh = triangle_lib.triangulate(triangle_input, f"pzeAq{quality:g}aQ")
+    nodes_all = np.asarray(triangle_mesh["vertices"], dtype=float)
+    cells_all = np.asarray(triangle_mesh["triangles"], dtype=np.int32)
+    attrs = np.rint(np.asarray(triangle_mesh["triangle_attributes"], dtype=float).reshape(-1)).astype(np.int32)
+    nodes_all = _smooth_triangle_nodes(
+        nodes_all,
+        cells_all,
+        attrs,
+        plc_node_count=len(vertices),
+        iterations=int(smoothing_iterations),
+    )
+    parameter_cells = cells_all[attrs == 2]
+    if parameter_cells.size == 0:
+        raise ValueError("triangle did not produce any parameter-domain cells")
+
+    used_node_ids_list: list[int] = []
+    seen_node_ids: set[int] = set()
+    for node_id in parameter_cells.reshape(-1):
+        node_id_int = int(node_id)
+        if node_id_int not in seen_node_ids:
+            seen_node_ids.add(node_id_int)
+            used_node_ids_list.append(node_id_int)
+    used_node_ids = np.asarray(used_node_ids_list, dtype=np.int32)
+    remap = np.full(nodes_all.shape[0], -1, dtype=np.int32)
+    remap[used_node_ids] = np.arange(used_node_ids.size, dtype=np.int32)
+    return nodes_all[used_node_ids], remap[parameter_cells]
+
+
+def _load_mesh_npz_arrays(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    with np.load(path) as data:
+        missing = {"nodes", "cells"}.difference(data.files)
+        if missing:
+            raise KeyError(f"{path} missing required mesh arrays: {sorted(missing)}")
+        surface_node_ids = (
+            np.asarray(data["surface_node_ids"], dtype=np.int32).ravel()
+            if "surface_node_ids" in data.files
+            else None
+        )
+        return (
+            np.asarray(data["nodes"], dtype=float),
+            np.asarray(data["cells"], dtype=np.int32),
+            surface_node_ids,
+        )
 
 
 def build_source_position_triangle_inversion_case(
@@ -304,14 +579,18 @@ def build_source_position_triangle_inversion_case(
     *,
     y_index: int,
     depth_levels: int = 11,
+    quality: float = 34.0,
+    smoothing_iterations: int = 10,
+    data_file: str | Path | None = None,
+    mesh_file: str | Path | None = None,
 ) -> SourcePositionInversionCase:
     """Build a source-position driven triangular inversion mesh.
 
-    The forward notebooks let pyGIMLi create ``paraDomain`` from the ERT source
-    positions instead of reusing the structured ParFlow forward grid. This helper
-    mirrors that modelling choice in native deepert: electrodes define the top
-    mesh row, depth levels are generated automatically from electrode spacing and
-    model depth, and each strip is split into triangles.
+    The notebooks create ``paraDomain`` from ERT source positions instead of
+    reusing the structured ParFlow forward grid. This helper mirrors that PLC
+    construction in deepert and uses Triangle directly.
+    If ``mesh_file`` is provided, saved paraDomain arrays are used as a
+    bootstrap cache and no mesh generator is imported.
     """
 
     elec_x_array = np.asarray(elec_x, dtype=float).ravel()
@@ -343,46 +622,29 @@ def build_source_position_triangle_inversion_case(
     if not np.all(np.isfinite(thickness_array)) or np.any(thickness_array <= 0.0):
         raise ValueError("layer_thickness must contain positive finite values")
 
-    electrode_spacing = float(np.median(np.diff(elec_x_array)))
-    depths = _source_depth_levels(float(np.sum(thickness_array)), electrode_spacing, int(depth_levels))
+    if data_file is not None:
+        parsed_data = load_terrain_forward_dat(data_file)
+        elec_x_array = parsed_data.elec_x
+        elec_z_array = parsed_data.elec_z
+        measurement_array = parsed_data.measurements
 
-    rows = []
-    for row_index, depth in enumerate(depths):
-        if row_index == 0:
-            row_x = elec_x_array
-            row_z_top = elec_z_array
-        else:
-            offset = (0.35 * electrode_spacing) * (1.0 if row_index % 2 else -1.0)
-            row_x = np.clip(elec_x_array + offset, elec_x_array[0], elec_x_array[-1])
-            row_x[0] = elec_x_array[0]
-            row_x[-1] = elec_x_array[-1]
-            row_z_top = np.interp(row_x, x_node_array, z_top_array)
-        rows.append(np.column_stack((row_x, row_z_top - depth)))
-    nodes = np.vstack(rows)
-
-    electrode_count = int(elec_x_array.size)
-
-    def node_id(row_index: int, electrode_index: int) -> int:
-        return row_index * electrode_count + electrode_index
-
-    cells: list[list[int]] = []
-    for row_index in range(len(depths) - 1):
-        for electrode_index in range(electrode_count - 1):
-            top_left = node_id(row_index, electrode_index)
-            top_right = node_id(row_index, electrode_index + 1)
-            bottom_left = node_id(row_index + 1, electrode_index)
-            bottom_right = node_id(row_index + 1, electrode_index + 1)
-            if (row_index + electrode_index) % 2 == 0:
-                cells.append([top_left, top_right, bottom_right])
-                cells.append([top_left, bottom_right, bottom_left])
-            else:
-                cells.append([top_left, top_right, bottom_left])
-                cells.append([top_right, bottom_right, bottom_left])
+    surface_node_ids = None
+    if mesh_file is not None:
+        nodes, cells, surface_node_ids = _load_mesh_npz_arrays(mesh_file)
+    else:
+        if depth_levels < 2:
+            raise ValueError("depth_levels must be >= 2")
+        nodes, cells = _source_position_triangle_arrays(
+            elec_x_array,
+            elec_z_array,
+            quality=float(quality),
+            smoothing_iterations=int(smoothing_iterations),
+        )
 
     mesh = Mesh.from_arrays(
         jnp.asarray(nodes),
         jnp.asarray(cells, dtype=jnp.int32),
-        surface_node_ids=jnp.arange(electrode_count, dtype=jnp.int32),
+        surface_node_ids=None if surface_node_ids is None else jnp.asarray(surface_node_ids, dtype=jnp.int32),
     )
     survey = Survey.from_arrays(
         jnp.asarray(np.column_stack((elec_x_array, elec_z_array))),

@@ -3,6 +3,7 @@
 from deepert.workflows.terrain import (
     ParflowGrid,
     SourcePositionInversionCase,
+    TerrainForwardData,
     TerrainForwardCase,
     TerrainForwardRecord,
     TerrainForwardRunner,
@@ -10,6 +11,7 @@ from deepert.workflows.terrain import (
     build_terrain_forward_case,
     build_wenner_alpha_measurements,
     discover_resistivity_slices,
+    load_terrain_forward_dat,
     parse_pftcl,
     parse_resistivity_slice_name,
     read_slope_x,
@@ -23,6 +25,7 @@ from deepert.workflows.terrain import (
 __all__ = [
     "ParflowGrid",
     "SourcePositionInversionCase",
+    "TerrainForwardData",
     "TerrainForwardCase",
     "TerrainForwardRecord",
     "TerrainForwardRunner",
@@ -30,6 +33,7 @@ __all__ = [
     "build_terrain_forward_case",
     "build_wenner_alpha_measurements",
     "discover_resistivity_slices",
+    "load_terrain_forward_dat",
     "parse_pftcl",
     "parse_resistivity_slice_name",
     "read_slope_x",

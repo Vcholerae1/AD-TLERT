@@ -25,6 +25,7 @@ class InversionConfig:
     max_iterations: int = 8
     data_std: float | ArrayLike = 0.05
     regularization: float = 1.0e-2
+    regularization_mode: str = "model"
     temporal_regularization: float = 0.0
     temporal_regularization_mode: str = "separate"
     spatial_regularization: str = "identity"
@@ -34,6 +35,7 @@ class InversionConfig:
     step_length: float = 1.0
     max_log_step: float | None = 1.0
     line_search: bool = False
+    target_chi2: float | None = None
     step_tolerance: float = 1.0e-4
     lsqr_atol: float = 1.0e-6
     lsqr_btol: float = 1.0e-6
@@ -74,6 +76,8 @@ def _check_config(config: InversionConfig) -> None:
         raise ValueError("max_iterations must be >= 1")
     if config.regularization < 0.0:
         raise ValueError("regularization must be non-negative")
+    if config.regularization_mode not in ("model", "update"):
+        raise ValueError("regularization_mode must be 'model' or 'update'")
     if config.temporal_regularization < 0.0:
         raise ValueError("temporal_regularization must be non-negative")
     if config.temporal_regularization_mode not in ("separate", "joint_frame"):
@@ -90,6 +94,8 @@ def _check_config(config: InversionConfig) -> None:
         raise ValueError("step_length must be positive")
     if config.max_log_step is not None and config.max_log_step <= 0.0:
         raise ValueError("max_log_step must be positive when set")
+    if config.target_chi2 is not None and config.target_chi2 <= 0.0:
+        raise ValueError("target_chi2 must be positive when set")
     if config.model_bounds is not None:
         lo, hi = config.model_bounds
         if not (0.0 < lo < hi):
@@ -573,7 +579,9 @@ def invert_single_log_resistivity(
             scale = float(np.sqrt(config.regularization))
             matrix_blocks.append(scale * regularization_matrix)
             current_roughness = regularization_matrix @ model
-            if reference is None:
+            if config.regularization_mode == "update":
+                reference_roughness = current_roughness
+            elif reference is None:
                 if config.spatial_regularization == "identity":
                     reference_roughness = current_roughness
                 else:
@@ -633,7 +641,10 @@ def invert_single_log_resistivity(
             jacobian = candidate_jacobian
 
         linearization_valid = True
-        iteration_chi2.append(_weighted_chi2(predicted_log, observed_log, weight))
+        chi2 = _weighted_chi2(predicted_log, observed_log, weight)
+        iteration_chi2.append(chi2)
+        if config.target_chi2 is not None and chi2 < config.target_chi2:
+            break
         if np.linalg.norm(actual_step) / max(float(np.sqrt(n_cells)), 1.0) < config.step_tolerance:
             break
 
