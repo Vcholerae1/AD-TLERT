@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
-from scipy.sparse.linalg import lsqr
+from scipy.spatial import cKDTree
+from scipy.sparse.linalg import cg, lsqr
 
 from deepert.forward import ERTForward2p5D, ERTForwardModeling
 from deepert.mesh import Mesh
@@ -37,9 +39,12 @@ class InversionConfig:
     line_search: bool = False
     target_chi2: float | None = None
     step_tolerance: float = 1.0e-4
+    linearized_solver: str = "lsqr"
     lsqr_atol: float = 1.0e-6
     lsqr_btol: float = 1.0e-6
     lsqr_iter_limit: int | None = None
+    cgls_max_iterations: int = 2000
+    cgls_tolerance: float = 1.0e-8
     include_robin_boundary_derivative: bool = False
     normal_sensitivity: bool = True
 
@@ -71,6 +76,316 @@ class TimeLapseERTInversionResult:
     window_reports: list[dict[str, float | int | None]] = field(default_factory=list)
 
 
+class ParameterizedERTForward2p5D:
+    """ERT forward wrapper with a full solve mesh and a smaller parameter mesh."""
+
+    def __init__(
+        self,
+        forward: ERTForward2p5D,
+        parameter_cell_ids: ArrayLike,
+        *,
+        regularization_mesh: Mesh | None = None,
+        forward_cell_parameter_ids: ArrayLike | None = None,
+        background_mode: str = "pygimli_prolongation",
+    ) -> None:
+        self.forward_operator = forward
+        self.survey = forward.survey
+        self.mesh = forward.mesh
+        self.regularization_mesh = regularization_mesh
+        forward_cell_count = int(forward.mesh.cell_count)
+        self.parameter_cell_ids = np.asarray(parameter_cell_ids, dtype=np.int32).ravel()
+        if self.parameter_cell_ids.ndim != 1:
+            raise ValueError("parameter_cell_ids must be a 1D array")
+        if self.parameter_cell_ids.size == 0:
+            raise ValueError("parameter_cell_ids must not be empty")
+        if np.any(self.parameter_cell_ids < 0) or np.any(self.parameter_cell_ids >= forward_cell_count):
+            raise ValueError("parameter_cell_ids reference cells outside the forward mesh")
+        if np.unique(self.parameter_cell_ids).size != self.parameter_cell_ids.size:
+            raise ValueError("parameter_cell_ids must be unique")
+        if background_mode not in ("pygimli_prolongation", "nearest", "fixed_mean"):
+            raise ValueError("background_mode must be 'pygimli_prolongation', 'nearest', or 'fixed_mean'")
+        self.background_mode = background_mode
+        self.forward_cell_parameter_ids = self._resolve_forward_cell_parameter_ids(
+            forward_cell_parameter_ids,
+            forward_cell_count=forward_cell_count,
+        )
+        self._n_parameters = int(np.max(self.forward_cell_parameter_ids)) + 1
+        if self.parameter_cell_ids.size != self._n_parameters:
+            raise ValueError(
+                "parameter_cell_ids must contain one representative forward cell per inversion parameter "
+                f"({self.parameter_cell_ids.size} != {self._n_parameters})"
+            )
+        representative_ids = self.forward_cell_parameter_ids[self.parameter_cell_ids]
+        expected_ids = np.arange(self._n_parameters, dtype=np.int32)
+        if not np.array_equal(representative_ids, expected_ids):
+            raise ValueError("parameter_cell_ids must be ordered representatives of forward_cell_parameter_ids")
+        if regularization_mesh is not None and int(regularization_mesh.cell_count) != self._n_parameters:
+            raise ValueError(
+                "regularization mesh cell count must match inversion parameter count "
+                f"({regularization_mesh.cell_count} != {self._n_parameters})"
+            )
+        all_cell_ids = np.arange(forward_cell_count, dtype=np.int32)
+        self._active_forward_mask = self.forward_cell_parameter_ids >= 0
+        self._active_forward_cell_ids = all_cell_ids[self._active_forward_mask]
+        self._active_parameter_ids = self.forward_cell_parameter_ids[self._active_forward_cell_ids]
+        self.background_cell_ids = all_cell_ids[~self._active_forward_mask]
+        self._background_parameter_ids = (
+            self._build_background_parameter_ids()
+            if self.background_mode == "nearest"
+            else np.empty((0,), dtype=np.int32)
+        )
+        self._resistivity_prolongation_matrix = (
+            self._build_resistivity_prolongation_matrix()
+            if self.background_mode == "pygimli_prolongation"
+            else None
+        )
+        self._jacobian_projection = self._build_jacobian_projection(forward_cell_count)
+
+    def _resolve_forward_cell_parameter_ids(
+        self,
+        forward_cell_parameter_ids: ArrayLike | None,
+        *,
+        forward_cell_count: int,
+    ) -> np.ndarray:
+        if forward_cell_parameter_ids is None:
+            cell_parameter_ids = np.full((forward_cell_count,), -1, dtype=np.int32)
+            cell_parameter_ids[self.parameter_cell_ids] = np.arange(self.parameter_cell_ids.size, dtype=np.int32)
+            return cell_parameter_ids
+
+        cell_parameter_ids = np.asarray(forward_cell_parameter_ids, dtype=np.int32).ravel()
+        if cell_parameter_ids.shape != (forward_cell_count,):
+            raise ValueError(
+                "forward_cell_parameter_ids must have one entry per forward mesh cell "
+                f"({cell_parameter_ids.shape} != ({forward_cell_count},))"
+            )
+        if np.any(cell_parameter_ids < -1):
+            raise ValueError("forward_cell_parameter_ids may only contain -1 or non-negative parameter ids")
+        active_ids = cell_parameter_ids[cell_parameter_ids >= 0]
+        if active_ids.size == 0:
+            raise ValueError("forward_cell_parameter_ids must contain at least one active parameter cell")
+        unique_ids = np.unique(active_ids)
+        expected_ids = np.arange(int(unique_ids[-1]) + 1, dtype=np.int32)
+        if not np.array_equal(unique_ids, expected_ids):
+            raise ValueError("forward_cell_parameter_ids must use contiguous ids starting at 0")
+        return cell_parameter_ids
+
+    @classmethod
+    def from_mesh_survey(
+        cls,
+        mesh: Mesh,
+        survey,
+        parameter_cell_ids: ArrayLike,
+        *,
+        regularization_mesh: Mesh | None = None,
+        background_mode: str = "pygimli_prolongation",
+        **forward_kwargs: Any,
+    ) -> "ParameterizedERTForward2p5D":
+        forward_cell_parameter_ids = forward_kwargs.pop("forward_cell_parameter_ids", None)
+        forward = ERTForward2p5D.from_mesh_survey(mesh, survey, **forward_kwargs)
+        return cls(
+            forward,
+            parameter_cell_ids,
+            regularization_mesh=regularization_mesh,
+            forward_cell_parameter_ids=forward_cell_parameter_ids,
+            background_mode=background_mode,
+        )
+
+    @property
+    def cell_count(self) -> int:
+        return self._n_parameters
+
+    def close(self) -> None:
+        self.forward_operator.close()
+
+    def _cell_centers(self) -> np.ndarray:
+        nodes = np.asarray(self.forward_operator.mesh.nodes, dtype=float)
+        cells = np.asarray(self.forward_operator.mesh.cells, dtype=np.int32)
+        return np.mean(nodes[cells], axis=1)
+
+    def _parameter_centers(self, centers: np.ndarray) -> np.ndarray:
+        sums = np.zeros((self.cell_count, centers.shape[1]), dtype=float)
+        counts = np.zeros((self.cell_count,), dtype=float)
+        np.add.at(sums, self._active_parameter_ids, centers[self._active_forward_cell_ids])
+        np.add.at(counts, self._active_parameter_ids, 1.0)
+        if np.any(counts <= 0.0):
+            raise ValueError("each inversion parameter must own at least one forward mesh cell")
+        return sums / counts[:, None]
+
+    def _build_background_parameter_ids(self) -> np.ndarray:
+        if self.background_cell_ids.size == 0:
+            return np.empty((0,), dtype=np.int32)
+        centers = self._cell_centers()
+        parameter_centers = self._parameter_centers(centers)
+        _, nearest = cKDTree(parameter_centers).query(centers[self.background_cell_ids])
+        return np.asarray(nearest, dtype=np.int32)
+
+    def _build_jacobian_projection(self, forward_cell_count: int) -> sp.csr_matrix:
+        rows = [self._active_forward_cell_ids]
+        cols = [self._active_parameter_ids]
+        data = [np.ones(self._active_forward_cell_ids.size, dtype=float)]
+        if self.background_mode == "pygimli_prolongation":
+            return sp.coo_matrix(
+                (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+                shape=(forward_cell_count, self.cell_count),
+            ).tocsr()
+        if self.background_cell_ids.size and self.background_mode == "nearest":
+            rows.append(self.background_cell_ids)
+            cols.append(self._background_parameter_ids)
+            data.append(np.ones(self.background_cell_ids.size, dtype=float))
+        elif self.background_cell_ids.size and self.background_mode == "fixed_mean":
+            rows.append(np.repeat(self.background_cell_ids, self.cell_count))
+            cols.append(np.tile(np.arange(self.cell_count, dtype=np.int32), self.background_cell_ids.size))
+            data.append(np.full(self.background_cell_ids.size * self.cell_count, 1.0 / self.cell_count, dtype=float))
+        return sp.coo_matrix(
+            (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+            shape=(forward_cell_count, self.cell_count),
+        ).tocsr()
+
+    def _build_resistivity_prolongation_matrix(self) -> sp.csr_matrix:
+        """Replicate PyGIMLi's marker model prolongation for background cells."""
+
+        forward_cell_count = int(self.forward_operator.mesh.cell_count)
+        matrix = np.zeros((forward_cell_count, self.cell_count), dtype=float)
+        matrix[self._active_forward_cell_ids, self._active_parameter_ids] = 1.0
+        if self.background_cell_ids.size == 0:
+            return sp.csr_matrix(matrix)
+
+        nodes = np.asarray(self.forward_operator.mesh.nodes, dtype=float)
+        cells = np.asarray(self.forward_operator.mesh.cells, dtype=np.int32)
+        edge_cells: dict[tuple[int, int], list[int]] = {}
+        for cell_id, cell in enumerate(cells):
+            for edge in _cell_edges(cell):
+                edge_cells.setdefault(tuple(sorted(edge)), []).append(cell_id)
+
+        neighbors: list[list[tuple[int, float]]] = [[] for _ in range(forward_cell_count)]
+        for edge, owners in edge_cells.items():
+            if len(owners) != 2:
+                continue
+            p0, p1 = nodes[list(edge)]
+            tangent = p1 - p0
+            length = float(np.linalg.norm(tangent))
+            if length <= 0.0:
+                continue
+            weight = abs(float(tangent[1])) / length + 1.0e-6
+            left, right = int(owners[0]), int(owners[1])
+            neighbors[left].append((right, weight))
+            neighbors[right].append((left, weight))
+
+        known = self._active_forward_mask.copy()
+        unknown = set(int(cell_id) for cell_id in self.background_cell_ids)
+        while unknown:
+            assignments: list[tuple[int, np.ndarray]] = []
+            for cell_id in sorted(unknown):
+                weighted = np.zeros((self.cell_count,), dtype=float)
+                total_weight = 0.0
+                for neighbor_id, weight in neighbors[cell_id]:
+                    if known[neighbor_id]:
+                        weighted += matrix[neighbor_id] * weight
+                        total_weight += weight
+                if total_weight > 1.0e-8:
+                    assignments.append((cell_id, weighted / total_weight))
+            if not assignments:
+                raise ValueError("could not prolongate background forward cells from active parameter cells")
+            for cell_id, row in assignments:
+                matrix[cell_id] = row
+                known[cell_id] = True
+                unknown.remove(cell_id)
+
+        return sp.csr_matrix(matrix)
+
+    def _full_log_model(self, log_resistivity: ArrayLike) -> np.ndarray:
+        full_log, _ = self._full_log_model_and_projection(log_resistivity)
+        return full_log
+
+    def _full_log_model_and_projection(self, log_resistivity: ArrayLike) -> tuple[np.ndarray, sp.csr_matrix]:
+        parameter_log = np.asarray(log_resistivity, dtype=float).ravel()
+        if parameter_log.shape != (self.cell_count,):
+            raise ValueError(f"log_resistivity must have shape ({self.cell_count},)")
+        if self.background_mode == "pygimli_prolongation":
+            if self._resistivity_prolongation_matrix is None:
+                raise ValueError("resistivity prolongation matrix has not been initialized")
+            parameter_resistivity = np.exp(parameter_log)
+            full_resistivity = np.asarray(self._resistivity_prolongation_matrix @ parameter_resistivity, dtype=float).ravel()
+            if np.any(full_resistivity <= 0.0) or not np.all(np.isfinite(full_resistivity)):
+                raise ValueError("prolongated forward resistivity contains non-positive or non-finite values")
+            if self._jacobian_projection is None:
+                raise ValueError("Jacobian projection has not been initialized")
+            return np.log(full_resistivity), self._jacobian_projection
+
+        full_log = np.empty((self.forward_operator.mesh.cell_count,), dtype=float)
+        full_log[self._active_forward_cell_ids] = parameter_log[self._active_parameter_ids]
+        if self.background_cell_ids.size:
+            if self.background_mode == "nearest":
+                full_log[self.background_cell_ids] = parameter_log[self._background_parameter_ids]
+            else:
+                full_log[self.background_cell_ids] = float(np.mean(parameter_log))
+        if self._jacobian_projection is None:
+            raise ValueError("Jacobian projection has not been initialized")
+        return full_log, self._jacobian_projection
+
+    def forward_and_jacobian(
+        self,
+        resistivity_model: ArrayLike,
+        log_transform: bool = True,
+        *,
+        include_robin_boundary_derivative: bool | None = None,
+        normal_sensitivity: bool | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        log_model = _as_log_model(
+            resistivity_model,
+            expected_size=self.cell_count,
+            log_model=log_transform,
+            name="resistivity_model",
+        )
+        full_log_model, projection = self._full_log_model_and_projection(log_model)
+        if (
+            self.background_mode == "pygimli_prolongation"
+            and (normal_sensitivity is None or bool(normal_sensitivity))
+            and not (bool(include_robin_boundary_derivative) if include_robin_boundary_derivative is not None else False)
+        ):
+            conductivity = jnp.asarray(np.exp(-full_log_model), dtype=FLOAT_DTYPE)
+            response, resistance_jacobian = self.forward_operator.solve_with_jacobian(
+                conductivity,
+                include_robin_boundary_derivative=False,
+                normal_sensitivity=True,
+                jacobian_cell_parameter_ids=self.forward_cell_parameter_ids,
+                jacobian_parameter_count=self.cell_count,
+            )
+            apparent_jacobian_sigma = jnp.abs(self.forward_operator._geometric_factors())[:, None] * resistance_jacobian
+            parameter_conductivity = jnp.asarray(np.exp(-log_model), dtype=apparent_jacobian_sigma.dtype)
+            jacobian = apparent_jacobian_sigma * (-parameter_conductivity[None, :])
+            jacobian = jacobian / response.apparent_resistivity[:, None]
+            return (
+                np.log(np.asarray(response.apparent_resistivity, dtype=float)),
+                np.asarray(jacobian, dtype=float),
+            )
+        predicted, full_jacobian = _forward_and_jacobian_log(
+            self.forward_operator,
+            full_log_model,
+            include_robin_boundary_derivative=bool(include_robin_boundary_derivative)
+            if include_robin_boundary_derivative is not None
+            else False,
+            normal_sensitivity=bool(normal_sensitivity) if normal_sensitivity is not None else True,
+        )
+        jacobian = np.asarray((projection.T @ np.asarray(full_jacobian, dtype=float).T).T, dtype=float)
+        return predicted, jacobian
+
+    def response(self, resistivity_model: ArrayLike) -> np.ndarray:
+        return self.forward(resistivity_model, log_transform=False)
+
+    def forward(self, resistivity_model: ArrayLike, log_transform: bool = True) -> np.ndarray:
+        log_model = _as_log_model(
+            resistivity_model,
+            expected_size=self.cell_count,
+            log_model=log_transform,
+            name="resistivity_model",
+        )
+        response = _forward_log_response(self.forward_operator, self._full_log_model(log_model))
+        if log_transform:
+            return response
+        return np.exp(response)
+
+
 def _check_config(config: InversionConfig) -> None:
     if config.max_iterations < 1:
         raise ValueError("max_iterations must be >= 1")
@@ -96,6 +411,12 @@ def _check_config(config: InversionConfig) -> None:
         raise ValueError("max_log_step must be positive when set")
     if config.target_chi2 is not None and config.target_chi2 <= 0.0:
         raise ValueError("target_chi2 must be positive when set")
+    if config.linearized_solver not in ("lsqr", "pyhydro_cgls", "normal_cg"):
+        raise ValueError("linearized_solver must be 'lsqr', 'pyhydro_cgls', or 'normal_cg'")
+    if config.cgls_max_iterations < 1:
+        raise ValueError("cgls_max_iterations must be >= 1")
+    if config.cgls_tolerance <= 0.0:
+        raise ValueError("cgls_tolerance must be positive")
     if config.model_bounds is not None:
         lo, hi = config.model_bounds
         if not (0.0 < lo < hi):
@@ -299,9 +620,44 @@ def _weighted_chi2(predicted_log_data: np.ndarray, observed_log_data: np.ndarray
     return float(np.mean(residual**2))
 
 
-def _coverage_from_jacobian(jacobian: np.ndarray, weights: np.ndarray) -> np.ndarray:
-    weighted_jacobian = jacobian * weights[:, None]
-    return np.sqrt(np.sum(weighted_jacobian**2, axis=0))
+def _mesh_cell_areas_np(mesh: Mesh) -> np.ndarray:
+    nodes = np.asarray(mesh.nodes, dtype=float)
+    cells = np.asarray(mesh.cells, dtype=np.int32)
+    cell_nodes = nodes[cells]
+    x_values = cell_nodes[:, :, 0]
+    y_values = cell_nodes[:, :, 1]
+    cross_sum = np.sum(
+        x_values * np.roll(y_values, -1, axis=1) - np.roll(x_values, -1, axis=1) * y_values,
+        axis=1,
+    )
+    areas = 0.5 * np.abs(cross_sum)
+    if np.any(areas <= 0.0) or not np.all(np.isfinite(areas)):
+        raise ValueError("regularization mesh contains non-positive or non-finite cell areas")
+    return areas
+
+
+def _pygimli_style_coverage_from_jacobian(
+    forward: ERTForward2p5D | ERTForwardModeling,
+    jacobian: np.ndarray,
+) -> np.ndarray:
+    """Return PyGIMLi-style log10 coverage used for default plot masking.
+
+    PyGIMLi's ERT coverage path applies the data/model log transform to the
+    sensitivity matrix, sums absolute transformed sensitivities over data, and
+    normalizes by parameter-cell size before taking log10.
+    """
+
+    matrix = np.asarray(jacobian, dtype=float)
+    mesh = _regularization_mesh(forward)
+    areas = _mesh_cell_areas_np(mesh)
+    if matrix.shape[1] != areas.shape[0]:
+        raise ValueError(
+            "coverage Jacobian column count does not match regularization mesh cell count "
+            f"({matrix.shape[1]} != {areas.shape[0]})"
+        )
+    sensitivity_sum = np.sum(np.abs(matrix), axis=0)
+    normalized = np.maximum(sensitivity_sum / areas, np.finfo(float).tiny)
+    return np.log10(normalized)
 
 
 def _data_phi(predicted_log_data: np.ndarray, observed_log_data: np.ndarray, weights: np.ndarray) -> float:
@@ -337,6 +693,13 @@ def _line_search_tau(
         regularization_matrix,
         reference_roughness,
     )
+    candidate_phi = _data_phi(candidate_predicted_log, observed_log, weights) + regularization * _model_phi(
+        state + step,
+        regularization_matrix,
+        reference_roughness,
+    )
+    if candidate_phi < best_phi:
+        return 1.0
     for index in range(1, 101):
         tau = 0.01 * index
         state_tau = state + tau * step
@@ -475,6 +838,52 @@ def _forward_and_jacobian_log(
     )
 
 
+ForwardJacobianCache = OrderedDict[tuple[tuple[int, ...], str, bytes, bool, bool], tuple[np.ndarray, np.ndarray]]
+
+
+def _forward_and_jacobian_log_cached(
+    forward: ERTForward2p5D | ERTForwardModeling,
+    log_resistivity: np.ndarray,
+    *,
+    include_robin_boundary_derivative: bool = False,
+    normal_sensitivity: bool = True,
+    cache: ForwardJacobianCache | None = None,
+    max_entries: int = 128,
+) -> tuple[np.ndarray, np.ndarray]:
+    if cache is None or max_entries < 1:
+        return _forward_and_jacobian_log(
+            forward,
+            log_resistivity,
+            include_robin_boundary_derivative=include_robin_boundary_derivative,
+            normal_sensitivity=normal_sensitivity,
+        )
+
+    key_array = np.ascontiguousarray(log_resistivity, dtype=np.float64)
+    key = (
+        tuple(int(size) for size in key_array.shape),
+        key_array.dtype.str,
+        key_array.tobytes(),
+        bool(include_robin_boundary_derivative),
+        bool(normal_sensitivity),
+    )
+    cached = cache.get(key)
+    if cached is not None:
+        cache.move_to_end(key)
+        return cached
+
+    result = _forward_and_jacobian_log(
+        forward,
+        log_resistivity,
+        include_robin_boundary_derivative=include_robin_boundary_derivative,
+        normal_sensitivity=normal_sensitivity,
+    )
+    cache[key] = result
+    cache.move_to_end(key)
+    while len(cache) > max_entries:
+        cache.popitem(last=False)
+    return result
+
+
 def _forward_log_response(
     forward: ERTForward2p5D | ERTForwardModeling,
     log_resistivity: np.ndarray,
@@ -498,6 +907,35 @@ def _solve_increment(
     rhs: np.ndarray,
     config: InversionConfig,
 ) -> np.ndarray:
+    if config.linearized_solver == "pyhydro_cgls":
+        normal_matrix = (matrix.T @ matrix).tocsr()
+        normal_rhs = np.asarray(matrix.T @ rhs, dtype=float).reshape(-1, 1)
+        solution = _pyhydro_cgls(
+            normal_matrix,
+            normal_rhs,
+            max_iterations=config.cgls_max_iterations,
+            tolerance=config.cgls_tolerance,
+        ).ravel()
+        if not np.all(np.isfinite(solution)):
+            raise ValueError("linearized inversion update contains non-finite values")
+        return solution
+
+    if config.linearized_solver == "normal_cg":
+        normal_matrix = (matrix.T @ matrix).tocsr()
+        normal_rhs = np.asarray(matrix.T @ rhs, dtype=float).ravel()
+        solution, info = cg(
+            normal_matrix,
+            normal_rhs,
+            rtol=config.cgls_tolerance,
+            atol=0.0,
+            maxiter=config.cgls_max_iterations,
+        )
+        if info < 0:
+            raise ValueError(f"normal_cg failed with illegal input/info={info}")
+        if not np.all(np.isfinite(solution)):
+            raise ValueError("linearized inversion update contains non-finite values")
+        return np.asarray(solution, dtype=float)
+
     solution = lsqr(
         matrix,
         rhs,
@@ -508,6 +946,61 @@ def _solve_increment(
     if not np.all(np.isfinite(solution)):
         raise ValueError("linearized inversion update contains non-finite values")
     return solution
+
+
+def _pyhydro_cgls(
+    matrix: sp.spmatrix,
+    rhs: np.ndarray,
+    *,
+    max_iterations: int,
+    tolerance: float,
+) -> np.ndarray:
+    """Replicate PyHydroGeophysX's CGLS routine for the linearized update."""
+
+    system = matrix.tocsr() if sp.issparse(matrix) else np.asarray(matrix, dtype=float)
+    b = np.asarray(rhs, dtype=float)
+    if b.ndim == 1:
+        b = b.reshape(-1, 1)
+    x = np.zeros((system.shape[1], 1), dtype=float)
+    r = b.copy()
+    s = system.T.dot(r)
+    if np.ndim(s) == 1:
+        s = np.asarray(s, dtype=float).reshape(-1, 1)
+    else:
+        s = np.asarray(s, dtype=float)
+    p = s.copy()
+    gamma = float((s.T @ s).item())
+    rr = float((r.T @ r).item())
+    rr0 = rr
+    if rr0 <= 0.0 or gamma <= 0.0:
+        return x
+
+    for _ in range(int(max_iterations)):
+        q = system.dot(p)
+        if np.ndim(q) == 1:
+            q = np.asarray(q, dtype=float).reshape(-1, 1)
+        else:
+            q = np.asarray(q, dtype=float)
+        denominator = float((q.T @ q).item())
+        if denominator <= 0.0:
+            break
+        alpha = gamma / denominator
+        x += alpha * p
+        r -= alpha * q
+        s = system.T.dot(r)
+        if np.ndim(s) == 1:
+            s = np.asarray(s, dtype=float).reshape(-1, 1)
+        else:
+            s = np.asarray(s, dtype=float)
+        gamma_new = float((s.T @ s).item())
+        if gamma <= 0.0:
+            break
+        p = s + float(gamma_new / gamma) * p
+        gamma = gamma_new
+        rr = float((r.T @ r).item())
+        if rr / rr0 < float(tolerance):
+            break
+    return x
 
 
 def invert_single_log_resistivity(
@@ -648,7 +1141,7 @@ def invert_single_log_resistivity(
         if np.linalg.norm(actual_step) / max(float(np.sqrt(n_cells)), 1.0) < config.step_tolerance:
             break
 
-    coverage = _coverage_from_jacobian(jacobian, weight)
+    coverage = _pygimli_style_coverage_from_jacobian(forward, jacobian)
     predicted_data = np.exp(predicted_log)
     final_log_model = _state_to_log_model(model, config)
     return ERTInversionResult(
@@ -689,6 +1182,8 @@ def invert_timelapse_log_resistivity(
     observed_log_data: bool = False,
     initial_log_model: bool = False,
     reference_log_model: bool = False,
+    _forward_jacobian_cache: ForwardJacobianCache | None = None,
+    _forward_jacobian_cache_max_entries: int = 128,
 ) -> TimeLapseERTInversionResult:
     """Jointly invert time-lapse ERT data with optional temporal smoothing.
 
@@ -755,11 +1250,13 @@ def invert_timelapse_log_resistivity(
             jacobians = []
             for time_index in range(n_times):
                 state_t = models[:, time_index]
-                pred_t, jac_log_t = _forward_and_jacobian_log(
+                pred_t, jac_log_t = _forward_and_jacobian_log_cached(
                     forward,
                     _state_to_log_model(state_t, config),
                     include_robin_boundary_derivative=config.include_robin_boundary_derivative,
                     normal_sensitivity=config.normal_sensitivity,
+                    cache=_forward_jacobian_cache,
+                    max_entries=_forward_jacobian_cache_max_entries,
                 )
                 predicted_rows.append(pred_t)
                 jacobians.append(jac_log_t * _d_log_model_d_state(state_t, config)[None, :])
@@ -792,7 +1289,9 @@ def invert_timelapse_log_resistivity(
                     )
                 frame_constraint = sp.vstack(frame_blocks, format="csr")
                 current_roughness = frame_constraint @ current_vec
-                if reference_vec is None:
+                if config.regularization_mode == "update":
+                    reference_roughness = current_roughness
+                elif reference_vec is None:
                     reference_roughness = np.zeros_like(current_roughness)
                 else:
                     reference_roughness = frame_constraint @ reference_vec
@@ -805,7 +1304,9 @@ def invert_timelapse_log_resistivity(
             scale = float(np.sqrt(config.regularization))
             matrix_blocks.append(scale * spatial_regularization_all)
             current_roughness = spatial_regularization_all @ current_vec
-            if reference is None:
+            if config.regularization_mode == "update":
+                reference_roughness = current_roughness
+            elif reference is None:
                 if config.spatial_regularization == "identity":
                     reference_roughness = current_roughness
                 else:
@@ -838,11 +1339,13 @@ def invert_timelapse_log_resistivity(
         candidate_jacobians = []
         for time_index in range(n_times):
             state_t = candidate_models[:, time_index]
-            pred_t, jac_log_t = _forward_and_jacobian_log(
+            pred_t, jac_log_t = _forward_and_jacobian_log_cached(
                 forward,
                 _state_to_log_model(state_t, config),
                 include_robin_boundary_derivative=config.include_robin_boundary_derivative,
                 normal_sensitivity=config.normal_sensitivity,
+                cache=_forward_jacobian_cache,
+                max_entries=_forward_jacobian_cache_max_entries,
             )
             candidate_rows.append(pred_t)
             candidate_jacobians.append(jac_log_t * _d_log_model_d_state(state_t, config)[None, :])
@@ -874,11 +1377,13 @@ def invert_timelapse_log_resistivity(
                 jacobians = []
                 for time_index in range(n_times):
                     state_t = models[:, time_index]
-                    pred_t, jac_log_t = _forward_and_jacobian_log(
+                    pred_t, jac_log_t = _forward_and_jacobian_log_cached(
                         forward,
                         _state_to_log_model(state_t, config),
                         include_robin_boundary_derivative=config.include_robin_boundary_derivative,
                         normal_sensitivity=config.normal_sensitivity,
+                        cache=_forward_jacobian_cache,
+                        max_entries=_forward_jacobian_cache_max_entries,
                     )
                     predicted_rows.append(pred_t)
                     jacobians.append(jac_log_t * _d_log_model_d_state(state_t, config)[None, :])
@@ -893,14 +1398,14 @@ def invert_timelapse_log_resistivity(
             jacobians = candidate_jacobians
 
         linearization_valid = True
-        iteration_chi2.append(_weighted_chi2(predicted_log, observed_log, weight))
+        chi2 = _weighted_chi2(predicted_log, observed_log, weight)
+        iteration_chi2.append(chi2)
+        if config.target_chi2 is not None and chi2 < config.target_chi2:
+            break
         if np.linalg.norm(actual_step_vec) / max(float(np.sqrt(total_size)), 1.0) < config.step_tolerance:
             break
 
-    all_coverage = [
-        _coverage_from_jacobian(jac_t, weight[time_index])
-        for time_index, jac_t in enumerate(jacobians)
-    ]
+    all_coverage = [_pygimli_style_coverage_from_jacobian(forward, jac_t) for jac_t in jacobians]
     coverage = np.nanmedian(np.column_stack(all_coverage), axis=1)
     final_log_models = _state_to_log_model(models, config)
     return TimeLapseERTInversionResult(
@@ -996,6 +1501,11 @@ def invert_windowed_timelapse_log_resistivity(
     coverage_bank: list[np.ndarray] = []
     window_final_chi2: list[float] = []
     window_reports: list[dict[str, float | int | None]] = []
+    forward_jacobian_cache: ForwardJacobianCache = OrderedDict()
+    forward_jacobian_cache_entries = max(
+        16,
+        min(128, int(window_size) * max(1, int(config.max_iterations) + 2) * 4),
+    )
 
     for start in starts:
         end = start + int(window_size)
@@ -1014,6 +1524,8 @@ def invert_windowed_timelapse_log_resistivity(
             observed_log_data=True,
             initial_log_model=True,
             reference_log_model=True,
+            _forward_jacobian_cache=forward_jacobian_cache,
+            _forward_jacobian_cache_max_entries=forward_jacobian_cache_entries,
         )
         for local_index in range(window_result.final_log_models.shape[1]):
             global_index = start + local_index

@@ -12,6 +12,7 @@ import numpy as np
 from deepert.forward import ERTForward2p5D
 from deepert.mesh import Mesh
 from deepert.survey import Survey
+from deepert.utils.dtypes import FLOAT_DTYPE
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,10 @@ class SourcePositionInversionCase:
     """Triangle inversion mesh generated from source/electrode positions."""
 
     mesh: Mesh
+    forward_mesh: Mesh
     survey: Survey
+    parameter_cell_ids: np.ndarray
+    cell_markers: np.ndarray
     elec_x: np.ndarray
     elec_z: np.ndarray
     x_nodes: np.ndarray
@@ -110,7 +114,7 @@ class TerrainForwardRunner:
 
     case_template: TerrainForwardCase
     forward: ERTForward2p5D
-    reuse_solver_state: bool = False
+    reuse_solver_state: bool = True
 
     @classmethod
     def from_case(
@@ -118,16 +122,15 @@ class TerrainForwardRunner:
         case: TerrainForwardCase,
         *,
         linear_solver_backend: str = "auto",
-        reuse_solver_state: bool = False,
+        reuse_solver_state: bool = True,
         terrain_cache_dir: str | Path | None = None,
         prepare_forward: bool = False,
     ) -> "TerrainForwardRunner":
         """Build a reusable forward operator from one terrain case.
 
-        By default each solve rebuilds cuDSS solver state while retaining the
-        geometry, JAX kernels, and auxiliary-field caches. Reusing cuDSS solver
-        state keeps only symbolic/plan/buffer state across models; each changed
-        conductivity still updates matrix values and refactorizes before solve.
+        By default cuDSS symbolic/plan/buffer state is retained across models.
+        Each changed conductivity still updates matrix values and refactorizes
+        before solve.
         """
 
         forward_kwargs = {"linear_solver_backend": linear_solver_backend}
@@ -147,18 +150,33 @@ class TerrainForwardRunner:
     def solve_resistivity(self, resistivity: np.ndarray) -> np.ndarray:
         """Compute apparent resistivity for a cell resistivity vector."""
 
+        conductivity = jnp.asarray(1.0 / np.asarray(resistivity, dtype=float), dtype=FLOAT_DTYPE)
+
         if not self.reuse_solver_state:
             self.forward.close()
-        conductivity = jnp.asarray(1.0 / np.asarray(resistivity, dtype=float), dtype=jnp.float32)
-        rhoa = np.asarray(self.forward.solve(conductivity=conductivity).apparent_resistivity, dtype=float)
-        if not np.isfinite(rhoa).all():
-            raise ValueError("forward returned non-finite apparent resistivity values")
+            return self._solve_conductivity_checked(conductivity)
+
+        rhoa = self._solve_conductivity_checked(conductivity, retry_on_invalid=False)
+        if rhoa is not None:
+            return rhoa
+
+        self.forward.close()
+        return self._solve_conductivity_checked(conductivity)
+
+    def _solve_conductivity_checked(self, conductivity, *, retry_on_invalid: bool = True) -> np.ndarray | None:
+        """Solve one model and optionally report invalid fast-path output to callers."""
+
+        rhoa = np.asarray(self.forward.apparent_resistivity_values(conductivity=conductivity), dtype=float)
+        if not np.isfinite(rhoa).all() or np.any(rhoa <= 0.0):
+            if retry_on_invalid:
+                raise ValueError("forward returned non-finite or non-positive apparent resistivity values")
+            return None
         return rhoa
 
     def prepare_resistivity(self, resistivity: np.ndarray) -> None:
         """Pre-populate caches for a representative terrain resistivity vector."""
 
-        conductivity = jnp.asarray(1.0 / np.asarray(resistivity, dtype=float), dtype=jnp.float32)
+        conductivity = jnp.asarray(1.0 / np.asarray(resistivity, dtype=float), dtype=FLOAT_DTYPE)
         self.forward.prepare(conductivity, include_solver_state=self.reuse_solver_state)
 
     def solve_case(self, case: TerrainForwardCase) -> np.ndarray:
@@ -173,13 +191,21 @@ class TerrainForwardRunner:
 
 
 def parse_resistivity_slice_name(path: str | Path) -> tuple[int, int]:
-    """Parse ``(y_index, timestep)`` from ``resistivity2d_y{y}_t{step}.npy``."""
+    """Parse ``(y_index, timestep)`` from terrain resistivity ``.npy`` names.
+
+    ``resistivity2d_y{y}_t{step}.npy`` carries an explicit y-index. The
+    notebook-style ``resistivity_t{step}.npy`` name is accepted with y-index
+    ``-1`` so callers can provide the desired slice separately.
+    """
 
     name = Path(path).name
     match = re.search(r"resistivity2d_y(\d+)_t(\d+)\.npy$", name)
-    if match is None:
-        raise ValueError(f"cannot parse y-index and timestep from filename: {name}")
-    return int(match.group(1)), int(match.group(2))
+    if match is not None:
+        return int(match.group(1)), int(match.group(2))
+    match = re.search(r"resistivity_t(\d+)\.npy$", name)
+    if match is not None:
+        return -1, int(match.group(1))
+    raise ValueError(f"cannot parse y-index and timestep from filename: {name}")
 
 
 def discover_resistivity_slices(
@@ -198,20 +224,45 @@ def discover_resistivity_slices(
 
     root = Path(input_dir)
     pairs: list[tuple[int, Path]] = []
-    for path in root.glob("resistivity2d_y*_t*.npy"):
-        try:
-            found_y_index, step = parse_resistivity_slice_name(path)
-        except ValueError:
-            continue
-        if y_index is not None and found_y_index != y_index:
-            continue
-        pairs.append((step, path))
+    for pattern in ("resistivity2d_y*_t*.npy", "resistivity_t*.npy"):
+        for path in root.glob(pattern):
+            try:
+                found_y_index, step = parse_resistivity_slice_name(path)
+            except ValueError:
+                continue
+            if y_index is not None and found_y_index >= 0 and found_y_index != y_index:
+                continue
+            pairs.append((step, path))
 
-    pairs.sort(key=lambda item: item[0])
+    pairs = sorted(set(pairs), key=lambda item: item[0])
     pairs = pairs[::file_stride]
     if max_steps is not None:
         pairs = pairs[:max_steps]
     return pairs
+
+
+def load_terrain_resistivity_slice(path: str | Path, grid: ParflowGrid, *, y_index: int) -> np.ndarray:
+    """Load a 2D terrain resistivity slice from a 2D or notebook-style 3D file."""
+
+    values = np.asarray(np.load(path), dtype=float)
+    if values.ndim == 2:
+        return values
+    if values.ndim != 3:
+        raise ValueError(f"{path}: resistivity array must be 2D or 3D, got shape={values.shape}")
+    if not (0 <= y_index < grid.ny):
+        raise ValueError(f"y_index={y_index} out of range for NY={grid.ny}")
+
+    if values.shape == (grid.nz, grid.ny, grid.nx):
+        return values[:, y_index, :]
+    if values.shape == (grid.ny, grid.nz, grid.nx):
+        return values[y_index, :, :]
+    if values.shape == (grid.nx, grid.ny, grid.nz):
+        return values[:, y_index, :].T
+    raise ValueError(
+        f"{path}: cannot infer 3D resistivity axis order from shape={values.shape}; "
+        f"expected ({grid.nz}, {grid.ny}, {grid.nx}), ({grid.ny}, {grid.nz}, {grid.nx}), "
+        f"or ({grid.nx}, {grid.ny}, {grid.nz})"
+    )
 
 
 def parse_pftcl(path: str | Path) -> ParflowGrid:
@@ -368,6 +419,26 @@ def _gimli_round(values: np.ndarray, tolerance: float) -> np.ndarray:
     return np.rint(np.asarray(values, dtype=float) / tolerance) * tolerance
 
 
+def _geometric_factors_np(electrodes: np.ndarray, measurements: np.ndarray) -> np.ndarray:
+    """Return analytic half-space geometric factors using NumPy double inputs."""
+
+    electrode_array = np.asarray(electrodes, dtype=float)
+    measurement_array = np.asarray(measurements, dtype=np.int32)
+    selected = electrode_array[measurement_array]
+    a = selected[:, 0]
+    b = selected[:, 1]
+    m = selected[:, 2]
+    n = selected[:, 3]
+
+    response = (
+        1.0 / np.linalg.norm(a - m, axis=-1)
+        - 1.0 / np.linalg.norm(a - n, axis=-1)
+        - 1.0 / np.linalg.norm(b - m, axis=-1)
+        + 1.0 / np.linalg.norm(b - n, axis=-1)
+    )
+    return 2.0 * np.pi / response
+
+
 def _triangle_node_adjacency(cells: np.ndarray, node_count: int) -> list[np.ndarray]:
     adjacency = [set() for _ in range(node_count)]
     for cell in cells:
@@ -441,13 +512,23 @@ def _smooth_triangle_nodes(
     return smoothed
 
 
+@dataclass(frozen=True)
+class _SourcePositionTriangleArrays:
+    parameter_nodes: np.ndarray
+    parameter_cells: np.ndarray
+    full_nodes: np.ndarray
+    full_cells: np.ndarray
+    cell_markers: np.ndarray
+    parameter_cell_ids: np.ndarray
+
+
 def _source_position_triangle_arrays(
     elec_x: np.ndarray,
     elec_z: np.ndarray,
     *,
     quality: float,
     smoothing_iterations: int = 10,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> _SourcePositionTriangleArrays:
     try:
         import triangle as triangle_lib
     except ImportError as exc:
@@ -535,7 +616,8 @@ def _source_position_triangle_arrays(
         plc_node_count=len(vertices),
         iterations=int(smoothing_iterations),
     )
-    parameter_cells = cells_all[attrs == 2]
+    parameter_cell_ids = np.flatnonzero(attrs == 2).astype(np.int32)
+    parameter_cells = cells_all[parameter_cell_ids]
     if parameter_cells.size == 0:
         raise ValueError("triangle did not produce any parameter-domain cells")
 
@@ -549,10 +631,19 @@ def _source_position_triangle_arrays(
     used_node_ids = np.asarray(used_node_ids_list, dtype=np.int32)
     remap = np.full(nodes_all.shape[0], -1, dtype=np.int32)
     remap[used_node_ids] = np.arange(used_node_ids.size, dtype=np.int32)
-    return nodes_all[used_node_ids], remap[parameter_cells]
+    return _SourcePositionTriangleArrays(
+        parameter_nodes=nodes_all[used_node_ids],
+        parameter_cells=remap[parameter_cells],
+        full_nodes=nodes_all,
+        full_cells=cells_all,
+        cell_markers=attrs,
+        parameter_cell_ids=parameter_cell_ids,
+    )
 
 
-def _load_mesh_npz_arrays(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+def _load_mesh_npz_arrays(
+    path: str | Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     with np.load(path) as data:
         missing = {"nodes", "cells"}.difference(data.files)
         if missing:
@@ -562,11 +653,21 @@ def _load_mesh_npz_arrays(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.
             if "surface_node_ids" in data.files
             else None
         )
-        return (
-            np.asarray(data["nodes"], dtype=float),
-            np.asarray(data["cells"], dtype=np.int32),
-            surface_node_ids,
+        nodes = np.asarray(data["nodes"], dtype=float)
+        cells = np.asarray(data["cells"], dtype=np.int32)
+        full_nodes = np.asarray(data["forward_nodes"], dtype=float) if "forward_nodes" in data.files else nodes
+        full_cells = np.asarray(data["forward_cells"], dtype=np.int32) if "forward_cells" in data.files else cells
+        cell_markers = (
+            np.asarray(data["cell_markers"], dtype=np.int32).ravel()
+            if "cell_markers" in data.files
+            else np.full(full_cells.shape[0], 2, dtype=np.int32)
         )
+        parameter_cell_ids = (
+            np.asarray(data["parameter_cell_ids"], dtype=np.int32).ravel()
+            if "parameter_cell_ids" in data.files
+            else np.arange(cells.shape[0], dtype=np.int32)
+        )
+        return nodes, cells, surface_node_ids, full_nodes, full_cells, cell_markers, parameter_cell_ids
 
 
 def build_source_position_triangle_inversion_case(
@@ -630,29 +731,50 @@ def build_source_position_triangle_inversion_case(
 
     surface_node_ids = None
     if mesh_file is not None:
-        nodes, cells, surface_node_ids = _load_mesh_npz_arrays(mesh_file)
+        (
+            nodes,
+            cells,
+            surface_node_ids,
+            full_nodes,
+            full_cells,
+            cell_markers,
+            parameter_cell_ids,
+        ) = _load_mesh_npz_arrays(mesh_file)
     else:
         if depth_levels < 2:
             raise ValueError("depth_levels must be >= 2")
-        nodes, cells = _source_position_triangle_arrays(
+        triangle_arrays = _source_position_triangle_arrays(
             elec_x_array,
             elec_z_array,
             quality=float(quality),
             smoothing_iterations=int(smoothing_iterations),
         )
+        nodes = triangle_arrays.parameter_nodes
+        cells = triangle_arrays.parameter_cells
+        full_nodes = triangle_arrays.full_nodes
+        full_cells = triangle_arrays.full_cells
+        cell_markers = triangle_arrays.cell_markers
+        parameter_cell_ids = triangle_arrays.parameter_cell_ids
 
     mesh = Mesh.from_arrays(
-        jnp.asarray(nodes),
+        jnp.asarray(nodes, dtype=FLOAT_DTYPE),
         jnp.asarray(cells, dtype=jnp.int32),
         surface_node_ids=None if surface_node_ids is None else jnp.asarray(surface_node_ids, dtype=jnp.int32),
     )
+    forward_mesh = Mesh.from_arrays(
+        jnp.asarray(full_nodes, dtype=FLOAT_DTYPE),
+        jnp.asarray(full_cells, dtype=jnp.int32),
+    )
     survey = Survey.from_arrays(
-        jnp.asarray(np.column_stack((elec_x_array, elec_z_array))),
+        jnp.asarray(np.column_stack((elec_x_array, elec_z_array)), dtype=FLOAT_DTYPE),
         jnp.asarray(measurement_array),
     )
     return SourcePositionInversionCase(
         mesh=mesh,
+        forward_mesh=forward_mesh,
         survey=survey,
+        parameter_cell_ids=np.asarray(parameter_cell_ids, dtype=np.int32),
+        cell_markers=np.asarray(cell_markers, dtype=np.int32),
         elec_x=elec_x_array,
         elec_z=elec_z_array,
         x_nodes=x_node_array,
@@ -733,12 +855,12 @@ def build_terrain_forward_case(
     measurements = build_wenner_alpha_measurements(electrode_count)
 
     mesh = Mesh.from_arrays(
-        jnp.asarray(nodes),
+        jnp.asarray(nodes, dtype=FLOAT_DTYPE),
         jnp.asarray(cells),
         surface_node_ids=jnp.arange(grid.nx + 1, dtype=jnp.int32),
     )
     survey = Survey.from_arrays(
-        jnp.asarray(np.column_stack((elec_x, elec_z))),
+        jnp.asarray(np.column_stack((elec_x, elec_z)), dtype=FLOAT_DTYPE),
         jnp.asarray(measurements),
     )
     return TerrainForwardCase(
@@ -758,7 +880,7 @@ def run_terrain_forward(
     case: TerrainForwardCase,
     *,
     linear_solver_backend: str = "auto",
-    reuse_solver_state: bool = False,
+    reuse_solver_state: bool = True,
     terrain_cache_dir: str | Path | None = None,
     prepare_forward: bool = False,
 ) -> np.ndarray:
@@ -791,33 +913,36 @@ def save_terrain_forward_dat(
     if rhoa_array.shape != (case.survey.measurement_count,):
         raise ValueError(f"rhoa must have shape ({case.survey.measurement_count},)")
 
-    electrodes = np.asarray(case.survey.electrode_positions, dtype=float)
+    electrodes = np.column_stack((np.asarray(case.elec_x, dtype=float), np.asarray(case.elec_z, dtype=float)))
     measurements = np.asarray(case.survey.measurements, dtype=np.int32)
-    geometric_factors = np.asarray(case.survey.geometric_factors(), dtype=float)
+    geometric_factors = _geometric_factors_np(electrodes, measurements)
     err = np.full(case.survey.measurement_count, float(relative_error), dtype=float)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as stream:
-        stream.write(f"{electrodes.shape[0]}\n")
-        stream.write("# x y z\n")
-        for x_coord, z_coord in electrodes:
-            stream.write(f"{x_coord:.14g}\t{z_coord:.14g}\t0\n")
-        stream.write(f"{measurements.shape[0]}\n")
-        stream.write("# a b m n err i ip iperr k r rhoa u valid \n")
+    lines = [
+        f"{electrodes.shape[0]}\n",
+        "# x y z\n",
+        *(f"{x_coord:.14g}\t{z_coord:.14g}\t0\n" for x_coord, z_coord in electrodes),
+        f"{measurements.shape[0]}\n",
+        "# a b m n err i ip iperr k r rhoa u valid \n",
+    ]
+    lines.extend(
+        (
+            f"{int(abmn[0]) + 1}\t{int(abmn[1]) + 1}\t{int(abmn[2]) + 1}\t{int(abmn[3]) + 1}\t"
+            f"{error_value:.14e}\t0.00000000000000e+00\t0.00000000000000e+00\t"
+            f"0.00000000000000e+00\t{k_value:.14e}\t0.00000000000000e+00\t"
+            f"{rhoa_value:.14e}\t0.00000000000000e+00\t1\n"
+        )
         for abmn, error_value, k_value, rhoa_value in zip(
             measurements,
             err,
             geometric_factors,
             rhoa_array,
             strict=True,
-        ):
-            a_idx, b_idx, m_idx, n_idx = abmn + 1
-            stream.write(
-                f"{a_idx}\t{b_idx}\t{m_idx}\t{n_idx}\t"
-                f"{error_value:.14e}\t0.00000000000000e+00\t0.00000000000000e+00\t"
-                f"0.00000000000000e+00\t{k_value:.14e}\t0.00000000000000e+00\t"
-                f"{rhoa_value:.14e}\t0.00000000000000e+00\t1\n"
-            )
+        )
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("".join(lines), encoding="utf-8")
 
 
 def save_terrain_forward_npz(
@@ -866,7 +991,7 @@ def run_terrain_forward_file(
     relative_error: float = 0.03,
     overwrite: bool = True,
     linear_solver_backend: str = "auto",
-    reuse_solver_state: bool = False,
+    reuse_solver_state: bool = True,
     terrain_cache_dir: str | Path | None = None,
     prepare_forward: bool = False,
 ) -> TerrainForwardRecord:
@@ -875,8 +1000,10 @@ def run_terrain_forward_file(
     path = Path(input_file)
     parsed_y_index, step = parse_resistivity_slice_name(path)
     if y_index is None:
+        if parsed_y_index < 0:
+            raise ValueError(f"{path}: y_index is required for notebook-style resistivity_t*.npy files")
         y_index = parsed_y_index
-    elif parsed_y_index != y_index:
+    elif parsed_y_index >= 0 and parsed_y_index != y_index:
         raise ValueError(f"input file y-index {parsed_y_index} does not match requested y_index={y_index}")
 
     output_root = Path(output_dir)
@@ -891,7 +1018,7 @@ def run_terrain_forward_file(
             status="skipped_existing",
         )
 
-    rho_2d = np.asarray(np.load(path), dtype=float)
+    rho_2d = load_terrain_resistivity_slice(path, grid, y_index=int(y_index))
     case = build_terrain_forward_case(
         rho_2d,
         grid,
@@ -932,7 +1059,7 @@ def run_terrain_forward_series(
     relative_error: float = 0.03,
     overwrite: bool = True,
     linear_solver_backend: str = "auto",
-    reuse_solver_state: bool = False,
+    reuse_solver_state: bool = True,
     terrain_cache_dir: str | Path | None = None,
     prepare_forward: bool = False,
 ) -> tuple[list[TerrainForwardRecord], list[TerrainForwardRecord]]:
@@ -940,10 +1067,9 @@ def run_terrain_forward_series(
 
     The terrain mesh, survey, sparse pattern, auxiliary discretization, JAX
     kernels, and auxiliary-field caches are reused across successful timesteps
-    with the same y-index. By default cuDSS solver state is rebuilt per solve to
-    avoid non-physical negative apparent resistivities observed when reusing it
-    across terrain timesteps. Set ``reuse_solver_state=True`` only for
-    experimental timing runs.
+    with the same y-index. cuDSS symbolic/plan/buffer state is also reused by
+    default; if that fast path returns invalid apparent resistivities, the
+    runner rebuilds solver state once and retries the timestep.
     """
 
     normalized_files: list[Path] = []
@@ -964,9 +1090,11 @@ def run_terrain_forward_series(
                 parsed_y_index, step = parse_resistivity_slice_name(path)
                 resolved_y_index = parsed_y_index
                 if y_index is not None:
-                    if parsed_y_index != y_index:
+                    if parsed_y_index >= 0 and parsed_y_index != y_index:
                         raise ValueError(f"input file y-index {parsed_y_index} does not match requested y_index={y_index}")
                     resolved_y_index = int(y_index)
+                elif parsed_y_index < 0:
+                    raise ValueError(f"{path}: y_index is required for notebook-style resistivity_t*.npy files")
 
                 dat_file = output_root / f"synthetic_ert_terrain_vardz_t{step:05d}.dat"
                 npz_file = output_root / f"synthetic_ert_terrain_vardz_t{step:05d}.npz"
@@ -982,7 +1110,7 @@ def run_terrain_forward_series(
                     )
                     continue
 
-                rho_2d = np.asarray(np.load(path), dtype=float)
+                rho_2d = load_terrain_resistivity_slice(path, grid, y_index=resolved_y_index)
                 runner = runners.get(resolved_y_index)
                 if runner is None:
                     case = build_terrain_forward_case(
@@ -1001,10 +1129,12 @@ def run_terrain_forward_series(
                         prepare_forward=prepare_forward,
                     )
                     runners[resolved_y_index] = runner
+                    resistivity = case.resistivity
                 else:
-                    case = runner.case_with_resistivity(_terrain_resistivity_vector(rho_2d, grid))
+                    case = runner.case_template
+                    resistivity = _terrain_resistivity_vector(rho_2d, grid)
 
-                rhoa = runner.solve_case(case)
+                rhoa = runner.solve_resistivity(resistivity)
                 save_terrain_forward_dat(dat_file, case, rhoa, relative_error=relative_error)
                 save_terrain_forward_npz(npz_file, case, rhoa, relative_error=relative_error)
                 manifest.append(

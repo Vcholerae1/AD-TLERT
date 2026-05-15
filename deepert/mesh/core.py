@@ -11,13 +11,13 @@ from jax import Array
 import jax.numpy as jnp
 import meshio
 
-from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE
+from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE, NP_FLOAT_DTYPE
 
 
 def triangle_areas(nodes: Array, cells: Array) -> Array:
     """Compute the area of each triangle cell."""
 
-    nodes_np = np.asarray(nodes, dtype=np.float32)
+    nodes_np = np.asarray(nodes, dtype=NP_FLOAT_DTYPE)
     cells_np = np.asarray(cells, dtype=np.int32)
     cell_nodes = nodes_np[cells_np]
     edge_1 = cell_nodes[:, 1] - cell_nodes[:, 0]
@@ -29,7 +29,7 @@ def triangle_areas(nodes: Array, cells: Array) -> Array:
 def cell_areas_2d(nodes: Array, cells: Array) -> Array:
     """Compute polygonal cell areas for triangle or quadrilateral cells."""
 
-    nodes_np = np.asarray(nodes, dtype=np.float32)
+    nodes_np = np.asarray(nodes, dtype=NP_FLOAT_DTYPE)
     cells_np = np.asarray(cells, dtype=np.int32)
     if cells_np.ndim != 2 or cells_np.shape[1] not in (3, 4):
         raise ValueError("cells must have shape (num_cells, 3) or (num_cells, 4)")
@@ -97,7 +97,7 @@ def _boundary_geometry(
 ) -> tuple[Array, Array, Array]:
     """Compute centers, lengths, and outward normals for boundary edges."""
 
-    nodes_np = np.asarray(nodes, dtype=np.float32)
+    nodes_np = np.asarray(nodes, dtype=NP_FLOAT_DTYPE)
     cells_np = np.asarray(cells, dtype=np.int32)
     boundary_edges_np = np.asarray(boundary_edges, dtype=np.int32)
     boundary_edge_cells_np = np.asarray(boundary_edge_cells, dtype=np.int32)
@@ -114,7 +114,7 @@ def _boundary_geometry(
     cell_centers = np.mean(nodes_np[cells_np[boundary_edge_cells_np]], axis=1)
     direction = centers - cell_centers
     orientation = np.sum(candidate_normals * direction, axis=1)
-    signs = np.where(orientation >= 0.0, 1.0, -1.0).astype(np.float32)
+    signs = np.where(orientation >= 0.0, 1.0, -1.0).astype(NP_FLOAT_DTYPE)
     normals = candidate_normals * signs[:, None]
     return (
         jnp.asarray(centers, dtype=FLOAT_DTYPE),
@@ -811,7 +811,7 @@ class Mesh:
             raise ValueError("nodes must have shape (num_nodes, 2)")
         if cell_array.ndim != 2 or cell_array.shape[1] not in (3, 4):
             raise ValueError("cells must have shape (num_cells, 3) or (num_cells, 4)")
-        node_array_np = np.asarray(node_array, dtype=np.float32)
+        node_array_np = np.asarray(node_array, dtype=NP_FLOAT_DTYPE)
         cell_array_np = np.asarray(cell_array, dtype=np.int32)
         if np.any(cell_array_np < 0):
             raise ValueError("cells contain negative node indices")

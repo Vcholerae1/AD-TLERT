@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import functools
 import hashlib
 import logging
 import os
@@ -14,6 +13,8 @@ import jax
 import jax.numpy as jnp
 from jax.experimental.sparse import CSR
 import numpy as np
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
 from scipy.special import k0 as besselk0
 
 from deepert.fem import (
@@ -34,15 +35,14 @@ from deepert.fem import (
 from deepert.forward.integration import build_inverse_cosine_weights, survey_wavenumber_bounds
 from deepert.mesh import Mesh
 from deepert.survey import Survey
-from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE
+from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE, NP_FLOAT_DTYPE
 
 _SOURCE_INSET_FACTOR = 0.69
-_VALID_LINEAR_SOLVER_BACKENDS = frozenset({"auto", "cudss"})
+_VALID_LINEAR_SOLVER_BACKENDS = frozenset({"auto", "cudss", "scipy"})
 _VALID_TOPOGRAPHIC_GEOMETRIC_FACTOR_MODES = frozenset({"analytic", "numerical"})
 _TERRAIN_AUXILIARY_CACHE_VERSION = "terrain_auxiliary_v1"
 _CUDSS_LOGGER = logging.getLogger("deepert.cudss")
 _CUDSS_LOGGER.setLevel(logging.ERROR)
-_PALLAS_DIRECT_SENSITIVITY_ENV = "DEEPERT_PALLAS_DIRECT_SENSITIVITY"
 
 
 def _enable_jax_x64_for_terrain_auxiliary() -> None:
@@ -526,7 +526,7 @@ def _quad_boundary_geometry(
 ) -> tuple[Array, Array, Array]:
     """Compute centers, lengths, and outward normals for quadrilateral boundary edges."""
 
-    nodes_np = np.asarray(nodes, dtype=np.float32)
+    nodes_np = np.asarray(nodes, dtype=NP_FLOAT_DTYPE)
     cells_np = np.asarray(cells, dtype=np.int32)
     boundary_edges_np = np.asarray(boundary_edges, dtype=np.int32)
     boundary_edge_cells_np = np.asarray(boundary_edge_cells, dtype=np.int32)
@@ -539,7 +539,7 @@ def _quad_boundary_geometry(
     cell_centers = np.mean(nodes_np[cells_np[boundary_edge_cells_np]], axis=1)
     direction = centers - cell_centers
     orientation = np.sum(candidate_normals * direction, axis=1)
-    signs = np.where(orientation >= 0.0, 1.0, -1.0).astype(np.float32)
+    signs = np.where(orientation >= 0.0, 1.0, -1.0).astype(NP_FLOAT_DTYPE)
     normals = candidate_normals * signs[:, None]
     return (
         jnp.asarray(centers, dtype=FLOAT_DTYPE),
@@ -769,9 +769,9 @@ def _build_q1_operator_templates(mesh: StructuredQuadMesh) -> OperatorTemplates:
             [gauss, gauss],
             [-gauss, gauss],
         ],
-        dtype=np.float32,
+        dtype=NP_FLOAT_DTYPE,
     )
-    quadrature_weights = np.ones((4,), dtype=np.float32)
+    quadrature_weights = np.ones((4,), dtype=NP_FLOAT_DTYPE)
 
     xi = quadrature_points[:, 0]
     eta = quadrature_points[:, 1]
@@ -783,12 +783,12 @@ def _build_q1_operator_templates(mesh: StructuredQuadMesh) -> OperatorTemplates:
             (1.0 - xi) * (1.0 + eta),
         ),
         axis=-1,
-    ).astype(np.float32)
+    ).astype(NP_FLOAT_DTYPE)
     dxi = 0.25 * np.stack((-(1.0 - eta), (1.0 - eta), (1.0 + eta), -(1.0 + eta)), axis=1)
     deta = 0.25 * np.stack((-(1.0 - xi), -(1.0 + xi), (1.0 + xi), (1.0 - xi)), axis=1)
-    reference_gradients = np.stack((dxi, deta), axis=-1).astype(np.float32)
+    reference_gradients = np.stack((dxi, deta), axis=-1).astype(NP_FLOAT_DTYPE)
 
-    cell_nodes = np.asarray(mesh.nodes, dtype=np.float32)[np.asarray(mesh.cells, dtype=np.int32)]
+    cell_nodes = np.asarray(mesh.nodes, dtype=NP_FLOAT_DTYPE)[np.asarray(mesh.cells, dtype=np.int32)]
     jacobians = np.einsum("cid,qia->cqda", cell_nodes, reference_gradients)
     determinant = np.linalg.det(jacobians)
     inverse_jacobian = np.linalg.inv(jacobians)
@@ -797,8 +797,8 @@ def _build_q1_operator_templates(mesh: StructuredQuadMesh) -> OperatorTemplates:
 
     stiffness = np.einsum("cqid,cqjd,cq->cij", gradients, gradients, weighted_det)
     mass = np.einsum("qi,qj,cq->cij", shape_values, shape_values, weighted_det)
-    boundary_reference = np.asarray([[2.0, 1.0], [1.0, 2.0]], dtype=np.float32) / 6.0
-    boundary_lengths = np.asarray(mesh.boundary_edge_lengths, dtype=np.float32)
+    boundary_reference = np.asarray([[2.0, 1.0], [1.0, 2.0]], dtype=NP_FLOAT_DTYPE) / 6.0
+    boundary_lengths = np.asarray(mesh.boundary_edge_lengths, dtype=NP_FLOAT_DTYPE)
     boundary_mass = boundary_lengths[:, None, None] * boundary_reference[None, :, :]
     return OperatorTemplates(
         stiffness=jnp.asarray(stiffness, dtype=FLOAT_DTYPE),
@@ -959,16 +959,16 @@ def _build_structured_quad_q2_topology(mesh: StructuredQuadMesh) -> tuple[Array,
     )
 
 
-def _build_exact_node_selection_matrix(
+def _exact_node_selection_indices(
     dof_nodes: Array,
     points: Array,
     tol: float = 1e-6,
-) -> Array:
-    """Build a one-hot interpolation matrix for points that coincide with mesh nodes."""
+) -> np.ndarray:
+    """Return source node indices for points that coincide with mesh nodes."""
 
     dof_nodes_np = np.asarray(dof_nodes, dtype=float)
     points_np = np.asarray(points, dtype=float)
-    matrix = np.zeros((points_np.shape[0], dof_nodes_np.shape[0]), dtype=np.float32)
+    indices = np.empty((points_np.shape[0],), dtype=np.int32)
     scale = 1.0 / tol
     node_lookup: dict[tuple[int, int], int] = {}
     for node_id, node in enumerate(dof_nodes_np):
@@ -983,7 +983,20 @@ def _build_exact_node_selection_matrix(
             nearest = int(np.argmin(distances))
             if distances[nearest] > tol:
                 raise ValueError("point does not coincide with a quadrilateral auxiliary node")
-        matrix[row_id, nearest] = 1.0
+        indices[row_id] = int(nearest)
+    return indices
+
+
+def _build_exact_node_selection_matrix(
+    dof_nodes: Array,
+    points: Array,
+    tol: float = 1e-6,
+) -> Array:
+    """Build a one-hot interpolation matrix for points that coincide with mesh nodes."""
+
+    indices = _exact_node_selection_indices(dof_nodes, points, tol=tol)
+    matrix = np.zeros((indices.shape[0], np.asarray(dof_nodes).shape[0]), dtype=NP_FLOAT_DTYPE)
+    matrix[np.arange(indices.shape[0]), indices] = 1.0
     return jnp.asarray(matrix, dtype=FLOAT_DTYPE)
 
 
@@ -999,7 +1012,7 @@ def _build_surface_interpolation_matrix(
     surface_nodes_np = np.asarray(surface_nodes, dtype=float)
     surface_node_ids_np = np.asarray(surface_node_ids, dtype=np.int32)
     points_np = np.asarray(points, dtype=float)
-    matrix = np.zeros((points_np.shape[0], node_count), dtype=np.float32)
+    matrix = np.zeros((points_np.shape[0], node_count), dtype=NP_FLOAT_DTYPE)
 
     segments = np.stack((surface_nodes_np[:-1], surface_nodes_np[1:]), axis=1)
     hits = _points_on_segments(points_np, segments, tol=tol)
@@ -1044,7 +1057,7 @@ def _build_surface_q2_interpolation_matrix(
     surface_node_ids_np = np.asarray(surface_node_ids, dtype=np.int32)
     boundary_np = np.asarray(boundary_connectivity, dtype=np.int32)
     points_np = np.asarray(points, dtype=float)
-    matrix = np.zeros((points_np.shape[0], node_count), dtype=np.float32)
+    matrix = np.zeros((points_np.shape[0], node_count), dtype=NP_FLOAT_DTYPE)
 
     edge_midpoints = {
         tuple(sorted((int(start), int(stop)))): int(midpoint)
@@ -1268,8 +1281,8 @@ def _build_auxiliary_discretization(
 def _build_source_resistivity_data(mesh: Mesh, source_node_ids: Array) -> SourceResistivityData:
     source_node_ids_np = np.asarray(source_node_ids, dtype=np.int32)
     cells_np = np.asarray(mesh.cells, dtype=np.int32)
-    weights = np.zeros((source_node_ids_np.shape[0], mesh.cell_count), dtype=np.float32)
-    counts = np.ones((source_node_ids_np.shape[0],), dtype=np.float32)
+    weights = np.zeros((source_node_ids_np.shape[0], mesh.cell_count), dtype=NP_FLOAT_DTYPE)
+    counts = np.ones((source_node_ids_np.shape[0],), dtype=NP_FLOAT_DTYPE)
 
     for source_idx, node_id in enumerate(source_node_ids_np):
         if node_id < 0:
@@ -1655,7 +1668,9 @@ class ERTForward2p5D:
         cache_name: str,
         discretization: AuxiliaryDiscretization,
         *extra_arrays: Array,
-    ) -> str:
+    ) -> str | None:
+        if self.terrain_cache_dir is None:
+            return None
         digest = hashlib.sha256()
         _update_digest_value(digest, "version", _TERRAIN_AUXILIARY_CACHE_VERSION)
         _update_digest_value(digest, "cache_name", cache_name)
@@ -1699,12 +1714,12 @@ class ERTForward2p5D:
             _update_digest_array(digest, f"extra.{index}", values)
         return digest.hexdigest()
 
-    def _terrain_cache_path(self, cache_key: str) -> Path | None:
-        if self.terrain_cache_dir is None:
+    def _terrain_cache_path(self, cache_key: str | None) -> Path | None:
+        if self.terrain_cache_dir is None or cache_key is None:
             return None
         return self.terrain_cache_dir / f"{cache_key}.npz"
 
-    def _load_terrain_cached_array(self, cache_key: str, *, shape: tuple[int, ...], dtype) -> Array | None:
+    def _load_terrain_cached_array(self, cache_key: str | None, *, shape: tuple[int, ...], dtype) -> Array | None:
         cache_path = self._terrain_cache_path(cache_key)
         if cache_path is None or not cache_path.exists():
             return None
@@ -1720,7 +1735,7 @@ class ERTForward2p5D:
             cached = cached.astype(expected_dtype, copy=False)
         return jnp.asarray(cached, dtype=dtype)
 
-    def _store_terrain_cached_array(self, cache_key: str, values: Array) -> None:
+    def _store_terrain_cached_array(self, cache_key: str | None, values: Array) -> None:
         cache_path = self._terrain_cache_path(cache_key)
         if cache_path is None:
             return
@@ -1894,6 +1909,64 @@ class ERTForward2p5D:
             solver.factorize()
         solution = solver.solve()
         return self._jax_batch_rhs_from_cupy(solution, dtype=solve_dtype)
+
+    def _solve_scipy_batch_with_pattern(
+        self,
+        operator_pattern: SparseOperatorPattern,
+        operator_values: Array,
+        rhs: Array,
+        *,
+        state_prefix: str,
+        refactorize: bool = True,
+    ) -> Array:
+        """Solve batched sparse systems with SciPy for CPU-only environments."""
+
+        del state_prefix, refactorize
+        values_np = np.asarray(jax.device_get(operator_values), dtype=NP_FLOAT_DTYPE)
+        rhs_np = np.asarray(jax.device_get(rhs), dtype=NP_FLOAT_DTYPE)
+        if values_np.ndim == 1:
+            values_np = values_np[None, :]
+        if rhs_np.ndim == 2:
+            rhs_np = rhs_np[None, :, :]
+        indices = np.asarray(operator_pattern.csr_indices, dtype=np.int32)
+        indptr = np.asarray(operator_pattern.csr_indptr, dtype=np.int32)
+        solutions: list[np.ndarray] = []
+        for batch_index in range(values_np.shape[0]):
+            matrix = sp.csr_matrix(
+                (values_np[batch_index], indices, indptr),
+                shape=operator_pattern.shape,
+            ).tocsc()
+            factor = spla.splu(matrix)
+            solution = factor.solve(np.asfortranarray(rhs_np[batch_index].T))
+            if solution.ndim == 1:
+                solution = solution[:, None]
+            solutions.append(np.asarray(solution.T, dtype=NP_FLOAT_DTYPE))
+        return jnp.asarray(np.stack(solutions, axis=0), dtype=FLOAT_DTYPE)
+
+    def _solve_batch_with_pattern(
+        self,
+        operator_pattern: SparseOperatorPattern,
+        operator_values: Array,
+        rhs: Array,
+        *,
+        state_prefix: str,
+        refactorize: bool = True,
+    ) -> Array:
+        if self.linear_solver_backend == "scipy":
+            return self._solve_scipy_batch_with_pattern(
+                operator_pattern,
+                operator_values,
+                rhs,
+                state_prefix=state_prefix,
+                refactorize=refactorize,
+            )
+        return self._solve_cudss_batch_with_pattern(
+            operator_pattern,
+            operator_values,
+            rhs,
+            state_prefix=state_prefix,
+            refactorize=refactorize,
+        )
 
     def _assemble_operator_values(self, conductivity: Array, wavenumber_index: int) -> Array:
         kernel = self._assemble_operator_values_kernel()
@@ -2342,9 +2415,23 @@ class ERTForward2p5D:
         return self._jax_batch_rhs_from_cupy(solution)
 
     def _solve_linear_system(self, operator_values: Array, rhs: Array) -> Array:
+        if self.linear_solver_backend == "scipy":
+            return self._solve_scipy_batch_with_pattern(
+                self.operator_pattern,
+                operator_values,
+                rhs,
+                state_prefix="main",
+            )[0]
         return self._solve_cudss(operator_values, rhs)
 
     def _solve_linear_system_batch(self, operator_values: Array, rhs: Array) -> Array:
+        if self.linear_solver_backend == "scipy":
+            return self._solve_scipy_batch_with_pattern(
+                self.operator_pattern,
+                operator_values,
+                rhs,
+                state_prefix="main",
+            )
         return self._solve_cudss_batch(operator_values, rhs)
 
     def _check_finite(self, values: Array, *, context: str, wavenumber: float | None = None) -> None:
@@ -2419,7 +2506,7 @@ class ERTForward2p5D:
             cache_key="apply_primary_auxiliary_operator_values_batch",
         )
         rhs = self._auxiliary_reference_rhs_stack(discretization, unit_primary) - op_primary
-        secondary_fields = self._solve_cudss_batch_with_pattern(
+        secondary_fields = self._solve_batch_with_pattern(
             discretization.operator_pattern,
             operator_values,
             rhs,
@@ -2630,237 +2717,6 @@ class ERTForward2p5D:
         self._kernel_cache[cache_key] = kernel
         return kernel
 
-    def _direct_sensitivity_parent_expansion(self, parent_cell_ids: Array, parameter_count: int) -> int | None:
-        parents = np.asarray(parent_cell_ids, dtype=np.int64)
-        if parents.ndim != 1 or parameter_count < 1 or parents.size % parameter_count != 0:
-            return None
-
-        expansion = int(parents.size // parameter_count)
-        if expansion < 1:
-            return None
-
-        expected = np.repeat(np.arange(parameter_count, dtype=np.int64), expansion)
-        if not np.array_equal(parents, expected):
-            return None
-        return expansion
-
-    def _should_use_pallas_direct_sensitivity(
-        self,
-        *,
-        parent_cell_ids: Array,
-        parameter_count: int,
-    ) -> int | None:
-        mode = os.environ.get(_PALLAS_DIRECT_SENSITIVITY_ENV, "0").strip().lower()
-        if mode in {"", "0", "false", "off", "no"}:
-            return None
-        if jax.default_backend() != "gpu":
-            if mode in {"1", "true", "on", "yes", "force"}:
-                raise RuntimeError("Pallas direct sensitivity requires the JAX GPU backend")
-            return None
-        return self._direct_sensitivity_parent_expansion(parent_cell_ids, parameter_count)
-
-    def _normal_sensitivity_direct_pallas_kernel(
-        self,
-        *,
-        cache_key: str,
-        batch_size: int,
-        cell_connectivity: Array,
-        parameter_count: int,
-        volume_templates: Array,
-        parent_expansion: int,
-    ):
-        kernel_cache_key = f"{cache_key}_pallas_b{batch_size}_p{parameter_count}_e{parent_expansion}"
-        kernel = self._kernel_cache.get(kernel_cache_key)
-        if kernel is not None:
-            return kernel
-
-        from jax.experimental import pallas as pl
-        from jax.experimental.pallas import triton as plgpu
-
-        block_measurements = 4
-        block_parameters = 8
-        weighted_templates = (self.weights.astype(volume_templates.dtype)[:, None, None, None] * volume_templates).astype(
-            volume_templates.dtype
-        )
-        cell_connectivity = jnp.asarray(cell_connectivity, dtype=INT_DTYPE)
-        out_shape = jax.ShapeDtypeStruct((batch_size, parameter_count), weighted_templates.dtype)
-
-        def pallas_body(
-            phi_stack_ref,
-            weighted_templates_ref,
-            cell_connectivity_ref,
-            current_positive_ref,
-            current_negative_ref,
-            receiver_positive_ref,
-            receiver_negative_ref,
-            out_ref,
-            *,
-            block_measurements: int,
-            block_parameters: int,
-            parent_expansion: int,
-        ) -> None:
-            measurement_block = pl.program_id(0)
-            parameter_block = pl.program_id(1)
-            measurement_ids = measurement_block * block_measurements + jnp.arange(block_measurements)
-            parameter_ids = parameter_block * block_parameters + jnp.arange(block_parameters)
-            measurement_mask = measurement_ids < current_positive_ref.shape[0]
-            parameter_mask = parameter_ids < parameter_count
-            mask = measurement_mask[:, None] & parameter_mask[None, :]
-
-            current_positive = plgpu.load(current_positive_ref.at[measurement_ids], mask=measurement_mask, other=0)
-            current_negative = plgpu.load(current_negative_ref.at[measurement_ids], mask=measurement_mask, other=0)
-            receiver_positive = plgpu.load(receiver_positive_ref.at[measurement_ids], mask=measurement_mask, other=0)
-            receiver_negative = plgpu.load(receiver_negative_ref.at[measurement_ids], mask=measurement_mask, other=0)
-            current_positive_safe = jnp.maximum(current_positive, 0)
-            current_negative_safe = jnp.maximum(current_negative, 0)
-            receiver_positive_safe = jnp.maximum(receiver_positive, 0)
-            receiver_negative_safe = jnp.maximum(receiver_negative, 0)
-
-            def current_node_values(wavenumber_id, current_nodes):
-                current_positive_values = plgpu.load(
-                    phi_stack_ref.at[
-                        wavenumber_id,
-                        current_positive_safe[:, None],
-                        current_nodes[None, :],
-                    ],
-                    mask=(measurement_mask & (current_positive >= 0))[:, None] & parameter_mask[None, :],
-                    other=0.0,
-                )
-                current_negative_values = plgpu.load(
-                    phi_stack_ref.at[
-                        wavenumber_id,
-                        current_negative_safe[:, None],
-                        current_nodes[None, :],
-                    ],
-                    mask=(measurement_mask & (current_negative >= 0))[:, None] & parameter_mask[None, :],
-                    other=0.0,
-                )
-                return current_positive_values - current_negative_values
-
-            def receiver_node_values(wavenumber_id, receiver_nodes):
-                receiver_positive_values = plgpu.load(
-                    phi_stack_ref.at[
-                        wavenumber_id,
-                        receiver_positive_safe[:, None],
-                        receiver_nodes[None, :],
-                    ],
-                    mask=(measurement_mask & (receiver_positive >= 0))[:, None] & parameter_mask[None, :],
-                    other=0.0,
-                )
-                receiver_negative_values = plgpu.load(
-                    phi_stack_ref.at[
-                        wavenumber_id,
-                        receiver_negative_safe[:, None],
-                        receiver_nodes[None, :],
-                    ],
-                    mask=(measurement_mask & (receiver_negative >= 0))[:, None] & parameter_mask[None, :],
-                    other=0.0,
-                )
-                return receiver_positive_values - receiver_negative_values
-
-            def current_local_body(current_local_id, carry):
-                accumulator, wavenumber_id, cell_ids, receiver_local_id, receiver_values = carry
-                current_nodes = plgpu.load(
-                    cell_connectivity_ref.at[cell_ids, current_local_id],
-                    mask=parameter_mask,
-                    other=0,
-                )
-                template_values = plgpu.load(
-                    weighted_templates_ref.at[
-                        wavenumber_id,
-                        cell_ids,
-                        receiver_local_id,
-                        current_local_id,
-                    ],
-                    mask=parameter_mask,
-                    other=0.0,
-                )
-                accumulator += (
-                    receiver_values
-                    * template_values[None, :]
-                    * current_node_values(wavenumber_id, current_nodes)
-                )
-                return accumulator, wavenumber_id, cell_ids, receiver_local_id, receiver_values
-
-            def receiver_local_body(receiver_local_id, carry):
-                accumulator, wavenumber_id, cell_ids = carry
-                receiver_nodes = plgpu.load(
-                    cell_connectivity_ref.at[cell_ids, receiver_local_id],
-                    mask=parameter_mask,
-                    other=0,
-                )
-                receiver_values = receiver_node_values(wavenumber_id, receiver_nodes)
-                accumulator, _, _, _, _ = jax.lax.fori_loop(
-                    0,
-                    cell_connectivity_ref.shape[1],
-                    current_local_body,
-                    (accumulator, wavenumber_id, cell_ids, receiver_local_id, receiver_values),
-                )
-                return accumulator, wavenumber_id, cell_ids
-
-            def child_body(child_id, carry):
-                accumulator, wavenumber_id = carry
-                cell_ids = parameter_ids * parent_expansion + child_id
-                accumulator, _, _ = jax.lax.fori_loop(
-                    0,
-                    cell_connectivity_ref.shape[1],
-                    receiver_local_body,
-                    (accumulator, wavenumber_id, cell_ids),
-                )
-                return accumulator, wavenumber_id
-
-            def wavenumber_body(wavenumber_id, accumulator):
-                accumulator, _ = jax.lax.fori_loop(
-                    0,
-                    parent_expansion,
-                    child_body,
-                    (accumulator, wavenumber_id),
-                )
-                return accumulator
-
-            accumulator = jax.lax.fori_loop(
-                0,
-                weighted_templates_ref.shape[0],
-                wavenumber_body,
-                jnp.zeros((block_measurements, block_parameters), dtype=out_ref.dtype),
-            )
-
-            plgpu.store(out_ref.at[measurement_ids[:, None], parameter_ids[None, :]], -accumulator, mask=mask)
-
-        call = pl.pallas_call(
-            functools.partial(
-                pallas_body,
-                block_measurements=block_measurements,
-                block_parameters=block_parameters,
-                parent_expansion=parent_expansion,
-            ),
-            out_shape=out_shape,
-            grid=(pl.cdiv(batch_size, block_measurements), pl.cdiv(parameter_count, block_parameters)),
-            compiler_params=plgpu.CompilerParams(num_warps=4, num_stages=3),
-            name="deepert_normal_direct_sensitivity",
-        )
-
-        @jax.jit
-        def kernel(
-            phi_stack: Array,
-            current_positive: Array,
-            current_negative: Array,
-            receiver_positive: Array,
-            receiver_negative: Array,
-        ) -> Array:
-            return call(
-                phi_stack,
-                weighted_templates,
-                cell_connectivity,
-                current_positive,
-                current_negative,
-                receiver_positive,
-                receiver_negative,
-            )
-
-        self._kernel_cache[kernel_cache_key] = kernel
-        return kernel
-
     def _normal_sensitivity_from_fields_direct(
         self,
         phi_stack: Array,
@@ -2875,27 +2731,13 @@ class ERTForward2p5D:
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1")
 
-        parent_expansion = self._should_use_pallas_direct_sensitivity(
+        kernel = self._normal_sensitivity_direct_kernel(
+            cache_key=cache_key,
+            cell_connectivity=cell_connectivity,
             parent_cell_ids=parent_cell_ids,
             parameter_count=parameter_count,
+            volume_templates=volume_templates,
         )
-        if parent_expansion is None:
-            kernel = self._normal_sensitivity_direct_kernel(
-                cache_key=cache_key,
-                cell_connectivity=cell_connectivity,
-                parent_cell_ids=parent_cell_ids,
-                parameter_count=parameter_count,
-                volume_templates=volume_templates,
-            )
-        else:
-            kernel = self._normal_sensitivity_direct_pallas_kernel(
-                cache_key=cache_key,
-                batch_size=batch_size,
-                cell_connectivity=cell_connectivity,
-                parameter_count=parameter_count,
-                volume_templates=volume_templates,
-                parent_expansion=parent_expansion,
-            )
         measurements = np.asarray(self.survey.measurements, dtype=np.int32)
         rows = []
         for start in range(0, int(self.survey.measurement_count), batch_size):
@@ -2916,6 +2758,58 @@ class ERTForward2p5D:
             rows.append(gradient_rows[:chunk_size])
 
         return jnp.concatenate(rows, axis=0)
+
+    def _direct_sensitivity_inputs(
+        self,
+        *,
+        cell_connectivity: Array,
+        parent_cell_ids: Array,
+        parameter_count: int,
+        volume_templates: Array,
+        cache_key: str,
+        sensitivity_cell_parameter_ids: Array | None,
+        sensitivity_parameter_count: int | None,
+    ) -> tuple[Array, Array, int, Array, str]:
+        if sensitivity_cell_parameter_ids is None:
+            return cell_connectivity, parent_cell_ids, parameter_count, volume_templates, cache_key
+
+        cell_parameter_ids = np.asarray(sensitivity_cell_parameter_ids, dtype=np.int32).ravel()
+        cell_count = int(cell_connectivity.shape[0])
+        if cell_parameter_ids.shape != (cell_count,):
+            raise ValueError(
+                "sensitivity_cell_parameter_ids must have one entry per sensitivity cell "
+                f"({cell_parameter_ids.shape} != ({cell_count},))"
+            )
+
+        active_cell_ids = np.flatnonzero(cell_parameter_ids >= 0).astype(np.int32)
+        if active_cell_ids.size == 0:
+            raise ValueError("sensitivity_cell_parameter_ids must contain at least one active cell")
+
+        active_parameter_ids = cell_parameter_ids[active_cell_ids]
+        resolved_parameter_count = (
+            int(sensitivity_parameter_count)
+            if sensitivity_parameter_count is not None
+            else int(np.max(active_parameter_ids)) + 1
+        )
+        if resolved_parameter_count < 1:
+            raise ValueError("sensitivity_parameter_count must be positive")
+        if np.any(active_parameter_ids >= resolved_parameter_count):
+            raise ValueError("sensitivity_cell_parameter_ids contain ids outside sensitivity_parameter_count")
+
+        active_cell_ids_jax = jnp.asarray(active_cell_ids, dtype=INT_DTYPE)
+        digest = hashlib.sha256()
+        _update_digest_value(digest, "parameter_count", resolved_parameter_count)
+        _update_digest_array(digest, "cell_parameter_ids", cell_parameter_ids)
+        parameterized_cache_key = (
+            f"{cache_key}_param_{resolved_parameter_count}_{active_cell_ids.size}_{digest.hexdigest()[:16]}"
+        )
+        return (
+            jnp.take(cell_connectivity, active_cell_ids_jax, axis=0),
+            jnp.asarray(active_parameter_ids, dtype=INT_DTYPE),
+            resolved_parameter_count,
+            jnp.take(volume_templates, active_cell_ids_jax, axis=1),
+            parameterized_cache_key,
+        )
 
     def _discretization_sub_potential_stack(
         self,
@@ -2951,7 +2845,7 @@ class ERTForward2p5D:
             discretization.source_matrix[None, :, :],
             (self.wavenumbers.shape[0], discretization.source_matrix.shape[0], discretization.source_matrix.shape[1]),
         ).astype(operator_values.dtype)
-        cached = self._solve_cudss_batch_with_pattern(
+        cached = self._solve_batch_with_pattern(
             discretization.operator_pattern,
             operator_values,
             rhs,
@@ -2994,11 +2888,11 @@ class ERTForward2p5D:
             cache_key="primary_potential_sub_potentials",
             state_prefix="primary_potential",
         )
-        interpolation = _build_exact_node_selection_matrix(
+        selection_indices = _exact_node_selection_indices(
             self.primary_potential_discretization.dof_nodes,
             self.primary_auxiliary_discretization.dof_nodes,
-        ).astype(primary_potentials.dtype)
-        cached = primary_potentials @ interpolation.T
+        )
+        cached = jnp.take(primary_potentials, jnp.asarray(selection_indices, dtype=INT_DTYPE), axis=-1)
         self._derived_cache["auxiliary_sub_potentials"] = cached
         self._store_terrain_cached_array(disk_cache_key, cached)
         return cached
@@ -3310,7 +3204,10 @@ class ERTForward2p5D:
     ) -> int:
         if batch_size is None:
             if normal_sensitivity and not include_robin_boundary_derivative:
-                return int(self.survey.measurement_count)
+                measurement_count = int(self.survey.measurement_count)
+                if int(self.mesh.cell_count) >= 4096:
+                    return min(measurement_count, 64)
+                return measurement_count
             return 8
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1")
@@ -3324,6 +3221,8 @@ class ERTForward2p5D:
         batch_size: int | None = None,
         include_robin_boundary_derivative: bool = False,
         normal_sensitivity: bool = True,
+        jacobian_cell_parameter_ids: Array | None = None,
+        jacobian_parameter_count: int | None = None,
     ) -> tuple[ForwardResponse, Array]:
         """Solve forward response and materialize the resistance Jacobian.
 
@@ -3333,6 +3232,9 @@ class ERTForward2p5D:
         sensitivity and omits the mixed Robin boundary derivative. Pass
         ``include_robin_boundary_derivative=True, normal_sensitivity=False``
         for the exact derivative of the deepert reciprocal-averaged response.
+        ``jacobian_cell_parameter_ids`` optionally accumulates the direct
+        normal sensitivity into marker/parameter columns without materializing
+        a full cell-by-cell Jacobian.
         """
 
         batch_size = self._resolve_jacobian_batch_size(
@@ -3368,14 +3270,40 @@ class ERTForward2p5D:
                 volume_templates = discretization.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[
                     :, None, None, None
                 ] * discretization.operator_templates.mass[None, :, :, :]
-                resistance_jacobian = self._normal_sensitivity_from_fields_direct(
-                    sub_potentials,
-                    batch_size=batch_size,
+                sensitivity_cell_parameter_ids = None
+                if jacobian_cell_parameter_ids is not None:
+                    mesh_parameter_ids = np.asarray(jacobian_cell_parameter_ids, dtype=np.int32).ravel()
+                    if mesh_parameter_ids.shape != (int(self.mesh.cell_count),):
+                        raise ValueError(
+                            "jacobian_cell_parameter_ids must have one entry per forward mesh cell "
+                            f"({mesh_parameter_ids.shape} != ({int(self.mesh.cell_count)},))"
+                        )
+                    sensitivity_cell_parameter_ids = mesh_parameter_ids[
+                        np.asarray(discretization.parent_cell_ids, dtype=np.int32)
+                    ]
+                (
+                    sensitivity_cell_connectivity,
+                    sensitivity_parent_ids,
+                    sensitivity_parameter_count,
+                    sensitivity_volume_templates,
+                    sensitivity_cache_key,
+                ) = self._direct_sensitivity_inputs(
                     cell_connectivity=discretization.cell_connectivity,
                     parent_cell_ids=discretization.parent_cell_ids,
                     parameter_count=int(self.mesh.cell_count),
                     volume_templates=volume_templates,
                     cache_key="primary_normal_sensitivity_direct",
+                    sensitivity_cell_parameter_ids=sensitivity_cell_parameter_ids,
+                    sensitivity_parameter_count=jacobian_parameter_count,
+                )
+                resistance_jacobian = self._normal_sensitivity_from_fields_direct(
+                    sub_potentials,
+                    batch_size=batch_size,
+                    cell_connectivity=sensitivity_cell_connectivity,
+                    parent_cell_ids=sensitivity_parent_ids,
+                    parameter_count=sensitivity_parameter_count,
+                    volume_templates=sensitivity_volume_templates,
+                    cache_key=sensitivity_cache_key,
                 )
             else:
                 resistance_jacobian = self._jacobian_from_fields_adjoint_batch(
@@ -3405,14 +3333,29 @@ class ERTForward2p5D:
                 volume_templates = self.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[:, None, None, None] * (
                     self.operator_templates.mass[None, :, :, :]
                 )
-                resistance_jacobian = self._normal_sensitivity_from_fields_direct(
-                    sub_potentials,
-                    batch_size=batch_size,
+                (
+                    sensitivity_cell_connectivity,
+                    sensitivity_parent_ids,
+                    sensitivity_parameter_count,
+                    sensitivity_volume_templates,
+                    sensitivity_cache_key,
+                ) = self._direct_sensitivity_inputs(
                     cell_connectivity=self.mesh.cells,
                     parent_cell_ids=jnp.arange(self.mesh.cell_count, dtype=INT_DTYPE),
                     parameter_count=int(self.mesh.cell_count),
                     volume_templates=volume_templates,
                     cache_key="normal_sensitivity_direct",
+                    sensitivity_cell_parameter_ids=jacobian_cell_parameter_ids,
+                    sensitivity_parameter_count=jacobian_parameter_count,
+                )
+                resistance_jacobian = self._normal_sensitivity_from_fields_direct(
+                    sub_potentials,
+                    batch_size=batch_size,
+                    cell_connectivity=sensitivity_cell_connectivity,
+                    parent_cell_ids=sensitivity_parent_ids,
+                    parameter_count=sensitivity_parameter_count,
+                    volume_templates=sensitivity_volume_templates,
+                    cache_key=sensitivity_cache_key,
                 )
             else:
                 resistance_jacobian = self._jacobian_from_fields_adjoint_batch(
@@ -3519,7 +3462,7 @@ class ERTForward2p5D:
             jax.block_until_ready((operator_values, unit_primary, source_resistivities, op_primary, rhs))
             jax.block_until_ready(geometric_factors)
             if include_solver_state:
-                prepared = self._solve_cudss_batch_with_pattern(
+                prepared = self._solve_batch_with_pattern(
                     discretization.operator_pattern,
                     operator_values,
                     rhs,
@@ -3577,7 +3520,7 @@ class ERTForward2p5D:
         if self.use_numerical_primary:
             discretization, operator_values, phi_stack = self._solve_secondary_fields_auxiliary(conductivity)
             tangent_rhs = -self._operator_tangent_apply(delta_conductivity, phi_stack)
-            delta_phi = self._solve_cudss_batch_with_pattern(
+            delta_phi = self._solve_batch_with_pattern(
                 discretization.operator_pattern,
                 operator_values,
                 tangent_rhs,
@@ -3666,7 +3609,7 @@ class ERTForward2p5D:
                 current_receiver,
                 node_count=int(discretization.dof_nodes.shape[0]),
             )
-            lambda_stack = self._solve_cudss_batch_with_pattern(
+            lambda_stack = self._solve_batch_with_pattern(
                 discretization.operator_pattern,
                 operator_values,
                 adjoint_rhs,
@@ -3752,7 +3695,7 @@ class ERTForward2p5D:
                     current_receiver,
                     node_count=node_count,
                 )
-            lambda_flat = self._solve_cudss_batch_with_pattern(
+            lambda_flat = self._solve_batch_with_pattern(
                 operator_pattern,
                 operator_values,
                 adjoint_rhs,

@@ -14,8 +14,7 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from deepert.forward import ERTForward2p5D
-from deepert.inversion import ERTInversion, InversionConfig
+from deepert.inversion import ERTInversion, InversionConfig, ParameterizedERTForward2p5D
 from deepert.workflows import (
     build_source_position_triangle_inversion_case,
     load_terrain_forward_dat,
@@ -94,12 +93,16 @@ def _data_std_summary(data_std: float | np.ndarray, shape: tuple[int, ...]) -> d
     }
 
 
-def _save_mesh_npz(path: Path, mesh) -> None:
+def _save_mesh_npz(path: Path, case) -> None:
     np.savez(
         path,
-        nodes=np.asarray(mesh.nodes, dtype=float),
-        cells=np.asarray(mesh.cells, dtype=np.int32),
-        surface_node_ids=np.asarray(mesh.surface_node_ids, dtype=np.int32),
+        nodes=np.asarray(case.mesh.nodes, dtype=float),
+        cells=np.asarray(case.mesh.cells, dtype=np.int32),
+        surface_node_ids=np.asarray(case.mesh.surface_node_ids, dtype=np.int32),
+        forward_nodes=np.asarray(case.forward_mesh.nodes, dtype=float),
+        forward_cells=np.asarray(case.forward_mesh.cells, dtype=np.int32),
+        cell_markers=np.asarray(case.cell_markers, dtype=np.int32),
+        parameter_cell_ids=np.asarray(case.parameter_cell_ids, dtype=np.int32),
     )
 
 
@@ -231,16 +234,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-chi2", type=float, default=1.5)
     parser.add_argument("--max-log-step", type=float, default=None)
     parser.add_argument("--coverage-percentile", type=float, default=20.0)
-    parser.add_argument(
-        "--coverage-reference",
-        default=None,
-        help="Optional .npy coverage array whose percentile mask should be reused for notebook-identical plot boundaries.",
-    )
-    parser.add_argument(
-        "--no-coverage-cache",
-        action="store_true",
-        help="Use native Deepert coverage instead of reusing output_dir/coverage.npy when it exists.",
-    )
     parser.add_argument("--linear-solver-backend", default="auto")
     parser.add_argument("--terrain-cache-dir", default=None)
     parser.add_argument("--no-plot", action="store_true")
@@ -253,7 +246,6 @@ def main(argv: list[str] | None = None) -> int:
     forward_npz = _resolve(root, args.forward_npz)
     forward_dat = _resolve(root, args.forward_dat) if args.forward_dat else None
     true_model_file = _resolve(root, args.true_model)
-    coverage_reference = _resolve(root, args.coverage_reference) if args.coverage_reference else None
     mesh_reference = _resolve(root, args.inversion_mesh_reference) if args.inversion_mesh_reference else None
     output_dir = _resolve(root, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -290,9 +282,11 @@ def main(argv: list[str] | None = None) -> int:
             f"{case.survey.measurement_count}"
         )
 
-    forward = ERTForward2p5D.from_mesh_survey(
-        case.mesh,
+    forward = ParameterizedERTForward2p5D.from_mesh_survey(
+        case.forward_mesh,
         case.survey,
+        case.parameter_cell_ids,
+        regularization_mesh=case.mesh,
         linear_solver_backend=args.linear_solver_backend,
         terrain_cache_dir=None if args.terrain_cache_dir is None else _resolve(root, args.terrain_cache_dir),
     )
@@ -314,25 +308,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         forward.close()
 
-    native_coverage = np.asarray(result.coverage, dtype=float).ravel()
-    coverage_cache = output_dir / "coverage.npy"
-    if coverage_reference is not None:
-        plot_coverage = np.asarray(np.load(coverage_reference), dtype=float).ravel()
-        if plot_coverage.shape != native_coverage.shape:
-            raise ValueError(
-                f"coverage reference shape {plot_coverage.shape} does not match inversion cells {native_coverage.shape}"
-            )
-        coverage_source = f"reference_file:{coverage_reference}"
-    elif not args.no_coverage_cache and coverage_cache.exists():
-        plot_coverage = np.asarray(np.load(coverage_cache), dtype=float).ravel()
-        if plot_coverage.shape != native_coverage.shape:
-            plot_coverage = native_coverage
-            coverage_source = "deepert_jacobian_norm"
-        else:
-            coverage_source = f"cache_file:{coverage_cache}"
-    else:
-        plot_coverage = native_coverage
-        coverage_source = "deepert_jacobian_norm"
+    plot_coverage = np.asarray(result.coverage, dtype=float).ravel()
+    coverage_source = "deepert_pygimli_style_sumabs_area"
 
     coverage_threshold = float(np.percentile(plot_coverage, args.coverage_percentile))
     coverage_mask = np.asarray(plot_coverage < coverage_threshold, dtype=np.uint8)
@@ -343,12 +320,11 @@ def main(argv: list[str] | None = None) -> int:
     np.save(output_dir / "final_log_model.npy", result.final_log_model)
     np.save(output_dir / "predicted_rhoa.npy", result.predicted_data)
     np.save(output_dir / "coverage.npy", plot_coverage)
-    np.save(output_dir / "coverage_native_deepert.npy", native_coverage)
     np.save(output_dir / "coverage_mask.npy", coverage_mask)
     np.save(output_dir / "final_model_masked_nan.npy", masked_model)
     np.save(output_dir / "chi2_history.npy", np.asarray(result.iteration_chi2, dtype=float))
     mesh_file = output_dir / f"inversion_mesh_t{step:05d}.npz"
-    _save_mesh_npz(mesh_file, case.mesh)
+    _save_mesh_npz(mesh_file, case)
 
     summary = {
         "forward_npz": str(forward_npz),
@@ -359,6 +335,8 @@ def main(argv: list[str] | None = None) -> int:
         "y_index": int(y_index),
         "mesh_cells": int(case.mesh.cell_count),
         "mesh_nodes": int(case.mesh.node_count),
+        "forward_mesh_cells": int(case.forward_mesh.cell_count),
+        "forward_mesh_nodes": int(case.forward_mesh.node_count),
         "inversion_mesh": "cached_para_domain" if mesh_reference is not None else "native_source_position_triangle",
         "inversion_mesh_file": str(mesh_file),
         "inversion_mesh_reference": None if mesh_reference is None else str(mesh_reference),
@@ -378,7 +356,6 @@ def main(argv: list[str] | None = None) -> int:
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "coverage_percentile": float(args.coverage_percentile),
         "coverage_source": coverage_source,
-        "coverage_reference": None if coverage_reference is None else str(coverage_reference),
         "coverage_threshold": coverage_threshold,
     }
     _write_json(output_dir / "inversion_summary.json", summary)

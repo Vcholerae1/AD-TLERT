@@ -12,6 +12,7 @@ import numpy as np
 from deepert.forward.ert2p5d import ERTForward2p5D
 from deepert.mesh import Mesh
 from deepert.survey import Survey
+from deepert.utils.dtypes import FLOAT_DTYPE
 
 
 def _point_xy(point: Any) -> list[float]:
@@ -213,7 +214,7 @@ class ERTForwardModeling:
             log_transform=log_transform,
             expected_size=self.cell_count,
         )
-        conductivity = jnp.asarray(1.0 / resistivity, dtype=jnp.float32)
+        conductivity = jnp.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
         self.forward_operator.prepare(conductivity, include_solver_state=include_solver_state)
 
     def forward(self, resistivity_model: Any, log_transform: bool = True) -> np.ndarray:
@@ -224,7 +225,7 @@ class ERTForwardModeling:
             log_transform=log_transform,
             expected_size=self.cell_count,
         )
-        conductivity = jnp.asarray(1.0 / resistivity, dtype=jnp.float32)
+        conductivity = jnp.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
         values = np.asarray(self.forward_operator.apparent_resistivity_values(conductivity), dtype=float)
         if log_transform:
             return np.log(values)
@@ -257,7 +258,7 @@ class ERTForwardModeling:
             log_transform=log_transform,
             expected_size=self.cell_count,
         )
-        conductivity = jnp.asarray(1.0 / resistivity, dtype=jnp.float32)
+        conductivity = jnp.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
         forward = self.forward_operator
         if include_robin_boundary_derivative is None:
             include_robin_boundary_derivative = self.include_robin_boundary_derivative

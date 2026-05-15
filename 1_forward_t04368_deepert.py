@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+
+import jax
 import numpy as np
+
+jax.config.update("jax_enable_x64", True)
 
 from deepert.workflows import (
     build_terrain_forward_case,
