@@ -237,6 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--coverage-percentile", type=float, default=20.0)
     parser.add_argument("--linear-solver-backend", default="auto")
     parser.add_argument("--terrain-cache-dir", default=None)
+    parser.add_argument("--jit-cache-dir", default=None)
     parser.add_argument("--quiet", action="store_true", help="Disable progress output on stderr.")
     parser.add_argument("--no-plot", action="store_true")
     return parser
@@ -291,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         regularization_mesh=case.mesh,
         linear_solver_backend=args.linear_solver_backend,
         terrain_cache_dir=None if args.terrain_cache_dir is None else _resolve(root, args.terrain_cache_dir),
+        jit_cache_dir=None if args.jit_cache_dir is None else _resolve(root, args.jit_cache_dir),
     )
     progress = InversionProgressPrinter(enabled=not args.quiet)
     try:

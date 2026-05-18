@@ -36,6 +36,7 @@ from deepert.forward.integration import build_inverse_cosine_weights, survey_wav
 from deepert.mesh import Mesh
 from deepert.survey import Survey
 from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE, NP_FLOAT_DTYPE
+from deepert.utils.jax_cache import configure_jax_compilation_cache
 
 _SOURCE_INSET_FACTOR = 0.69
 _VALID_LINEAR_SOLVER_BACKENDS = frozenset({"auto", "cudss", "scipy"})
@@ -1331,6 +1332,7 @@ class ERTForward2p5D:
     auxiliary_discretization: AuxiliaryDiscretization | None
     linear_solver_backend: str
     terrain_cache_dir: Path | None
+    jit_cache_dir: Path | None
     _unit_primary_cache: dict[float, Array] = field(default_factory=dict, init=False, repr=False, compare=False)
     _reference_rhs_cache: dict[float, Array] = field(default_factory=dict, init=False, repr=False, compare=False)
     _cudss_state: dict[str, object] = field(default_factory=dict, init=False, repr=False, compare=False)
@@ -1348,9 +1350,11 @@ class ERTForward2p5D:
         topographic_geometric_factor_mode: str = "analytic",
         linear_solver_backend: str = "auto",
         terrain_cache_dir: str | Path | None = None,
+        jit_cache_dir: str | Path | None = None,
     ) -> "ERTForward2p5D":
         """Build the single supported forward configuration."""
 
+        resolved_jit_cache_dir = configure_jax_compilation_cache(jit_cache_dir)
         routing = build_coo_routing(mesh)
         boundary_routing = build_boundary_routing(mesh)
         source_cell_ids = _locate_point_cells(mesh, survey.electrode_positions)
@@ -1480,6 +1484,7 @@ class ERTForward2p5D:
             auxiliary_discretization=auxiliary_discretization,
             linear_solver_backend=_normalize_linear_solver_backend(linear_solver_backend),
             terrain_cache_dir=_normalize_cache_dir(terrain_cache_dir),
+            jit_cache_dir=resolved_jit_cache_dir,
         )
 
     def _wavenumber_index(self, wavenumber: float) -> int:

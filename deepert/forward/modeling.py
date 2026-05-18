@@ -131,6 +131,7 @@ class ERTForwardModeling:
     topographic_geometric_factor_mode: str = "analytic"
     linear_solver_backend: str = "auto"
     terrain_cache_dir: str | Path | None = None
+    jit_cache_dir: str | Path | None = None
     include_robin_boundary_derivative: bool = False
     normal_sensitivity: bool = True
 
@@ -193,6 +194,7 @@ class ERTForwardModeling:
                 topographic_geometric_factor_mode=self.topographic_geometric_factor_mode,
                 linear_solver_backend=self.linear_solver_backend,
                 terrain_cache_dir=self.terrain_cache_dir,
+                jit_cache_dir=self.jit_cache_dir,
             )
         return self._forward
 
@@ -300,6 +302,7 @@ class MappedERTForwardModeling:
     topographic_geometric_factor_mode: str = "analytic"
     linear_solver_backend: str = "auto"
     terrain_cache_dir: str | Path | None = None
+    jit_cache_dir: str | Path | None = None
     include_robin_boundary_derivative: bool = False
     normal_sensitivity: bool = True
 
@@ -313,6 +316,7 @@ class MappedERTForwardModeling:
             topographic_geometric_factor_mode=self.topographic_geometric_factor_mode,
             linear_solver_backend=self.linear_solver_backend,
             terrain_cache_dir=self.terrain_cache_dir,
+            jit_cache_dir=self.jit_cache_dir,
             include_robin_boundary_derivative=self.include_robin_boundary_derivative,
             normal_sensitivity=self.normal_sensitivity,
         )

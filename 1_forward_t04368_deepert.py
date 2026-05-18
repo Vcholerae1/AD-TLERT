@@ -247,6 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--topo-offset", type=float, default=0.0)
     parser.add_argument("--linear-solver-backend", default="auto")
     parser.add_argument("--terrain-cache-dir", default=None)
+    parser.add_argument("--jit-cache-dir", default=None)
     parser.add_argument("--no-plot", action="store_true", help="Do not save the PNG preview.")
     return parser
 
@@ -276,6 +277,7 @@ def main(argv: list[str] | None = None) -> int:
         case,
         linear_solver_backend=args.linear_solver_backend,
         terrain_cache_dir=None if args.terrain_cache_dir is None else _resolve(root, args.terrain_cache_dir),
+        jit_cache_dir=None if args.jit_cache_dir is None else _resolve(root, args.jit_cache_dir),
     )
 
     dat_file = output_dir / f"synthetic_ert_terrain_vardz_t{step:05d}.dat"

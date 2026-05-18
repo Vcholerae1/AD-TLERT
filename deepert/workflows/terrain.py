@@ -124,6 +124,7 @@ class TerrainForwardRunner:
         linear_solver_backend: str = "auto",
         reuse_solver_state: bool = True,
         terrain_cache_dir: str | Path | None = None,
+        jit_cache_dir: str | Path | None = None,
         prepare_forward: bool = False,
     ) -> "TerrainForwardRunner":
         """Build a reusable forward operator from one terrain case.
@@ -136,6 +137,8 @@ class TerrainForwardRunner:
         forward_kwargs = {"linear_solver_backend": linear_solver_backend}
         if terrain_cache_dir is not None:
             forward_kwargs["terrain_cache_dir"] = terrain_cache_dir
+        if jit_cache_dir is not None:
+            forward_kwargs["jit_cache_dir"] = jit_cache_dir
         forward = ERTForward2p5D.from_mesh_survey(case.mesh, case.survey, **forward_kwargs)
         runner = cls(case_template=case, forward=forward, reuse_solver_state=bool(reuse_solver_state))
         if prepare_forward:
@@ -882,6 +885,7 @@ def run_terrain_forward(
     linear_solver_backend: str = "auto",
     reuse_solver_state: bool = True,
     terrain_cache_dir: str | Path | None = None,
+    jit_cache_dir: str | Path | None = None,
     prepare_forward: bool = False,
 ) -> np.ndarray:
     """Compute apparent resistivity for a terrain case."""
@@ -891,6 +895,7 @@ def run_terrain_forward(
         linear_solver_backend=linear_solver_backend,
         reuse_solver_state=reuse_solver_state,
         terrain_cache_dir=terrain_cache_dir,
+        jit_cache_dir=jit_cache_dir,
         prepare_forward=prepare_forward,
     )
     try:
@@ -993,6 +998,7 @@ def run_terrain_forward_file(
     linear_solver_backend: str = "auto",
     reuse_solver_state: bool = True,
     terrain_cache_dir: str | Path | None = None,
+    jit_cache_dir: str | Path | None = None,
     prepare_forward: bool = False,
 ) -> TerrainForwardRecord:
     """Run and save one terrain-forward timestep from a resistivity ``.npy`` file."""
@@ -1032,6 +1038,7 @@ def run_terrain_forward_file(
         linear_solver_backend=linear_solver_backend,
         reuse_solver_state=reuse_solver_state,
         terrain_cache_dir=terrain_cache_dir,
+        jit_cache_dir=jit_cache_dir,
         prepare_forward=prepare_forward,
     )
     save_terrain_forward_dat(dat_file, case, rhoa, relative_error=relative_error)
@@ -1061,6 +1068,7 @@ def run_terrain_forward_series(
     linear_solver_backend: str = "auto",
     reuse_solver_state: bool = True,
     terrain_cache_dir: str | Path | None = None,
+    jit_cache_dir: str | Path | None = None,
     prepare_forward: bool = False,
 ) -> tuple[list[TerrainForwardRecord], list[TerrainForwardRecord]]:
     """Run a sequential terrain-forward series and return ``(manifest, failures)``.
@@ -1126,6 +1134,7 @@ def run_terrain_forward_series(
                         linear_solver_backend=linear_solver_backend,
                         reuse_solver_state=reuse_solver_state,
                         terrain_cache_dir=terrain_cache_dir,
+                        jit_cache_dir=jit_cache_dir,
                         prepare_forward=prepare_forward,
                     )
                     runners[resolved_y_index] = runner

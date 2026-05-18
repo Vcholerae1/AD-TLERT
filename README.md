@@ -39,6 +39,16 @@ rhoa = response.apparent_resistivity
 jacobian = forward.jacobian(conductivity)
 ```
 
+To reuse JAX/XLA compiled executables across Python runs, pass a persistent
+JIT cache directory or set `DEEPERT_JIT_CACHE_DIR`:
+
+```python
+forward = ERTForward2p5D.from_mesh_survey(mesh, survey, jit_cache_dir=".deepert_jit_cache")
+```
+
+The cache is keyed by JAX, so shape, dtype, static constants, backend, and
+JAX/XLA version changes get separate entries.
+
 `ERTForwardModeling` provides a small wrapper for mesh/data-like objects:
 
 ```python

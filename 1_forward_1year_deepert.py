@@ -75,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--topo-offset", type=float, default=0.0)
     parser.add_argument("--linear-solver-backend", default="auto")
     parser.add_argument("--terrain-cache-dir", default=None)
+    parser.add_argument("--jit-cache-dir", default=None)
     parser.add_argument("--skip-existing", action="store_true", help="Reuse existing .dat/.npz files.")
     parser.add_argument(
         "--reuse-solver-state",
@@ -141,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         linear_solver_backend=args.linear_solver_backend,
         reuse_solver_state=args.reuse_solver_state,
         terrain_cache_dir=None if args.terrain_cache_dir is None else _resolve(root, args.terrain_cache_dir),
+        jit_cache_dir=None if args.jit_cache_dir is None else _resolve(root, args.jit_cache_dir),
         prepare_forward=args.prepare_forward,
     )
     elapsed_sec = time.perf_counter() - start
