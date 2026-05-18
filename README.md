@@ -152,6 +152,20 @@ final_models = result.final_models
 ## Validation
 
 ```bash
+uv run pytest
 uv run python -m compileall deepert
 uv build
 ```
+
+During the JAX-to-Torch migration, compare migrated example outputs against a
+JAX baseline artifact root with:
+
+```bash
+DEEPERT_EXAMPLE_PARITY_BASELINE_ROOT=result_jax_baseline \
+DEEPERT_EXAMPLE_PARITY_CANDIDATE_ROOT=result_torch_candidate \
+uv run pytest tests/test_example_parity.py -q
+```
+
+The parity gate covers `1_forward_t04368_deepert.py`,
+`1_forward_1year_deepert.py`, `2_single_inversion_t04368_deepert.py`, and
+`2_timelapsedERT_inversion_deepert.py`.
