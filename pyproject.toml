@@ -9,14 +9,15 @@ description = "Differentiable time-lapse ERT in pure JAX"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "cupy-cuda12x>=14.0.0; sys_platform == 'linux'",
+    "cupy-cuda13x[ctk]>=14.0.0; sys_platform == 'linux'",
     "ipykernel>=7.2.0",
-    "jax[cuda12]>=0.9.2",
+    "jax>=0.9.2",
     "matplotlib>=3.10.0",
     "meshio>=5.3.5",
-    "nvidia-cudss-cu12>=0.7.1.6; sys_platform == 'linux'",
+    "nvidia-cudss-cu13>=0.7.1.6; sys_platform == 'linux'",
     "nvmath-python>=0.8.0; sys_platform == 'linux'",
     "scipy>=1.16.0",
+    "torch>=2.12.0",
 ]
 
 [project.optional-dependencies]
