@@ -15,6 +15,7 @@ import numpy as np
 jax.config.update("jax_enable_x64", True)
 
 from deepert.inversion import ERTInversion, InversionConfig, ParameterizedERTForward2p5D
+from deepert.utils.progress import InversionProgressPrinter
 from deepert.workflows import (
     build_source_position_triangle_inversion_case,
     load_terrain_forward_dat,
@@ -236,6 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--coverage-percentile", type=float, default=20.0)
     parser.add_argument("--linear-solver-backend", default="auto")
     parser.add_argument("--terrain-cache-dir", default=None)
+    parser.add_argument("--quiet", action="store_true", help="Disable progress output on stderr.")
     parser.add_argument("--no-plot", action="store_true")
     return parser
 
@@ -290,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         linear_solver_backend=args.linear_solver_backend,
         terrain_cache_dir=None if args.terrain_cache_dir is None else _resolve(root, args.terrain_cache_dir),
     )
+    progress = InversionProgressPrinter(enabled=not args.quiet)
     try:
         config = InversionConfig(
             max_iterations=args.max_iterations,
@@ -302,11 +305,13 @@ def main(argv: list[str] | None = None) -> int:
             max_log_step=args.max_log_step,
             line_search=True,
             target_chi2=args.target_chi2,
+            progress_callback=progress,
         )
         initial_model = np.full(case.mesh.cell_count, float(np.median(observed_rhoa)), dtype=float)
         result = ERTInversion(forward=forward, observed_data=observed_rhoa, config=config).setup().run(initial_model)
     finally:
         forward.close()
+        progress.finish()
 
     plot_coverage = np.asarray(result.coverage, dtype=float).ravel()
     coverage_source = "deepert_pygimli_style_sumabs_area"

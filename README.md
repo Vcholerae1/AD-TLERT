@@ -17,8 +17,8 @@ This repository is intentionally small. It keeps:
 uv sync
 ```
 
-The terrain examples read ParFlow PFB files, so install the example extra when
-running those paths:
+The terrain examples read ParFlow PFB files and build Triangle inversion
+meshes, so install the example extra when running those paths:
 
 ```bash
 uv sync --extra examples

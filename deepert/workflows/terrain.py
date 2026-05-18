@@ -534,8 +534,8 @@ def _source_position_triangle_arrays(
     except ImportError as exc:
         raise ImportError(
             "Building the source-position inversion mesh requires "
-            "the optional `triangle` package. Run this example with "
-            "`uv run --with triangle ...`."
+            "the optional `triangle` package. Install the example dependencies "
+            "with `uv sync --extra examples`."
         ) from exc
 
     if quality <= 0.0:

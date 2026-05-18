@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -18,6 +19,7 @@ from deepert.utils.dtypes import FLOAT_DTYPE
 
 
 ArrayLike = Any
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,13 @@ class InversionConfig:
     cgls_tolerance: float = 1.0e-8
     include_robin_boundary_derivative: bool = False
     normal_sensitivity: bool = True
+    progress_callback: ProgressCallback | None = field(default=None, repr=False, compare=False)
+
+
+def _emit_progress(config: InversionConfig, event: str, **payload: Any) -> None:
+    callback = config.progress_callback
+    if callback is not None:
+        callback({"event": event, **payload})
 
 
 @dataclass(frozen=True)
@@ -417,6 +426,8 @@ def _check_config(config: InversionConfig) -> None:
         raise ValueError("cgls_max_iterations must be >= 1")
     if config.cgls_tolerance <= 0.0:
         raise ValueError("cgls_tolerance must be positive")
+    if config.progress_callback is not None and not callable(config.progress_callback):
+        raise ValueError("progress_callback must be callable when set")
     if config.model_bounds is not None:
         lo, hi = config.model_bounds
         if not (0.0 < lo < hi):
@@ -1053,7 +1064,22 @@ def invert_single_log_resistivity(
     linearization_valid = False
     regularization_matrix = _spatial_regularization_matrix(forward, config, n_cells)
 
-    for _ in range(config.max_iterations):
+    _emit_progress(
+        config,
+        "single_start",
+        n_cells=int(n_cells),
+        n_data=int(n_data),
+        max_iterations=int(config.max_iterations),
+    )
+    stop_reason = "max_iterations"
+    for iteration_index in range(config.max_iterations):
+        iteration = iteration_index + 1
+        _emit_progress(
+            config,
+            "single_iteration_start",
+            iteration=int(iteration),
+            max_iterations=int(config.max_iterations),
+        )
         if not linearization_valid:
             log_model = _state_to_log_model(model, config)
             predicted_log, jacobian_log = _forward_and_jacobian_log(
@@ -1136,14 +1162,34 @@ def invert_single_log_resistivity(
         linearization_valid = True
         chi2 = _weighted_chi2(predicted_log, observed_log, weight)
         iteration_chi2.append(chi2)
+        step_metric = float(np.linalg.norm(actual_step) / max(float(np.sqrt(n_cells)), 1.0))
+        _emit_progress(
+            config,
+            "single_iteration_done",
+            iteration=int(iteration),
+            max_iterations=int(config.max_iterations),
+            chi2=float(chi2),
+            step_norm=step_metric,
+            target_chi2=None if config.target_chi2 is None else float(config.target_chi2),
+        )
         if config.target_chi2 is not None and chi2 < config.target_chi2:
+            stop_reason = "target_chi2"
             break
-        if np.linalg.norm(actual_step) / max(float(np.sqrt(n_cells)), 1.0) < config.step_tolerance:
+        if step_metric < config.step_tolerance:
+            stop_reason = "step_tolerance"
             break
 
     coverage = _pygimli_style_coverage_from_jacobian(forward, jacobian)
     predicted_data = np.exp(predicted_log)
     final_log_model = _state_to_log_model(model, config)
+    _emit_progress(
+        config,
+        "single_done",
+        iterations=int(len(iteration_chi2)),
+        max_iterations=int(config.max_iterations),
+        final_chi2=float(iteration_chi2[-1]) if iteration_chi2 else None,
+        stop_reason=stop_reason,
+    )
     return ERTInversionResult(
         final_model=np.exp(final_log_model),
         final_log_model=final_log_model,
@@ -1244,11 +1290,38 @@ def invert_timelapse_log_resistivity(
     )
     temporal_difference = _temporal_difference_matrix(n_cells, n_times, 1.0)
 
-    for _ in range(config.max_iterations):
+    _emit_progress(
+        config,
+        "timelapse_start",
+        n_cells=int(n_cells),
+        n_measurements=int(n_measurements),
+        n_times=int(n_times),
+        max_iterations=int(config.max_iterations),
+    )
+    stop_reason = "max_iterations"
+    for iteration_index in range(config.max_iterations):
+        iteration = iteration_index + 1
+        _emit_progress(
+            config,
+            "timelapse_iteration_start",
+            iteration=int(iteration),
+            max_iterations=int(config.max_iterations),
+            n_times=int(n_times),
+        )
         if not linearization_valid:
             predicted_rows: list[np.ndarray] = []
             jacobians = []
             for time_index in range(n_times):
+                _emit_progress(
+                    config,
+                    "timelapse_time_start",
+                    iteration=int(iteration),
+                    max_iterations=int(config.max_iterations),
+                    stage="linearization",
+                    time_index=int(time_index),
+                    time_number=int(time_index + 1),
+                    n_times=int(n_times),
+                )
                 state_t = models[:, time_index]
                 pred_t, jac_log_t = _forward_and_jacobian_log_cached(
                     forward,
@@ -1260,6 +1333,16 @@ def invert_timelapse_log_resistivity(
                 )
                 predicted_rows.append(pred_t)
                 jacobians.append(jac_log_t * _d_log_model_d_state(state_t, config)[None, :])
+                _emit_progress(
+                    config,
+                    "timelapse_time_done",
+                    iteration=int(iteration),
+                    max_iterations=int(config.max_iterations),
+                    stage="linearization",
+                    time_index=int(time_index),
+                    time_number=int(time_index + 1),
+                    n_times=int(n_times),
+                )
             predicted_log = np.vstack(predicted_rows)
 
         data_blocks: list[sp.csr_matrix] = []
@@ -1338,6 +1421,16 @@ def invert_timelapse_log_resistivity(
         candidate_rows = []
         candidate_jacobians = []
         for time_index in range(n_times):
+            _emit_progress(
+                config,
+                "timelapse_time_start",
+                iteration=int(iteration),
+                max_iterations=int(config.max_iterations),
+                stage="candidate",
+                time_index=int(time_index),
+                time_number=int(time_index + 1),
+                n_times=int(n_times),
+            )
             state_t = candidate_models[:, time_index]
             pred_t, jac_log_t = _forward_and_jacobian_log_cached(
                 forward,
@@ -1349,6 +1442,16 @@ def invert_timelapse_log_resistivity(
             )
             candidate_rows.append(pred_t)
             candidate_jacobians.append(jac_log_t * _d_log_model_d_state(state_t, config)[None, :])
+            _emit_progress(
+                config,
+                "timelapse_time_done",
+                iteration=int(iteration),
+                max_iterations=int(config.max_iterations),
+                stage="candidate",
+                time_index=int(time_index),
+                time_number=int(time_index + 1),
+                n_times=int(n_times),
+            )
         candidate_predicted_log = np.vstack(candidate_rows)
 
         actual_step_vec = candidate_step_vec
@@ -1376,6 +1479,16 @@ def invert_timelapse_log_resistivity(
                 predicted_rows = []
                 jacobians = []
                 for time_index in range(n_times):
+                    _emit_progress(
+                        config,
+                        "timelapse_time_start",
+                        iteration=int(iteration),
+                        max_iterations=int(config.max_iterations),
+                        stage="line_search",
+                        time_index=int(time_index),
+                        time_number=int(time_index + 1),
+                        n_times=int(n_times),
+                    )
                     state_t = models[:, time_index]
                     pred_t, jac_log_t = _forward_and_jacobian_log_cached(
                         forward,
@@ -1387,6 +1500,16 @@ def invert_timelapse_log_resistivity(
                     )
                     predicted_rows.append(pred_t)
                     jacobians.append(jac_log_t * _d_log_model_d_state(state_t, config)[None, :])
+                    _emit_progress(
+                        config,
+                        "timelapse_time_done",
+                        iteration=int(iteration),
+                        max_iterations=int(config.max_iterations),
+                        stage="line_search",
+                        time_index=int(time_index),
+                        time_number=int(time_index + 1),
+                        n_times=int(n_times),
+                    )
                 predicted_log = np.vstack(predicted_rows)
             else:
                 models = candidate_models
@@ -1400,14 +1523,35 @@ def invert_timelapse_log_resistivity(
         linearization_valid = True
         chi2 = _weighted_chi2(predicted_log, observed_log, weight)
         iteration_chi2.append(chi2)
+        step_metric = float(np.linalg.norm(actual_step_vec) / max(float(np.sqrt(total_size)), 1.0))
+        _emit_progress(
+            config,
+            "timelapse_iteration_done",
+            iteration=int(iteration),
+            max_iterations=int(config.max_iterations),
+            n_times=int(n_times),
+            chi2=float(chi2),
+            step_norm=step_metric,
+            target_chi2=None if config.target_chi2 is None else float(config.target_chi2),
+        )
         if config.target_chi2 is not None and chi2 < config.target_chi2:
+            stop_reason = "target_chi2"
             break
-        if np.linalg.norm(actual_step_vec) / max(float(np.sqrt(total_size)), 1.0) < config.step_tolerance:
+        if step_metric < config.step_tolerance:
+            stop_reason = "step_tolerance"
             break
 
     all_coverage = [_pygimli_style_coverage_from_jacobian(forward, jac_t) for jac_t in jacobians]
     coverage = np.nanmedian(np.column_stack(all_coverage), axis=1)
     final_log_models = _state_to_log_model(models, config)
+    _emit_progress(
+        config,
+        "timelapse_done",
+        iterations=int(len(iteration_chi2)),
+        max_iterations=int(config.max_iterations),
+        final_chi2=float(iteration_chi2[-1]) if iteration_chi2 else None,
+        stop_reason=stop_reason,
+    )
     return TimeLapseERTInversionResult(
         final_models=np.exp(final_log_models),
         final_log_models=final_log_models,
@@ -1507,8 +1651,29 @@ def invert_windowed_timelapse_log_resistivity(
         min(128, int(window_size) * max(1, int(config.max_iterations) + 2) * 4),
     )
 
-    for start in starts:
+    _emit_progress(
+        config,
+        "windowed_start",
+        n_cells=int(n_cells),
+        n_measurements=int(n_measurements),
+        n_times=int(n_times),
+        n_windows=int(len(starts)),
+        window_size=int(window_size),
+        window_step=int(window_step),
+        max_iterations=int(config.max_iterations),
+    )
+    for window_index, start in enumerate(starts, start=1):
         end = start + int(window_size)
+        _emit_progress(
+            config,
+            "window_start",
+            window_index=int(window_index),
+            n_windows=int(len(starts)),
+            start_idx=int(start),
+            end_idx=int(end - 1),
+            window_size=int(window_size),
+            max_iterations=int(config.max_iterations),
+        )
         window_config = _config_for_time_window(
             config,
             observed_shape=observed_log.shape,
@@ -1542,6 +1707,15 @@ def invert_windowed_timelapse_log_resistivity(
                 "final_chi2_data": final_chi2,
             }
         )
+        _emit_progress(
+            config,
+            "window_done",
+            window_index=int(window_index),
+            n_windows=int(len(starts)),
+            start_idx=int(start),
+            end_idx=int(end - 1),
+            final_chi2=final_chi2,
+        )
 
     final_log_columns: list[np.ndarray] = []
     for time_index, timestep_contributions in enumerate(contributions):
@@ -1551,12 +1725,22 @@ def invert_windowed_timelapse_log_resistivity(
         final_log_columns.append(np.mean(stack, axis=1))
     final_log_models = np.column_stack(final_log_columns)
 
-    predicted_log = np.vstack(
-        [
-            _forward_log_response(forward, final_log_models[:, time_index])
-            for time_index in range(n_times)
-        ]
+    _emit_progress(
+        config,
+        "windowed_prediction_start",
+        n_times=int(n_times),
     )
+    predicted_rows: list[np.ndarray] = []
+    for time_index in range(n_times):
+        _emit_progress(
+            config,
+            "windowed_prediction_step",
+            time_index=int(time_index),
+            time_number=int(time_index + 1),
+            n_times=int(n_times),
+        )
+        predicted_rows.append(_forward_log_response(forward, final_log_models[:, time_index]))
+    predicted_log = np.vstack(predicted_rows)
     if coverage_bank:
         coverage = np.nanmedian(np.column_stack(coverage_bank), axis=1)
         all_coverage = coverage_bank
@@ -1564,6 +1748,12 @@ def invert_windowed_timelapse_log_resistivity(
         coverage = np.zeros((n_cells,), dtype=float)
         all_coverage = []
 
+    _emit_progress(
+        config,
+        "windowed_done",
+        n_windows=int(len(starts)),
+        final_chi2=float(window_final_chi2[-1]) if window_final_chi2 else None,
+    )
     return TimeLapseERTInversionResult(
         final_models=np.exp(final_log_models),
         final_log_models=final_log_models,

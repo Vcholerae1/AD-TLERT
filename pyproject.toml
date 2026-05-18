@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 examples = [
     "pftools>=1.3.14",
+    "triangle>=20250106",
 ]
 
 [dependency-groups]
