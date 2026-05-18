@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
+import torch
 
 from deepert.forward import ERTForward2p5D, ERTForwardModeling
 from deepert.mesh import Mesh
@@ -114,6 +116,36 @@ def test_flat_forward_scipy_regression_values() -> None:
             dtype=np.float32,
         ),
         rtol=1.0e-5,
+        atol=1.0e-7,
+    )
+
+
+def test_flat_forward_cudss_regression_values_when_available() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    try:
+        import cupy  # noqa: F401
+        import nvmath.sparse.advanced  # noqa: F401
+    except ImportError as exc:
+        pytest.skip(f"cuDSS stack is not available: {exc}")
+
+    mesh, survey, conductivity = _flat_four_electrode_case()
+    forward = ERTForward2p5D.from_mesh_survey(mesh, survey, linear_solver_backend="cudss")
+    try:
+        response = forward.solve(conductivity)
+    finally:
+        forward.close()
+
+    np.testing.assert_allclose(
+        np.asarray(response.apparent_resistivity),
+        np.asarray([1.0000906], dtype=np.float32),
+        rtol=1.0e-6,
+        atol=1.0e-7,
+    )
+    np.testing.assert_allclose(
+        np.asarray(response.resistance),
+        np.asarray([0.15916936], dtype=np.float32),
+        rtol=1.0e-6,
         atol=1.0e-7,
     )
 

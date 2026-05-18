@@ -467,6 +467,8 @@ def _normalize_topographic_geometric_factor_mode(mode: str) -> str:
 
 
 def _array_is_on_cuda(values: Array) -> bool:
+    if bool(getattr(values, "is_cuda", False)):
+        return True
     try:
         devices = values.devices()
     except AttributeError:
@@ -1646,7 +1648,12 @@ class ERTForward2p5D:
             array = array.T
 
         if not _array_is_on_cuda(array):
-            raise RuntimeError("Torch tensors must be placed on CUDA/GPU for zero-copy cuDSS interop")
+            numpy_array = np.asarray(array)
+            cupy_array = cp.asarray(numpy_array)
+            if fortran:
+                cupy_array = cp.asfortranarray(cupy_array)
+            self._cudss_state["gpu_zero_copy"] = False
+            return cupy_array
 
         try:
             cupy_array = cp.from_dlpack(array.__dlpack__())

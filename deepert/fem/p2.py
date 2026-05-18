@@ -107,7 +107,7 @@ def build_p2_element_data(mesh: Mesh) -> P2ElementData:
     edge_1 = cell_nodes[:, 1] - cell_nodes[:, 0]
     edge_2 = cell_nodes[:, 2] - cell_nodes[:, 0]
     jacobians = jnp.stack((edge_1, edge_2), axis=-1)
-    inverse_jacobian_t = jnp.linalg.inv(jacobians).transpose((0, 2, 1))
+    inverse_jacobian_t = jnp.linalg.inv(jacobians).permute(0, 2, 1)
     gradients = jnp.einsum("eij,qnj->eqni", inverse_jacobian_t, reference_gradients)
 
     return P2ElementData(
