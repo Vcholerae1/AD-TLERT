@@ -7,12 +7,12 @@ import json
 import os
 from pathlib import Path
 
-os.environ.setdefault("JAX_ENABLE_X64", "1")
+os.environ.setdefault("DEEPERT_ENABLE_FLOAT64", "1")
 
-import jax
+from deepert.utils.torch_compat import torch_runtime
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
+torch_runtime.config.update("torch_enable_float64", True)
 
 from deepert.workflows import (
     build_terrain_forward_case,

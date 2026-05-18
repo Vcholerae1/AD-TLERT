@@ -6,8 +6,8 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import roots_laguerre, roots_legendre
 
-from jax import Array
-import jax.numpy as jnp
+from deepert.utils.torch_compat import Array
+from deepert.utils.torch_compat import jnp
 
 from deepert.survey import Survey
 from deepert.utils.dtypes import FLOAT_DTYPE

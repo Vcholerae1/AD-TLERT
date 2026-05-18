@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-import jax.numpy as jnp
+from deepert.utils.torch_compat import jnp
 import numpy as np
 import scipy.sparse as sp
 from scipy.spatial import cKDTree

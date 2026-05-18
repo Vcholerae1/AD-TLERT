@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import os
-
 import numpy as np
-
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 from deepert.forward import ERTForward2p5D, ERTForwardModeling
 from deepert.mesh import Mesh

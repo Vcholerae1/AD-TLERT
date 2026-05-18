@@ -10,12 +10,12 @@ import re
 import time
 from pathlib import Path
 
-os.environ.setdefault("JAX_ENABLE_X64", "1")
+os.environ.setdefault("DEEPERT_ENABLE_FLOAT64", "1")
 
-import jax
+from deepert.utils.torch_compat import torch_runtime
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
+torch_runtime.config.update("torch_enable_float64", True)
 
 from deepert.inversion import (
     InversionConfig,
@@ -613,7 +613,7 @@ def main(argv: list[str] | None = None) -> int:
         "mesh_file": str(output_dir / "timelapse_inversion_mesh.npz"),
         "inversion_mesh_quality": float(args.inversion_mesh_quality),
         "inversion_mesh_smoothing_iterations": int(args.inversion_mesh_smoothing_iterations),
-        "jax_enable_x64": bool(jax.config.jax_enable_x64),
+        "torch_enable_float64": bool(torch_runtime.config.torch_enable_float64),
         "elapsed_sec": float(elapsed_sec),
         "elapsed_min": float(elapsed_sec / 60.0),
         "plot_files": plot_files,

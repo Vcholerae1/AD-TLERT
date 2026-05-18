@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from jax import Array
-import jax.numpy as jnp
+from deepert.utils.torch_compat import Array
+from deepert.utils.torch_compat import jnp
 import numpy as np
 
 from deepert.mesh import Mesh
-from deepert.utils.dtypes import FLOAT_DTYPE
+from deepert.utils.dtypes import FLOAT_DTYPE, NP_FLOAT_DTYPE
 
 
 @dataclass(frozen=True)
@@ -81,7 +81,7 @@ def reference_shape_gradients() -> Array:
 def build_p1_element_data(mesh: Mesh, quadrature_order: int = 2) -> P1ElementData:
     """Prepare batched element tensors for later FEM assembly."""
 
-    dtype = np.dtype(FLOAT_DTYPE)
+    dtype = NP_FLOAT_DTYPE
     if quadrature_order == 1:
         quadrature_points = np.asarray([[1.0 / 3.0, 1.0 / 3.0]], dtype=dtype)
         quadrature_weights = np.asarray([0.5], dtype=dtype)

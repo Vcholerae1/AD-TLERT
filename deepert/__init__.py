@@ -1,4 +1,4 @@
-"""Top-level package for differentiable time-lapse ERT in JAX."""
+"""Top-level package for differentiable time-lapse ERT on Torch."""
 
 from deepert.fem import P1ElementData, build_p1_element_data, p1_shape_functions
 from deepert.forward import ERTForward2p5D, ERTForwardModeling, ForwardResponse

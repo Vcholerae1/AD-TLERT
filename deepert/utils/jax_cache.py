@@ -1,11 +1,9 @@
-"""JAX persistent compilation cache helpers."""
+"""JIT cache path helpers kept for migration-time API compatibility."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-
-import jax
 
 DEEPERT_JIT_CACHE_DIR_ENV = "DEEPERT_JIT_CACHE_DIR"
 
@@ -22,12 +20,11 @@ def normalize_jit_cache_dir(cache_dir: str | Path | None) -> Path | None:
 
 
 def configure_jax_compilation_cache(cache_dir: str | Path | None) -> Path | None:
-    """Enable JAX's persistent compilation cache for Deepert JIT kernels.
+    """Resolve and create the optional JIT cache directory.
 
-    JAX owns the executable cache key, including argument shapes, dtypes, static
-    constants, backend, and JAX/XLA version inputs. Deepert only supplies the
-    directory and lowers the default compile-time threshold so short but repeated
-    kernels are persisted too.
+    Torch eager execution does not need the former JAX persistent compilation
+    cache. Deepert still accepts ``jit_cache_dir`` so existing scripts keep
+    working while the migration removes JAX-specific behavior.
     """
 
     resolved = normalize_jit_cache_dir(cache_dir)
@@ -35,22 +32,15 @@ def configure_jax_compilation_cache(cache_dir: str | Path | None) -> Path | None
         return None
 
     resolved.mkdir(parents=True, exist_ok=True)
-    current = jax.config.jax_compilation_cache_dir
-    if current is not None and Path(current).expanduser().resolve() != resolved:
-        raise ValueError(
-            "JAX compilation cache directory is already configured as "
-            f"{current!r}, cannot switch to {str(resolved)!r} in the same process"
-        )
-
-    jax.config.update("jax_enable_compilation_cache", True)
-    jax.config.update("jax_compilation_cache_dir", str(resolved))
-    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
-    jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
     return resolved
+
+
+configure_torch_jit_cache = configure_jax_compilation_cache
 
 
 __all__ = [
     "DEEPERT_JIT_CACHE_DIR_ENV",
     "configure_jax_compilation_cache",
+    "configure_torch_jit_cache",
     "normalize_jit_cache_dir",
 ]

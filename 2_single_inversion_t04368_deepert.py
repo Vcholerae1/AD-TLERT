@@ -7,12 +7,12 @@ import json
 import os
 from pathlib import Path
 
-os.environ.setdefault("JAX_ENABLE_X64", "1")
+os.environ.setdefault("DEEPERT_ENABLE_FLOAT64", "1")
 
-import jax
+from deepert.utils.torch_compat import torch_runtime
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
+torch_runtime.config.update("torch_enable_float64", True)
 
 from deepert.inversion import ERTInversion, InversionConfig, ParameterizedERTForward2p5D
 from deepert.utils.progress import InversionProgressPrinter
@@ -360,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         "line_search": True,
         "max_log_step": None if args.max_log_step is None else float(args.max_log_step),
         "target_chi2": None if args.target_chi2 is None else float(args.target_chi2),
-        "jax_enable_x64": bool(jax.config.jax_enable_x64),
+        "torch_enable_float64": bool(torch_runtime.config.torch_enable_float64),
         "coverage_percentile": float(args.coverage_percentile),
         "coverage_source": coverage_source,
         "coverage_threshold": coverage_threshold,

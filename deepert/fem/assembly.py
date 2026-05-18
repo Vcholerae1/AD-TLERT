@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from jax import Array
-import jax.numpy as jnp
-from jax.experimental.sparse import BCOO
+from deepert.utils.torch_compat import Array
+from deepert.utils.torch_compat import jnp
+from deepert.utils.torch_compat import BCOO
 import numpy as np
 
 from deepert.fem.p1 import P1ElementData
 from deepert.fem.p2 import P2ElementData
 from deepert.mesh import Mesh
-from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE
+from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE, NP_FLOAT_DTYPE
 
 
 @dataclass(frozen=True)
@@ -103,7 +103,7 @@ def assemble_local_stiffness(element_data: P1ElementData, conductivity: Array | 
 
     static_conductivity = _static_scalar_value(conductivity)
     if static_conductivity is not None:
-        dtype = np.dtype(FLOAT_DTYPE)
+        dtype = NP_FLOAT_DTYPE
         gradients = np.asarray(element_data.gradients, dtype=dtype)
         weights = (
             2.0
@@ -130,7 +130,7 @@ def assemble_local_mass(
 
     static_coefficient = _static_scalar_value(coefficients)
     if static_coefficient is not None:
-        dtype = np.dtype(FLOAT_DTYPE)
+        dtype = NP_FLOAT_DTYPE
         shape_values = np.asarray(element_data.shape_values, dtype=dtype)
         weights = (
             2.0

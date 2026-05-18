@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from jax import Array
-import jax.numpy as jnp
+from deepert.utils.torch_compat import Array
+from deepert.utils.torch_compat import jnp
 
 from deepert.mesh import Mesh
 from deepert.utils.dtypes import FLOAT_DTYPE

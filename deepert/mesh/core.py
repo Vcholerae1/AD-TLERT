@@ -7,8 +7,8 @@ import heapq
 from pathlib import Path
 import numpy as np
 
-from jax import Array
-import jax.numpy as jnp
+from deepert.utils.torch_compat import Array
+from deepert.utils.torch_compat import jnp
 import meshio
 
 from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE, NP_FLOAT_DTYPE

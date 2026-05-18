@@ -7,12 +7,12 @@ import numpy as np
 from scipy.special import k0 as besselk0
 from scipy.special import k1 as besselk1
 
-from jax import Array
-import jax.numpy as jnp
-from jax.experimental.sparse import BCOO
+from deepert.utils.torch_compat import Array
+from deepert.utils.torch_compat import jnp
+from deepert.utils.torch_compat import BCOO
 
 from deepert.mesh import Mesh
-from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE
+from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE, NP_FLOAT_DTYPE
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,7 @@ def assemble_local_boundary_mass(mesh: Mesh, coefficients: Array | float) -> Arr
 
     static_coefficient = _static_scalar_value(coefficients)
     if static_coefficient is not None:
-        dtype = np.dtype(FLOAT_DTYPE)
+        dtype = NP_FLOAT_DTYPE
         reference = np.asarray([[2.0, 1.0], [1.0, 2.0]], dtype=dtype) / 6.0
         lengths = np.asarray(mesh.boundary_edge_lengths, dtype=dtype)
         local = static_coefficient * lengths[:, None, None] * reference[None, :, :]
@@ -77,7 +77,7 @@ def assemble_local_boundary_mass_p2(lengths: Array, coefficients: Array | float)
 
     static_coefficient = _static_scalar_value(coefficients)
     if static_coefficient is not None:
-        dtype = np.dtype(FLOAT_DTYPE)
+        dtype = NP_FLOAT_DTYPE
         length_array_np = np.asarray(lengths, dtype=dtype)
         reference = np.asarray(
             [
@@ -141,7 +141,7 @@ def robin_boundary_coefficients(
         conductivity_values = _expand_cell_coefficient(conductivity, mesh)
         boundary_sigma = conductivity_values[mesh.boundary_edge_cells]
     else:
-        boundary_sigma = np.full(mesh.boundary_edges.shape[0], static_conductivity, dtype=np.dtype(FLOAT_DTYPE))
+        boundary_sigma = np.full(mesh.boundary_edges.shape[0], static_conductivity, dtype=NP_FLOAT_DTYPE)
 
     centers = np.asarray(mesh.boundary_edge_centers, dtype=float)
     normals = np.asarray(mesh.boundary_edge_normals, dtype=float)

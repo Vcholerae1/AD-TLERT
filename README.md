@@ -1,6 +1,6 @@
 # deepert
 
-Differentiable 2.5D ERT forward and time-lapse inversion tooling in JAX.
+Differentiable 2.5D ERT forward and time-lapse inversion tooling on Torch.
 
 This repository is intentionally small. It keeps:
 
@@ -27,27 +27,27 @@ uv sync --extra examples
 ## Core Forward API
 
 ```python
-import jax.numpy as jnp
+import torch
 
 from deepert.forward import ERTForward2p5D
 
 forward = ERTForward2p5D.from_mesh_survey(mesh, survey)
-conductivity = jnp.asarray(1.0 / resistivity, dtype=jnp.float32)
+conductivity = torch.as_tensor(1.0 / resistivity, dtype=torch.float32)
 response = forward.solve(conductivity)
 
 rhoa = response.apparent_resistivity
 jacobian = forward.jacobian(conductivity)
 ```
 
-To reuse JAX/XLA compiled executables across Python runs, pass a persistent
-JIT cache directory or set `DEEPERT_JIT_CACHE_DIR`:
+`jit_cache_dir` and `DEEPERT_JIT_CACHE_DIR` are retained as compatibility
+knobs during the Torch migration:
 
 ```python
 forward = ERTForward2p5D.from_mesh_survey(mesh, survey, jit_cache_dir=".deepert_jit_cache")
 ```
 
-The cache is keyed by JAX, so shape, dtype, static constants, backend, and
-JAX/XLA version changes get separate entries.
+Torch eager execution does not require the old JAX/XLA persistent cache, so the
+directory is resolved and created but no executable cache entries are expected.
 
 `ERTForwardModeling` provides a small wrapper for mesh/data-like objects:
 
@@ -157,8 +157,8 @@ uv run python -m compileall deepert
 uv build
 ```
 
-During the JAX-to-Torch migration, compare migrated example outputs against a
-JAX baseline artifact root with:
+During the migration, compare Torch example outputs against a legacy JAX
+baseline artifact root with:
 
 ```bash
 DEEPERT_EXAMPLE_PARITY_BASELINE_ROOT=result_jax_baseline \

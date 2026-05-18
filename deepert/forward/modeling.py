@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import jax.numpy as jnp
+from deepert.utils.torch_compat import jnp
 import numpy as np
 
 from deepert.forward.ert2p5d import ERTForward2p5D

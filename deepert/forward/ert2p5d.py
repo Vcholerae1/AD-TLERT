@@ -8,10 +8,10 @@ import logging
 import os
 from pathlib import Path
 
-from jax import Array
-import jax
-import jax.numpy as jnp
-from jax.experimental.sparse import CSR
+from deepert.utils.torch_compat import Array
+from deepert.utils.torch_compat import torch_runtime
+from deepert.utils.torch_compat import jnp
+from deepert.utils.torch_compat import CSR
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
@@ -36,7 +36,7 @@ from deepert.forward.integration import build_inverse_cosine_weights, survey_wav
 from deepert.mesh import Mesh
 from deepert.survey import Survey
 from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE, NP_FLOAT_DTYPE
-from deepert.utils.jax_cache import configure_jax_compilation_cache
+from deepert.utils.jax_cache import configure_torch_jit_cache
 
 _SOURCE_INSET_FACTOR = 0.69
 _VALID_LINEAR_SOLVER_BACKENDS = frozenset({"auto", "cudss", "scipy"})
@@ -46,11 +46,11 @@ _CUDSS_LOGGER = logging.getLogger("deepert.cudss")
 _CUDSS_LOGGER.setLevel(logging.ERROR)
 
 
-def _enable_jax_x64_for_terrain_auxiliary() -> None:
+def _enable_torch_float64_for_terrain_auxiliary() -> None:
     """Enable local terrain auxiliary float64 arrays without changing FLOAT_DTYPE."""
 
-    if not jax.config.jax_enable_x64:
-        jax.config.update("jax_enable_x64", True)
+    if not torch_runtime.config.torch_enable_float64:
+        torch_runtime.config.update("torch_enable_float64", True)
 
 
 def _normalize_cache_dir(cache_dir: str | Path | None) -> Path | None:
@@ -73,6 +73,16 @@ def _update_digest_array(digest: "hashlib._Hash", label: str, values: Array | np
     digest.update(str(array.dtype).encode("utf-8"))
     digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
     digest.update(array.tobytes())
+
+
+def _numpy_dtype(dtype) -> np.dtype:
+    if dtype == jnp.float64:
+        return np.dtype(np.float64)
+    if dtype == jnp.float32:
+        return np.dtype(np.float32)
+    if dtype == jnp.int32:
+        return np.dtype(np.int32)
+    return np.dtype(dtype)
 
 
 @dataclass(frozen=True)
@@ -223,9 +233,9 @@ def _locate_point_cells(mesh: Mesh, points: Array) -> Array:
 def _build_interpolation_matrix(mesh: Mesh, points: Array) -> Array:
     cell_ids, barycentric_weights = mesh.locate_points(points)
     cell_ids_np = np.asarray(cell_ids, dtype=np.int32)
-    weights_np = np.asarray(barycentric_weights, dtype=np.dtype(FLOAT_DTYPE))
+    weights_np = np.asarray(barycentric_weights, dtype=NP_FLOAT_DTYPE)
     cell_nodes = np.asarray(mesh.cells, dtype=np.int32)[cell_ids_np]
-    matrix = np.zeros((points.shape[0], mesh.node_count), dtype=np.dtype(FLOAT_DTYPE))
+    matrix = np.zeros((points.shape[0], mesh.node_count), dtype=NP_FLOAT_DTYPE)
     row_indices = np.repeat(np.arange(points.shape[0], dtype=np.int32), cell_nodes.shape[1])
     np.add.at(matrix, (row_indices, cell_nodes.reshape(-1)), weights_np.reshape(-1))
     return jnp.asarray(matrix, dtype=FLOAT_DTYPE)
@@ -240,7 +250,7 @@ def _build_quadratic_interpolation_matrix(
     """Interpolate points into quadratic triangle DOFs."""
 
     cell_ids, barycentric_weights = geometry_mesh.locate_points(points)
-    barycentric_np = np.asarray(barycentric_weights, dtype=np.dtype(FLOAT_DTYPE))
+    barycentric_np = np.asarray(barycentric_weights, dtype=NP_FLOAT_DTYPE)
     l1 = barycentric_np[:, 0]
     l2 = barycentric_np[:, 1]
     l3 = barycentric_np[:, 2]
@@ -254,9 +264,9 @@ def _build_quadratic_interpolation_matrix(
             4.0 * l3 * l1,
         ),
         axis=-1,
-    ).astype(np.dtype(FLOAT_DTYPE))
+    ).astype(NP_FLOAT_DTYPE)
     cell_dofs = np.asarray(cell_connectivity, dtype=np.int32)[np.asarray(cell_ids, dtype=np.int32)]
-    matrix = np.zeros((points.shape[0], node_count), dtype=np.dtype(FLOAT_DTYPE))
+    matrix = np.zeros((points.shape[0], node_count), dtype=NP_FLOAT_DTYPE)
     row_indices = np.repeat(np.arange(points.shape[0], dtype=np.int32), cell_connectivity.shape[1])
     np.add.at(matrix, (row_indices, cell_dofs.reshape(-1)), shape_values.reshape(-1))
     return jnp.asarray(matrix, dtype=FLOAT_DTYPE)
@@ -865,7 +875,7 @@ def _q2_reference_shape_gradients_np(points: np.ndarray) -> np.ndarray:
 def _build_q2_operator_templates(mesh: StructuredQuadMesh) -> OperatorTemplates:
     """Build serendipity-Q2 field templates on a bilinear quadrilateral geometry."""
 
-    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    dtype = np.float64 if torch_runtime.config.torch_enable_float64 else np.float32
     gauss_points_1d, gauss_weights_1d = np.polynomial.legendre.leggauss(3)
     quadrature_points = np.asarray(
         [[xi, eta] for eta in gauss_points_1d for xi in gauss_points_1d],
@@ -903,11 +913,11 @@ def _build_q2_operator_templates(mesh: StructuredQuadMesh) -> OperatorTemplates:
     ) / 30.0
     boundary_lengths = np.asarray(mesh.boundary_edge_lengths, dtype=dtype)
     boundary_mass = boundary_lengths[:, None, None] * boundary_reference[None, :, :]
-    jax_dtype = jnp.float64 if jax.config.jax_enable_x64 else FLOAT_DTYPE
+    torch_dtype = jnp.float64 if torch_runtime.config.torch_enable_float64 else FLOAT_DTYPE
     return OperatorTemplates(
-        stiffness=jnp.asarray(stiffness, dtype=jax_dtype),
-        mass=jnp.asarray(mass, dtype=jax_dtype),
-        boundary_mass=jnp.asarray(boundary_mass, dtype=jax_dtype),
+        stiffness=jnp.asarray(stiffness, dtype=torch_dtype),
+        mass=jnp.asarray(mass, dtype=torch_dtype),
+        boundary_mass=jnp.asarray(boundary_mass, dtype=torch_dtype),
     )
 
 
@@ -1146,7 +1156,7 @@ def _build_structured_quad_auxiliary_discretization(
     # The terrain-strip H2 mesh keeps these outer boundaries as
     # homogeneous natural boundaries, not mixed/Robin boundaries.
     boundary_geometries = jnp.asarray(
-        np.zeros((wavenumbers.shape[0], geometry_mesh.boundary_edges.shape[0]), dtype=np.dtype(FLOAT_DTYPE)),
+        np.zeros((wavenumbers.shape[0], geometry_mesh.boundary_edges.shape[0]), dtype=NP_FLOAT_DTYPE),
         dtype=FLOAT_DTYPE,
     )
 
@@ -1354,7 +1364,7 @@ class ERTForward2p5D:
     ) -> "ERTForward2p5D":
         """Build the single supported forward configuration."""
 
-        resolved_jit_cache_dir = configure_jax_compilation_cache(jit_cache_dir)
+        resolved_jit_cache_dir = configure_torch_jit_cache(jit_cache_dir)
         routing = build_coo_routing(mesh)
         boundary_routing = build_boundary_routing(mesh)
         source_cell_ids = _locate_point_cells(mesh, survey.electrode_positions)
@@ -1414,7 +1424,7 @@ class ERTForward2p5D:
             not mesh.is_flat_surface and normalized_topographic_geometric_factor_mode == "numerical"
         )
         if use_numerical_primary:
-            _enable_jax_x64_for_terrain_auxiliary()
+            _enable_torch_float64_for_terrain_auxiliary()
 
         primary_auxiliary_discretization = None
         primary_potential_discretization = None
@@ -1503,7 +1513,7 @@ class ERTForward2p5D:
         boundary_inverse = self.operator_pattern.boundary_inverse
         nnz = self.operator_pattern.unique_indices.shape[0]
 
-        @jax.jit
+        @torch_runtime.jit
         def kernel(conductivity: Array, wavenumber_sq: Array, boundary_geometry: Array) -> Array:
             volume_values = conductivity[:, None, None] * (stiffness + wavenumber_sq * mass)
             boundary_values = (
@@ -1533,7 +1543,7 @@ class ERTForward2p5D:
         nnz = self.operator_pattern.unique_indices.shape[0]
         wave_count = int(self.wavenumbers.shape[0])
 
-        @jax.jit
+        @torch_runtime.jit
         def kernel(conductivity: Array) -> Array:
             conductivity_boundary = conductivity[boundary_edge_cells]
             volume_values = conductivity[None, :, None, None] * (
@@ -1559,7 +1569,7 @@ class ERTForward2p5D:
         csr_indices = jnp.asarray(self.operator_pattern.csr_indices, dtype=INT_DTYPE)
         csr_indptr = jnp.asarray(self.operator_pattern.csr_indptr, dtype=INT_DTYPE)
 
-        @jax.jit
+        @torch_runtime.jit
         def kernel(values: Array, vectors: Array) -> Array:
             operator = CSR((values, csr_indices, csr_indptr), shape=shape)
             return (operator @ vectors.T).T
@@ -1581,9 +1591,9 @@ class ERTForward2p5D:
             operator = CSR((values, csr_indices, csr_indptr), shape=shape)
             return (operator @ vectors.T).T
 
-        @jax.jit
+        @torch_runtime.jit
         def kernel(values: Array, vectors: Array) -> Array:
-            return jax.lax.map(apply_single, (values, vectors))
+            return torch_runtime.lax.map(apply_single, (values, vectors))
 
         self._kernel_cache["apply_operator_values_batch"] = kernel
         return kernel
@@ -1625,18 +1635,18 @@ class ERTForward2p5D:
         return fixed
 
     def _auxiliary_float_dtype(self):
-        if self.use_numerical_primary and jax.config.jax_enable_x64:
+        if self.use_numerical_primary and torch_runtime.config.torch_enable_float64:
             return jnp.float64
         return FLOAT_DTYPE
 
-    def _cupy_from_jax(self, values: Array, *, transpose: bool = False, fortran: bool = False, dtype=FLOAT_DTYPE):
+    def _cupy_from_torch(self, values: Array, *, transpose: bool = False, fortran: bool = False, dtype=FLOAT_DTYPE):
         cp, _ = self._cupy_sparse_modules()
         array = values.astype(dtype)
         if transpose:
             array = array.T
 
         if not _array_is_on_cuda(array):
-            raise RuntimeError("JAX arrays must be placed on CUDA/GPU; set JAX_PLATFORMS=cuda")
+            raise RuntimeError("Torch tensors must be placed on CUDA/GPU for zero-copy cuDSS interop")
 
         try:
             cupy_array = cp.from_dlpack(array.__dlpack__())
@@ -1652,20 +1662,20 @@ class ERTForward2p5D:
             self._cudss_state["gpu_zero_copy"] = False
             return cupy_array
 
-    def _jax_from_cupy(self, values, *, dtype=FLOAT_DTYPE):
+    def _torch_from_cupy(self, values, *, dtype=FLOAT_DTYPE):
         cp, _ = self._cupy_sparse_modules()
         values = cp.ascontiguousarray(values)
         cp.cuda.get_current_stream().synchronize()
         if self._cudss_state.get("gpu_zero_copy", False):
-            return jax.dlpack.from_dlpack(values).astype(dtype).copy()
+            return torch_runtime.dlpack.from_dlpack(values).astype(dtype).copy()
         return jnp.asarray(cp.asnumpy(values), dtype=dtype)
 
-    def _jax_batch_rhs_from_cupy(self, values, *, dtype=FLOAT_DTYPE):
+    def _torch_batch_rhs_from_cupy(self, values, *, dtype=FLOAT_DTYPE):
         cp, _ = self._cupy_sparse_modules()
         transposed = cp.ascontiguousarray(values.transpose((0, 2, 1)))
         cp.cuda.get_current_stream().synchronize()
         if self._cudss_state.get("gpu_zero_copy", False):
-            return jax.dlpack.from_dlpack(transposed).astype(dtype).copy()
+            return torch_runtime.dlpack.from_dlpack(transposed).astype(dtype).copy()
         return jnp.asarray(cp.asnumpy(transposed), dtype=dtype)
 
     def _terrain_cache_key(
@@ -1679,9 +1689,9 @@ class ERTForward2p5D:
         digest = hashlib.sha256()
         _update_digest_value(digest, "version", _TERRAIN_AUXILIARY_CACHE_VERSION)
         _update_digest_value(digest, "cache_name", cache_name)
-        _update_digest_value(digest, "jax_enable_x64", bool(jax.config.jax_enable_x64))
-        _update_digest_value(digest, "float_dtype", str(np.dtype(FLOAT_DTYPE)))
-        _update_digest_value(digest, "auxiliary_dtype", str(np.dtype(self._auxiliary_float_dtype())))
+        _update_digest_value(digest, "torch_enable_float64", bool(torch_runtime.config.torch_enable_float64))
+        _update_digest_value(digest, "float_dtype", str(NP_FLOAT_DTYPE))
+        _update_digest_value(digest, "auxiliary_dtype", str(_numpy_dtype(self._auxiliary_float_dtype())))
         _update_digest_value(digest, "numerical_h2_refined", self.numerical_h2_refined)
         _update_digest_value(digest, "numerical_p2_refined", self.numerical_p2_refined)
         _update_digest_value(digest, "topographic_geometric_factor_mode", self.topographic_geometric_factor_mode)
@@ -1728,7 +1738,7 @@ class ERTForward2p5D:
         cache_path = self._terrain_cache_path(cache_key)
         if cache_path is None or not cache_path.exists():
             return None
-        expected_dtype = np.dtype(dtype)
+        expected_dtype = _numpy_dtype(dtype)
         try:
             with np.load(cache_path, allow_pickle=False) as payload:
                 cached = np.asarray(payload["value"])
@@ -1746,7 +1756,7 @@ class ERTForward2p5D:
             return
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            array = np.asarray(jax.block_until_ready(values))
+            array = np.asarray(torch_runtime.block_until_ready(values))
             tmp_path = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.tmp.npz")
             np.savez(tmp_path, value=array)
             tmp_path.replace(cache_path)
@@ -1775,7 +1785,7 @@ class ERTForward2p5D:
             nnz = discretization.operator_pattern.unique_indices.shape[0]
             wave_count = int(self.wavenumbers.shape[0])
 
-            @jax.jit
+            @torch_runtime.jit
             def kernel(model_conductivity: Array) -> Array:
                 model_conductivity = model_conductivity.astype(dtype)
                 discretization_conductivity = model_conductivity[parent_cell_ids]
@@ -1818,9 +1828,9 @@ class ERTForward2p5D:
                 operator = CSR((single_values, csr_indices, csr_indptr), shape=shape)
                 return (operator @ single_vectors.T).T
 
-            @jax.jit
+            @torch_runtime.jit
             def kernel(values_batch: Array, vectors_batch: Array) -> Array:
-                return jax.lax.map(apply_single, (values_batch, vectors_batch))
+                return torch_runtime.lax.map(apply_single, (values_batch, vectors_batch))
 
             self._kernel_cache[cache_key] = kernel
 
@@ -1850,8 +1860,8 @@ class ERTForward2p5D:
         cp, cupy_sparse = self._cupy_sparse_modules()
         solve_dtype = self._auxiliary_float_dtype()
         fixed = self._cupy_csr_fixed_for(operator_pattern, f"{state_prefix}_gpu_fixed")
-        values_cp = self._cupy_from_jax(operator_values, dtype=solve_dtype)
-        rhs_raw_cp = self._cupy_from_jax(rhs, dtype=solve_dtype)
+        values_cp = self._cupy_from_torch(operator_values, dtype=solve_dtype)
+        rhs_raw_cp = self._cupy_from_torch(rhs, dtype=solve_dtype)
 
         matrix_data_key = f"{state_prefix}_matrix_data_batch_gpu"
         matrix_data = self._cudss_state.get(matrix_data_key)
@@ -1913,7 +1923,7 @@ class ERTForward2p5D:
         if factorize:
             solver.factorize()
         solution = solver.solve()
-        return self._jax_batch_rhs_from_cupy(solution, dtype=solve_dtype)
+        return self._torch_batch_rhs_from_cupy(solution, dtype=solve_dtype)
 
     def _solve_scipy_batch_with_pattern(
         self,
@@ -1927,8 +1937,8 @@ class ERTForward2p5D:
         """Solve batched sparse systems with SciPy for CPU-only environments."""
 
         del state_prefix, refactorize
-        values_np = np.asarray(jax.device_get(operator_values), dtype=NP_FLOAT_DTYPE)
-        rhs_np = np.asarray(jax.device_get(rhs), dtype=NP_FLOAT_DTYPE)
+        values_np = np.asarray(torch_runtime.device_get(operator_values), dtype=NP_FLOAT_DTYPE)
+        rhs_np = np.asarray(torch_runtime.device_get(rhs), dtype=NP_FLOAT_DTYPE)
         if values_np.ndim == 1:
             values_np = values_np[None, :]
         if rhs_np.ndim == 2:
@@ -2258,7 +2268,7 @@ class ERTForward2p5D:
         source_node_ids = self.source_node_ids
         source_cell_ids = self.source_cell_ids
 
-        @jax.jit
+        @torch_runtime.jit
         def kernel(conductivity: Array) -> Array:
             log_resistivity = -jnp.log(conductivity)
             node_log_rho = jnp.einsum("ec,c->e", node_cell_weights, log_resistivity) / node_cell_counts
@@ -2278,7 +2288,7 @@ class ERTForward2p5D:
         csr_indices = jnp.asarray(self.operator_pattern.csr_indices, dtype=INT_DTYPE)
         csr_indptr = jnp.asarray(self.operator_pattern.csr_indptr, dtype=INT_DTYPE)
 
-        @jax.jit
+        @torch_runtime.jit
         def kernel(operator_values: Array, unit_primary: Array, source_resistivities: Array, reference_rhs: Array):
             operator = CSR((operator_values, csr_indices, csr_indptr), shape=shape)
             primary = unit_primary * source_resistivities[:, None]
@@ -2296,7 +2306,7 @@ class ERTForward2p5D:
 
         apply_batch = self._apply_operator_values_batch_kernel()
 
-        @jax.jit
+        @torch_runtime.jit
         def kernel(
             operator_values: Array,
             unit_primary: Array,
@@ -2321,8 +2331,8 @@ class ERTForward2p5D:
 
         cp, cupy_sparse = self._cupy_sparse_modules()
         fixed = self._cupy_csr_fixed()
-        values_cp = self._cupy_from_jax(operator_values)
-        rhs_cp = self._cupy_from_jax(rhs, transpose=True, fortran=True)
+        values_cp = self._cupy_from_torch(operator_values)
+        rhs_cp = self._cupy_from_torch(rhs, transpose=True, fortran=True)
 
         matrix_data = self._cudss_state.get("matrix_data_gpu")
         if matrix_data is None:
@@ -2357,7 +2367,7 @@ class ERTForward2p5D:
         if self._cudss_state.get("gpu_zero_copy", False):
             solution_transposed = cp.ascontiguousarray(solution.T)
             cp.cuda.get_current_stream().synchronize()
-            return jax.dlpack.from_dlpack(solution_transposed).astype(FLOAT_DTYPE).copy()
+            return torch_runtime.dlpack.from_dlpack(solution_transposed).astype(FLOAT_DTYPE).copy()
         return jnp.asarray(cp.asnumpy(solution.T), dtype=FLOAT_DTYPE)
 
     def _solve_cudss_batch(self, operator_values: Array, rhs: Array) -> Array:
@@ -2370,8 +2380,8 @@ class ERTForward2p5D:
 
         cp, cupy_sparse = self._cupy_sparse_modules()
         fixed = self._cupy_csr_fixed()
-        values_cp = self._cupy_from_jax(operator_values)
-        rhs_raw_cp = self._cupy_from_jax(rhs)
+        values_cp = self._cupy_from_torch(operator_values)
+        rhs_raw_cp = self._cupy_from_torch(rhs)
 
         matrix_data = self._cudss_state.get("matrix_data_batch_gpu")
         if matrix_data is None:
@@ -2417,7 +2427,7 @@ class ERTForward2p5D:
 
         solver.factorize()
         solution = solver.solve()
-        return self._jax_batch_rhs_from_cupy(solution)
+        return self._torch_batch_rhs_from_cupy(solution)
 
     def _solve_linear_system(self, operator_values: Array, rhs: Array) -> Array:
         if self.linear_solver_backend == "scipy":
@@ -2689,7 +2699,7 @@ class ERTForward2p5D:
             volume_templates.dtype
         )
 
-        @jax.jit
+        @torch_runtime.jit
         def kernel(
             phi_stack: Array,
             current_positive: Array,
@@ -2801,7 +2811,7 @@ class ERTForward2p5D:
         if np.any(active_parameter_ids >= resolved_parameter_count):
             raise ValueError("sensitivity_cell_parameter_ids contain ids outside sensitivity_parameter_count")
 
-        active_cell_ids_jax = jnp.asarray(active_cell_ids, dtype=INT_DTYPE)
+        active_cell_ids_torch = jnp.asarray(active_cell_ids, dtype=INT_DTYPE)
         digest = hashlib.sha256()
         _update_digest_value(digest, "parameter_count", resolved_parameter_count)
         _update_digest_array(digest, "cell_parameter_ids", cell_parameter_ids)
@@ -2809,10 +2819,10 @@ class ERTForward2p5D:
             f"{cache_key}_param_{resolved_parameter_count}_{active_cell_ids.size}_{digest.hexdigest()[:16]}"
         )
         return (
-            jnp.take(cell_connectivity, active_cell_ids_jax, axis=0),
+            jnp.take(cell_connectivity, active_cell_ids_torch, axis=0),
             jnp.asarray(active_parameter_ids, dtype=INT_DTYPE),
             resolved_parameter_count,
-            jnp.take(volume_templates, active_cell_ids_jax, axis=1),
+            jnp.take(volume_templates, active_cell_ids_torch, axis=1),
             parameterized_cache_key,
         )
 
@@ -3077,7 +3087,7 @@ class ERTForward2p5D:
         resistance: Array,
     ) -> None:
         try:
-            conductivity_host = np.asarray(jax.block_until_ready(conductivity))
+            conductivity_host = np.asarray(torch_runtime.block_until_ready(conductivity))
         except Exception:
             return
         self._derived_cache["prepared_response_conductivity_host"] = conductivity_host
@@ -3099,7 +3109,7 @@ class ERTForward2p5D:
             return None
 
         try:
-            candidate = np.asarray(jax.block_until_ready(conductivity))
+            candidate = np.asarray(torch_runtime.block_until_ready(conductivity))
         except Exception:
             return None
         if candidate.shape != conductivity_host.shape or not np.array_equal(candidate, conductivity_host):
@@ -3113,7 +3123,7 @@ class ERTForward2p5D:
         total_fields: Array,
     ) -> None:
         try:
-            conductivity_host = np.asarray(jax.block_until_ready(conductivity))
+            conductivity_host = np.asarray(torch_runtime.block_until_ready(conductivity))
         except Exception:
             return
         self._derived_cache["prepared_total_fields_conductivity_host"] = conductivity_host
@@ -3128,7 +3138,7 @@ class ERTForward2p5D:
             return None
 
         try:
-            candidate = np.asarray(jax.block_until_ready(conductivity))
+            candidate = np.asarray(torch_runtime.block_until_ready(conductivity))
         except Exception:
             return None
         if candidate.shape != conductivity_host.shape or not np.array_equal(candidate, conductivity_host):
@@ -3464,8 +3474,8 @@ class ERTForward2p5D:
                 cache_key="primary_auxiliary_current_receiver_matrix",
             )
             geometric_factors = self._geometric_factors()
-            jax.block_until_ready((operator_values, unit_primary, source_resistivities, op_primary, rhs))
-            jax.block_until_ready(geometric_factors)
+            torch_runtime.block_until_ready((operator_values, unit_primary, source_resistivities, op_primary, rhs))
+            torch_runtime.block_until_ready(geometric_factors)
             if include_solver_state:
                 prepared = self._solve_batch_with_pattern(
                     discretization.operator_pattern,
@@ -3478,8 +3488,8 @@ class ERTForward2p5D:
                 electrode_potentials = integrated_potentials @ discretization.electrode_matrix.T
                 resistance = self._auxiliary_resistance_from_integrated(discretization, integrated_potentials)
                 apparent_resistivity = jnp.abs(geometric_factors) * resistance
-                jax.block_until_ready((prepared, integrated_potentials, electrode_potentials, resistance, apparent_resistivity))
-                total_fields = jax.block_until_ready(total_fields)
+                torch_runtime.block_until_ready((prepared, integrated_potentials, electrode_potentials, resistance, apparent_resistivity))
+                total_fields = torch_runtime.block_until_ready(total_fields)
                 self._store_prepared_total_fields(solve_conductivity, operator_values, total_fields)
                 self._store_prepared_measurement_response(
                     solve_conductivity,
@@ -3500,8 +3510,8 @@ class ERTForward2p5D:
         self._measurement_receiver_matrix()
         self._current_receiver_matrix()
         geometric_factors = self._geometric_factors()
-        jax.block_until_ready((operator_values, source_resistivities, rhs, primary))
-        jax.block_until_ready(geometric_factors)
+        torch_runtime.block_until_ready((operator_values, source_resistivities, rhs, primary))
+        torch_runtime.block_until_ready(geometric_factors)
         if include_solver_state:
             prepared = self._solve_linear_system_batch(operator_values, rhs)
             total_fields = prepared + primary
@@ -3509,8 +3519,8 @@ class ERTForward2p5D:
             electrode_potentials = integrated_potentials @ self.electrode_matrix.T
             resistance = self._native_resistance_from_integrated(integrated_potentials)
             apparent_resistivity = jnp.abs(geometric_factors) * resistance
-            jax.block_until_ready((prepared, integrated_potentials, electrode_potentials, resistance, apparent_resistivity))
-            total_fields = jax.block_until_ready(total_fields)
+            torch_runtime.block_until_ready((prepared, integrated_potentials, electrode_potentials, resistance, apparent_resistivity))
+            total_fields = torch_runtime.block_until_ready(total_fields)
             self._store_prepared_total_fields(solve_conductivity, operator_values, total_fields)
             self._store_prepared_measurement_response(
                 solve_conductivity,

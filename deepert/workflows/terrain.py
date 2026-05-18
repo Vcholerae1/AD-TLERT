@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-import jax.numpy as jnp
+from deepert.utils.torch_compat import jnp
 import numpy as np
 
 from deepert.forward import ERTForward2p5D
@@ -1073,7 +1073,7 @@ def run_terrain_forward_series(
 ) -> tuple[list[TerrainForwardRecord], list[TerrainForwardRecord]]:
     """Run a sequential terrain-forward series and return ``(manifest, failures)``.
 
-    The terrain mesh, survey, sparse pattern, auxiliary discretization, JAX
+    The terrain mesh, survey, sparse pattern, auxiliary discretization, Torch
     kernels, and auxiliary-field caches are reused across successful timesteps
     with the same y-index. cuDSS symbolic/plan/buffer state is also reused by
     default; if that fast path returns invalid apparent resistivities, the
