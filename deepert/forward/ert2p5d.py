@@ -16,6 +16,7 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 from scipy.special import k0 as besselk0
+import torch
 
 from deepert.fem import (
     build_boundary_routing,
@@ -2705,6 +2706,228 @@ class ERTForward2p5D:
         weighted_templates = (self.weights.astype(volume_templates.dtype)[:, None, None, None] * volume_templates).astype(
             volume_templates.dtype
         )
+        cell_count = int(cell_connectivity.shape[0])
+        nodes_per_cell = int(cell_connectivity.shape[1])
+        tensor_cache: dict[str, tuple[Array, Array, Array]] = {}
+        cupy_tensor_cache: dict[str, tuple[object, object, object]] = {}
+        cupy_kernel_cache: dict[str, object] = {}
+        cupy_disabled = False
+
+        def cached_tensors(device: torch.device) -> tuple[Array, Array, Array]:
+            key = str(device)
+            cached = tensor_cache.get(key)
+            if cached is None:
+                cached = (
+                    cell_connectivity.reshape(-1).to(device=device, dtype=torch.long),
+                    parent_cell_ids.to(device=device, dtype=torch.long),
+                    weighted_templates.to(device=device),
+                )
+                tensor_cache[key] = cached
+            return cached
+
+        def torch_to_cupy(array: Array):
+            cp, _ = self._cupy_sparse_modules()
+            contiguous = array.contiguous()
+            if contiguous.is_cuda:
+                return cp.from_dlpack(contiguous.__dlpack__())
+            return cp.asarray(np.asarray(contiguous))
+
+        def cached_cupy_tensors(dtype: torch.dtype):
+            cp, _ = self._cupy_sparse_modules()
+            key = str(dtype)
+            cached = cupy_tensor_cache.get(key)
+            if cached is None:
+                cp_dtype = cp.float64 if dtype == torch.float64 else cp.float32
+                cached = (
+                    cp.asarray(np.asarray(cell_connectivity.reshape(-1), dtype=np.int32)),
+                    cp.asarray(np.asarray(parent_cell_ids, dtype=np.int32)),
+                    cp.asarray(
+                        np.asarray(
+                            weighted_templates,
+                            dtype=np.float64 if dtype == torch.float64 else np.float32,
+                        ),
+                        dtype=cp_dtype,
+                    ),
+                )
+                cupy_tensor_cache[key] = cached
+            return cached
+
+        def cupy_raw_kernel(dtype: torch.dtype):
+            cp, _ = self._cupy_sparse_modules()
+            key = "f64" if dtype == torch.float64 else "f32"
+            kernel = cupy_kernel_cache.get(key)
+            if kernel is not None:
+                return kernel
+            scalar_type = "double" if dtype == torch.float64 else "float"
+            kernel_name = f"normal_sensitivity_{key}"
+            source = f"""
+            extern "C" __global__
+            void {kernel_name}(
+                const {scalar_type}* __restrict__ phi,
+                const int* __restrict__ current_positive,
+                const int* __restrict__ current_negative,
+                const int* __restrict__ receiver_positive,
+                const int* __restrict__ receiver_negative,
+                const int* __restrict__ cell_connectivity,
+                const int* __restrict__ parent_cell_ids,
+                const {scalar_type}* __restrict__ weighted_templates,
+                {scalar_type}* __restrict__ gradient,
+                const int wavenumber_count,
+                const int source_count,
+                const int node_count,
+                const int measurement_count,
+                const int cell_count,
+                const int parameter_count
+            ) {{
+                const int linear_id = blockIdx.x * blockDim.x + threadIdx.x;
+                const int total = measurement_count * cell_count;
+                if (linear_id >= total) {{
+                    return;
+                }}
+
+                const int cell_id = linear_id % cell_count;
+                const int measurement_id = linear_id / cell_count;
+                const int parameter_id = parent_cell_ids[cell_id];
+                if (parameter_id < 0 || parameter_id >= parameter_count) {{
+                    return;
+                }}
+
+                const int current_p = current_positive[measurement_id];
+                const int current_n = current_negative[measurement_id];
+                const int receiver_p = receiver_positive[measurement_id];
+                const int receiver_n = receiver_negative[measurement_id];
+                const int n0 = cell_connectivity[cell_id * 3 + 0];
+                const int n1 = cell_connectivity[cell_id * 3 + 1];
+                const int n2 = cell_connectivity[cell_id * 3 + 2];
+                const int nodes[3] = {{n0, n1, n2}};
+
+                {scalar_type} total_value = ({scalar_type})0;
+                for (int wavenumber_id = 0; wavenumber_id < wavenumber_count; ++wavenumber_id) {{
+                    const long long phi_base = (long long)wavenumber_id * source_count * node_count;
+                    const long long template_base = ((long long)wavenumber_id * cell_count + cell_id) * 9;
+                    {scalar_type} current_values[3];
+                    {scalar_type} receiver_values[3];
+                    for (int local_id = 0; local_id < 3; ++local_id) {{
+                        const int node_id = nodes[local_id];
+                        const {scalar_type} current_pos_value =
+                            current_p >= 0 ? phi[phi_base + (long long)current_p * node_count + node_id] : ({scalar_type})0;
+                        const {scalar_type} current_neg_value =
+                            current_n >= 0 ? phi[phi_base + (long long)current_n * node_count + node_id] : ({scalar_type})0;
+                        const {scalar_type} receiver_pos_value =
+                            receiver_p >= 0 ? phi[phi_base + (long long)receiver_p * node_count + node_id] : ({scalar_type})0;
+                        const {scalar_type} receiver_neg_value =
+                            receiver_n >= 0 ? phi[phi_base + (long long)receiver_n * node_count + node_id] : ({scalar_type})0;
+                        current_values[local_id] = current_pos_value - current_neg_value;
+                        receiver_values[local_id] = receiver_pos_value - receiver_neg_value;
+                    }}
+                    for (int i = 0; i < 3; ++i) {{
+                        for (int j = 0; j < 3; ++j) {{
+                            total_value += receiver_values[i] * weighted_templates[template_base + i * 3 + j] * current_values[j];
+                        }}
+                    }}
+                }}
+
+                atomicAdd(gradient + (long long)measurement_id * parameter_count + parameter_id, -total_value);
+            }}
+            """
+            kernel = cp.RawKernel(source, kernel_name)
+            cupy_kernel_cache[key] = kernel
+            return kernel
+
+        def compute_cupy(
+            phi_stack: Array,
+            current_positive: Array,
+            current_negative: Array,
+            receiver_positive: Array,
+            receiver_negative: Array,
+        ) -> Array | None:
+            # Avoid Torch eager materializing W x B x C x 3 field blocks for the common triangular-cell path.
+            nonlocal cupy_disabled
+            if cupy_disabled or nodes_per_cell != 3 or not torch.cuda.is_available():
+                return None
+            try:
+                cp, _ = self._cupy_sparse_modules()
+                solve_dtype = phi_stack.dtype
+                if solve_dtype not in (torch.float32, torch.float64):
+                    return None
+                compute_device = phi_stack.device if phi_stack.is_cuda else torch.device("cuda")
+                phi_work = phi_stack.to(device=compute_device, dtype=solve_dtype).contiguous()
+                current_positive_work = current_positive.to(device=compute_device, dtype=torch.int32).contiguous()
+                current_negative_work = current_negative.to(device=compute_device, dtype=torch.int32).contiguous()
+                receiver_positive_work = receiver_positive.to(device=compute_device, dtype=torch.int32).contiguous()
+                receiver_negative_work = receiver_negative.to(device=compute_device, dtype=torch.int32).contiguous()
+                phi_cp = torch_to_cupy(phi_work)
+                current_positive_cp = torch_to_cupy(current_positive_work)
+                current_negative_cp = torch_to_cupy(current_negative_work)
+                receiver_positive_cp = torch_to_cupy(receiver_positive_work)
+                receiver_negative_cp = torch_to_cupy(receiver_negative_work)
+                cell_connectivity_cp, parent_cell_ids_cp, weighted_templates_cp = cached_cupy_tensors(solve_dtype)
+                cp_dtype = cp.float64 if solve_dtype == torch.float64 else cp.float32
+                gradient_cp = cp.zeros((int(current_positive.shape[0]), parameter_count), dtype=cp_dtype)
+                kernel = cupy_raw_kernel(solve_dtype)
+                total_threads = int(current_positive.shape[0]) * cell_count
+                threads_per_block = 256
+                blocks = (total_threads + threads_per_block - 1) // threads_per_block
+                kernel(
+                    (blocks,),
+                    (threads_per_block,),
+                    (
+                        phi_cp,
+                        current_positive_cp,
+                        current_negative_cp,
+                        receiver_positive_cp,
+                        receiver_negative_cp,
+                        cell_connectivity_cp,
+                        parent_cell_ids_cp,
+                        weighted_templates_cp,
+                        gradient_cp,
+                        int(phi_stack.shape[0]),
+                        int(phi_stack.shape[1]),
+                        int(phi_stack.shape[2]),
+                        int(current_positive.shape[0]),
+                        cell_count,
+                        parameter_count,
+                    ),
+                )
+                if phi_stack.is_cuda:
+                    return torch_runtime.dlpack.from_dlpack(gradient_cp).to(dtype=solve_dtype).clone()
+                return jnp.asarray(cp.asnumpy(gradient_cp), dtype=solve_dtype)
+            except Exception:
+                cupy_disabled = True
+                return None
+
+        def compute(
+            phi_stack: Array,
+            current_positive: Array,
+            current_negative: Array,
+            receiver_positive: Array,
+            receiver_negative: Array,
+            flat_cell_connectivity_work: Array,
+            parent_cell_ids_work: Array,
+            weighted_templates_work: Array,
+        ) -> Array:
+            def source_difference(positive: Array, negative: Array) -> Array:
+                positive_values = torch.index_select(phi_stack, 1, positive.to(device=phi_stack.device, dtype=torch.long))
+                negative_values = torch.index_select(phi_stack, 1, negative.to(device=phi_stack.device, dtype=torch.long))
+                return positive_values - negative_values
+
+            current_fields = source_difference(current_positive, current_negative)
+            receiver_fields = source_difference(receiver_positive, receiver_negative)
+            local_shape = (int(phi_stack.shape[0]), int(current_fields.shape[1]), cell_count, nodes_per_cell)
+            current_local = torch.index_select(current_fields, 2, flat_cell_connectivity_work).reshape(local_shape)
+            receiver_local = torch.index_select(receiver_fields, 2, flat_cell_connectivity_work).reshape(local_shape)
+            auxiliary_gradient = -jnp.einsum(
+                "wbci,wcij,wbcj->bc",
+                receiver_local,
+                weighted_templates_work,
+                current_local,
+            )
+            gradient = torch.zeros(
+                (current_positive.shape[0], parameter_count),
+                dtype=auxiliary_gradient.dtype,
+                device=phi_stack.device,
+            )
+            return gradient.index_add_(1, parent_cell_ids_work, auxiliary_gradient)
 
         @torch_runtime.jit
         def kernel(
@@ -2714,27 +2937,35 @@ class ERTForward2p5D:
             receiver_positive: Array,
             receiver_negative: Array,
         ) -> Array:
-            def source_difference(positive: Array, negative: Array) -> Array:
-                safe_positive = jnp.maximum(positive, 0)
-                safe_negative = jnp.maximum(negative, 0)
-                positive_values = phi_stack[:, safe_positive, :]
-                negative_values = phi_stack[:, safe_negative, :]
-                positive_values = jnp.where(positive[None, :, None] >= 0, positive_values, 0.0)
-                negative_values = jnp.where(negative[None, :, None] >= 0, negative_values, 0.0)
-                return positive_values - negative_values
-
-            current_fields = source_difference(current_positive, current_negative)
-            receiver_fields = source_difference(receiver_positive, receiver_negative)
-            current_local = current_fields[:, :, cell_connectivity]
-            receiver_local = receiver_fields[:, :, cell_connectivity]
-            auxiliary_gradient = -jnp.einsum(
-                "wbci,wcij,wbcj->bc",
-                receiver_local,
-                weighted_templates,
-                current_local,
+            cupy_result = compute_cupy(
+                phi_stack,
+                current_positive,
+                current_negative,
+                receiver_positive,
+                receiver_negative,
             )
-            gradient = jnp.zeros((current_positive.shape[0], parameter_count), dtype=auxiliary_gradient.dtype)
-            return gradient.at[:, parent_cell_ids].add(auxiliary_gradient)
+            if cupy_result is not None:
+                return cupy_result
+            compute_device = phi_stack.device
+            if not phi_stack.is_cuda and torch.cuda.is_available():
+                compute_device = torch.device("cuda")
+                phi_stack_work = phi_stack.to(device=compute_device)
+            else:
+                phi_stack_work = phi_stack
+            flat_cell_connectivity_work, parent_cell_ids_work, weighted_templates_work = cached_tensors(compute_device)
+            result = compute(
+                phi_stack_work,
+                current_positive.to(device=compute_device),
+                current_negative.to(device=compute_device),
+                receiver_positive.to(device=compute_device),
+                receiver_negative.to(device=compute_device),
+                flat_cell_connectivity_work,
+                parent_cell_ids_work,
+                weighted_templates_work,
+            )
+            if result.device != phi_stack.device:
+                return result.cpu()
+            return result
 
         self._kernel_cache[cache_key] = kernel
         return kernel
@@ -2765,11 +2996,6 @@ class ERTForward2p5D:
         for start in range(0, int(self.survey.measurement_count), batch_size):
             stop = min(start + batch_size, int(self.survey.measurement_count))
             chunk = measurements[start:stop]
-            chunk_size = int(chunk.shape[0])
-            if chunk_size < batch_size:
-                padding = np.full((batch_size - chunk_size, 4), -1, dtype=np.int32)
-                chunk = np.concatenate((chunk, padding), axis=0)
-
             gradient_rows = kernel(
                 phi_stack,
                 jnp.asarray(chunk[:, 0], dtype=INT_DTYPE),
@@ -2777,7 +3003,7 @@ class ERTForward2p5D:
                 jnp.asarray(chunk[:, 2], dtype=INT_DTYPE),
                 jnp.asarray(chunk[:, 3], dtype=INT_DTYPE),
             )
-            rows.append(gradient_rows[:chunk_size])
+            rows.append(gradient_rows)
 
         return jnp.concatenate(rows, axis=0)
 

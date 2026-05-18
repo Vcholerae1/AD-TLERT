@@ -396,7 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--regularization-mode", choices=("model", "update"), default="model")
     parser.add_argument("--linearized-solver", choices=("lsqr", "pyhydro_cgls", "normal_cg"), default="lsqr")
     parser.add_argument("--relative-error", type=float, default=0.05)
-    parser.add_argument("--max-iterations", type=int, default=15)
+    parser.add_argument("--max-iterations", type=int, default=4)
     parser.add_argument("--model-min", type=float, default=0.001)
     parser.add_argument("--model-max", type=float, default=1.0e4)
     parser.add_argument("--max-log-step", type=float, default=None)

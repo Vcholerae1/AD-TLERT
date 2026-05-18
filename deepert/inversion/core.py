@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+import time
 from typing import Any
 
 from deepert.utils.torch_compat import jnp
@@ -1680,6 +1681,7 @@ def invert_windowed_timelapse_log_resistivity(
             start=start,
             end=end,
         )
+        window_start_time = time.perf_counter()
         window_result = invert_timelapse_log_resistivity(
             forward,
             observed_log[start:end],
@@ -1692,6 +1694,7 @@ def invert_windowed_timelapse_log_resistivity(
             _forward_jacobian_cache=forward_jacobian_cache,
             _forward_jacobian_cache_max_entries=forward_jacobian_cache_entries,
         )
+        window_elapsed_sec = time.perf_counter() - window_start_time
         for local_index in range(window_result.final_log_models.shape[1]):
             global_index = start + local_index
             contributions[global_index].append(window_result.final_log_models[:, local_index])
@@ -1705,6 +1708,8 @@ def invert_windowed_timelapse_log_resistivity(
                 "start_idx": int(start),
                 "end_idx": int(end - 1),
                 "final_chi2_data": final_chi2,
+                "iterations": int(len(window_result.iteration_chi2)),
+                "elapsed_sec": float(window_elapsed_sec),
             }
         )
         _emit_progress(
