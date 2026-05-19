@@ -6,8 +6,8 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import roots_laguerre, roots_legendre
 
-from deepert.utils.torch_compat import Array
-from deepert.utils.torch_compat import jnp
+from deepert.utils.torch_runtime import Array
+from deepert.utils.torch_runtime import torch_np
 
 from deepert.survey import Survey
 from deepert.utils.dtypes import FLOAT_DTYPE
@@ -51,6 +51,6 @@ def build_inverse_cosine_weights(r_min: float, r_max: float) -> CosineTransformW
     w_lag = k0 * np.exp(laguerre_points) * laguerre_weights / np.pi
 
     return CosineTransformWeights(
-        wavenumbers=jnp.asarray(np.concatenate((k_leg, k_lag)), dtype=FLOAT_DTYPE),
-        weights=jnp.asarray(np.concatenate((w_leg, w_lag)), dtype=FLOAT_DTYPE),
+        wavenumbers=torch_np.asarray(np.concatenate((k_leg, k_lag)), dtype=FLOAT_DTYPE),
+        weights=torch_np.asarray(np.concatenate((w_leg, w_lag)), dtype=FLOAT_DTYPE),
     )

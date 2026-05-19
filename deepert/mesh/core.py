@@ -7,8 +7,8 @@ import heapq
 from pathlib import Path
 import numpy as np
 
-from deepert.utils.torch_compat import Array
-from deepert.utils.torch_compat import jnp
+from deepert.utils.torch_runtime import Array
+from deepert.utils.torch_runtime import torch_np
 import meshio
 
 from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE, NP_FLOAT_DTYPE
@@ -23,7 +23,7 @@ def triangle_areas(nodes: Array, cells: Array) -> Array:
     edge_1 = cell_nodes[:, 1] - cell_nodes[:, 0]
     edge_2 = cell_nodes[:, 2] - cell_nodes[:, 0]
     cross = edge_1[:, 0] * edge_2[:, 1] - edge_1[:, 1] * edge_2[:, 0]
-    return jnp.asarray(0.5 * np.abs(cross), dtype=FLOAT_DTYPE)
+    return torch_np.asarray(0.5 * np.abs(cross), dtype=FLOAT_DTYPE)
 
 
 def cell_areas_2d(nodes: Array, cells: Array) -> Array:
@@ -40,7 +40,7 @@ def cell_areas_2d(nodes: Array, cells: Array) -> Array:
         x_values * np.roll(y_values, -1, axis=1) - np.roll(x_values, -1, axis=1) * y_values,
         axis=1,
     )
-    return jnp.asarray(0.5 * np.abs(cross_sum), dtype=FLOAT_DTYPE)
+    return torch_np.asarray(0.5 * np.abs(cross_sum), dtype=FLOAT_DTYPE)
 
 
 def _cell_edge_pairs(cell_width: int) -> tuple[tuple[int, int], ...]:
@@ -54,11 +54,11 @@ def _cell_edge_pairs(cell_width: int) -> tuple[tuple[int, int], ...]:
 def extract_boundary_edges(cells: Array) -> Array:
     """Return edges that belong to exactly one 2D cell."""
 
-    cell_array = jnp.asarray(cells, dtype=INT_DTYPE)
+    cell_array = torch_np.asarray(cells, dtype=INT_DTYPE)
     edge_slices = [cell_array[:, [start, stop]] for start, stop in _cell_edge_pairs(int(cell_array.shape[1]))]
-    edges = jnp.concatenate(edge_slices, axis=0)
-    edges = jnp.sort(edges, axis=1)
-    unique_edges, counts = jnp.unique(edges, axis=0, return_counts=True)
+    edges = torch_np.concatenate(edge_slices, axis=0)
+    edges = torch_np.sort(edges, axis=1)
+    unique_edges, counts = torch_np.unique(edges, axis=0, return_counts=True)
     return unique_edges[counts == 1]
 
 
@@ -84,8 +84,8 @@ def _boundary_topology(cells: Array) -> tuple[Array, Array]:
     boundary_edges = [boundary_edges[idx] for idx in order]
     boundary_cells = [boundary_cells[idx] for idx in order]
     return (
-        jnp.asarray(boundary_edges, dtype=INT_DTYPE),
-        jnp.asarray(boundary_cells, dtype=INT_DTYPE),
+        torch_np.asarray(boundary_edges, dtype=INT_DTYPE),
+        torch_np.asarray(boundary_cells, dtype=INT_DTYPE),
     )
 
 
@@ -117,9 +117,9 @@ def _boundary_geometry(
     signs = np.where(orientation >= 0.0, 1.0, -1.0).astype(NP_FLOAT_DTYPE)
     normals = candidate_normals * signs[:, None]
     return (
-        jnp.asarray(centers, dtype=FLOAT_DTYPE),
-        jnp.asarray(lengths, dtype=FLOAT_DTYPE),
-        jnp.asarray(normals, dtype=FLOAT_DTYPE),
+        torch_np.asarray(centers, dtype=FLOAT_DTYPE),
+        torch_np.asarray(lengths, dtype=FLOAT_DTYPE),
+        torch_np.asarray(normals, dtype=FLOAT_DTYPE),
     )
 
 
@@ -205,11 +205,11 @@ def _surface_topology(
         reference_level = float(np.mean(surface_nodes[:, 1]))
 
     return (
-        jnp.asarray(surface_node_ids, dtype=INT_DTYPE),
-        jnp.asarray(surface_edge_mask, dtype=bool),
-        jnp.asarray(surface_nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(reference_level, dtype=FLOAT_DTYPE),
-        jnp.asarray(flat_surface, dtype=bool),
+        torch_np.asarray(surface_node_ids, dtype=INT_DTYPE),
+        torch_np.asarray(surface_edge_mask, dtype=bool),
+        torch_np.asarray(surface_nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(reference_level, dtype=FLOAT_DTYPE),
+        torch_np.asarray(flat_surface, dtype=bool),
     )
 
 
@@ -243,11 +243,11 @@ def _surface_topology_from_node_path(
         reference_level = float(np.mean(surface_nodes[:, 1]))
 
     return (
-        jnp.asarray(surface_node_ids_np, dtype=INT_DTYPE),
-        jnp.asarray(surface_edge_mask, dtype=bool),
-        jnp.asarray(surface_nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(reference_level, dtype=FLOAT_DTYPE),
-        jnp.asarray(flat_surface, dtype=bool),
+        torch_np.asarray(surface_node_ids_np, dtype=INT_DTYPE),
+        torch_np.asarray(surface_edge_mask, dtype=bool),
+        torch_np.asarray(surface_nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(reference_level, dtype=FLOAT_DTYPE),
+        torch_np.asarray(flat_surface, dtype=bool),
     )
 
 
@@ -292,8 +292,8 @@ def locate_points_in_triangles(
         raise ValueError("some points could not be located in the mesh")
 
     return (
-        jnp.asarray(cell_ids, dtype=INT_DTYPE),
-        jnp.asarray(weights, dtype=FLOAT_DTYPE),
+        torch_np.asarray(cell_ids, dtype=INT_DTYPE),
+        torch_np.asarray(weights, dtype=FLOAT_DTYPE),
     )
 
 
@@ -422,8 +422,8 @@ def locate_points_in_quadrilaterals(
         raise ValueError("some points could not be located in the mesh")
 
     return (
-        jnp.asarray(cell_ids, dtype=INT_DTYPE),
-        jnp.asarray(weights, dtype=FLOAT_DTYPE),
+        torch_np.asarray(cell_ids, dtype=INT_DTYPE),
+        torch_np.asarray(weights, dtype=FLOAT_DTYPE),
     )
 
 
@@ -464,9 +464,9 @@ def refine_triangle_mesh(nodes: Array, cells: Array) -> tuple[Array, Array, Arra
         parent_cells.extend([parent_id] * 4)
 
     return (
-        jnp.asarray(refined_nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(refined_cells, dtype=INT_DTYPE),
-        jnp.asarray(parent_cells, dtype=INT_DTYPE),
+        torch_np.asarray(refined_nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(refined_cells, dtype=INT_DTYPE),
+        torch_np.asarray(parent_cells, dtype=INT_DTYPE),
         edge_midpoints,
     )
 
@@ -503,11 +503,11 @@ def insert_surface_points_into_triangle_mesh(
 
     if points_np.shape[0] == 0 or surface_node_ids_np.shape[0] < 2:
         return (
-            jnp.asarray(nodes_np, dtype=FLOAT_DTYPE),
-            jnp.asarray(cells_np, dtype=INT_DTYPE),
-            jnp.arange(cells_np.shape[0], dtype=INT_DTYPE),
-            jnp.empty((0,), dtype=INT_DTYPE),
-            jnp.asarray(surface_node_ids_np, dtype=INT_DTYPE),
+            torch_np.asarray(nodes_np, dtype=FLOAT_DTYPE),
+            torch_np.asarray(cells_np, dtype=INT_DTYPE),
+            torch_np.arange(cells_np.shape[0], dtype=INT_DTYPE),
+            torch_np.empty((0,), dtype=INT_DTYPE),
+            torch_np.asarray(surface_node_ids_np, dtype=INT_DTYPE),
         )
 
     boundary_cell_by_edge = {
@@ -560,11 +560,11 @@ def insert_surface_points_into_triangle_mesh(
 
     if not segment_points:
         return (
-            jnp.asarray(nodes_np, dtype=FLOAT_DTYPE),
-            jnp.asarray(cells_np, dtype=INT_DTYPE),
-            jnp.arange(cells_np.shape[0], dtype=INT_DTYPE),
-            jnp.asarray(point_node_ids, dtype=INT_DTYPE),
-            jnp.asarray(surface_node_ids_np, dtype=INT_DTYPE),
+            torch_np.asarray(nodes_np, dtype=FLOAT_DTYPE),
+            torch_np.asarray(cells_np, dtype=INT_DTYPE),
+            torch_np.arange(cells_np.shape[0], dtype=INT_DTYPE),
+            torch_np.asarray(point_node_ids, dtype=INT_DTYPE),
+            torch_np.asarray(surface_node_ids_np, dtype=INT_DTYPE),
         )
 
     refined_nodes = nodes_np.tolist()
@@ -627,11 +627,11 @@ def insert_surface_points_into_triangle_mesh(
         refined_surface_node_ids.append(int(stop_node))
 
     return (
-        jnp.asarray(refined_nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(refined_cells, dtype=INT_DTYPE),
-        jnp.asarray(parent_cells, dtype=INT_DTYPE),
-        jnp.asarray(point_node_ids, dtype=INT_DTYPE),
-        jnp.asarray(refined_surface_node_ids, dtype=INT_DTYPE),
+        torch_np.asarray(refined_nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(refined_cells, dtype=INT_DTYPE),
+        torch_np.asarray(parent_cells, dtype=INT_DTYPE),
+        torch_np.asarray(point_node_ids, dtype=INT_DTYPE),
+        torch_np.asarray(refined_surface_node_ids, dtype=INT_DTYPE),
     )
 
 
@@ -732,9 +732,9 @@ def expand_columnar_triangle_mesh(
         parent_cells.append(parent_id)
 
     return (
-        jnp.asarray(expanded_nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(expanded_cells, dtype=INT_DTYPE),
-        jnp.asarray(parent_cells, dtype=INT_DTYPE),
+        torch_np.asarray(expanded_nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(expanded_cells, dtype=INT_DTYPE),
+        torch_np.asarray(parent_cells, dtype=INT_DTYPE),
     )
 
 
@@ -775,9 +775,9 @@ def build_quadratic_triangle_mesh(
         quadratic_boundary_edges.append([int(node_a), int(node_b), midpoint])
 
     return (
-        jnp.asarray(quadratic_nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(quadratic_cells, dtype=INT_DTYPE),
-        jnp.asarray(quadratic_boundary_edges, dtype=INT_DTYPE),
+        torch_np.asarray(quadratic_nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(quadratic_cells, dtype=INT_DTYPE),
+        torch_np.asarray(quadratic_boundary_edges, dtype=INT_DTYPE),
     )
 
 
@@ -803,8 +803,8 @@ class Mesh:
     def from_arrays(cls, nodes: Array, cells: Array, *, surface_node_ids: Array | None = None) -> "Mesh":
         """Build a mesh from node coordinates and triangle or quadrilateral connectivity."""
 
-        node_array = jnp.asarray(nodes, dtype=FLOAT_DTYPE)
-        cell_array = jnp.asarray(cells, dtype=INT_DTYPE)
+        node_array = torch_np.asarray(nodes, dtype=FLOAT_DTYPE)
+        cell_array = torch_np.asarray(cells, dtype=INT_DTYPE)
         surface_node_array = None if surface_node_ids is None else np.asarray(surface_node_ids, dtype=np.int32)
 
         if node_array.ndim != 2 or node_array.shape[1] != 2:
@@ -823,9 +823,9 @@ class Mesh:
             remapped_ids = np.full((int(node_array.shape[0]),), -1, dtype=np.int32)
             remapped_ids[used_node_ids] = np.arange(used_node_ids.size, dtype=np.int32)
             node_array_np = node_array_np[used_node_ids]
-            node_array = jnp.asarray(node_array_np, dtype=FLOAT_DTYPE)
+            node_array = torch_np.asarray(node_array_np, dtype=FLOAT_DTYPE)
             cell_array_np = remapped_ids[cell_array_np]
-            cell_array = jnp.asarray(cell_array_np, dtype=INT_DTYPE)
+            cell_array = torch_np.asarray(cell_array_np, dtype=INT_DTYPE)
             if surface_node_array is not None:
                 surface_node_array = remapped_ids[surface_node_array]
 
@@ -855,7 +855,7 @@ class Mesh:
             ) = _surface_topology_from_node_path(
                 node_array,
                 boundary_edges,
-                jnp.asarray(surface_node_array, dtype=INT_DTYPE),
+                torch_np.asarray(surface_node_array, dtype=INT_DTYPE),
             )
         return cls(
             nodes=node_array,
@@ -954,7 +954,7 @@ class Mesh:
             Mesh.from_arrays(
                 refined_nodes,
                 refined_cells,
-                surface_node_ids=jnp.asarray(refined_surface_node_ids, dtype=INT_DTYPE),
+                surface_node_ids=torch_np.asarray(refined_surface_node_ids, dtype=INT_DTYPE),
             ),
             parent_cells,
         )

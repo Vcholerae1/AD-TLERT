@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from deepert.utils.torch_compat import Array
-from deepert.utils.torch_compat import jnp
+from deepert.utils.torch_runtime import Array
+from deepert.utils.torch_runtime import torch_np
 import numpy as np
 
 from deepert.mesh import Mesh
@@ -37,12 +37,12 @@ def triangle_quadrature(order: int = 2) -> TriangleQuadrature:
     """Return a low-order Gauss rule on the reference triangle."""
 
     if order == 1:
-        points = jnp.asarray([[1.0 / 3.0, 1.0 / 3.0]], dtype=FLOAT_DTYPE)
-        weights = jnp.asarray([0.5], dtype=FLOAT_DTYPE)
+        points = torch_np.asarray([[1.0 / 3.0, 1.0 / 3.0]], dtype=FLOAT_DTYPE)
+        weights = torch_np.asarray([0.5], dtype=FLOAT_DTYPE)
         return TriangleQuadrature(points=points, weights=weights)
 
     if order == 2:
-        points = jnp.asarray(
+        points = torch_np.asarray(
             [
                 [1.0 / 6.0, 1.0 / 6.0],
                 [2.0 / 3.0, 1.0 / 6.0],
@@ -50,7 +50,7 @@ def triangle_quadrature(order: int = 2) -> TriangleQuadrature:
             ],
             dtype=FLOAT_DTYPE,
         )
-        weights = jnp.asarray([1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0], dtype=FLOAT_DTYPE)
+        weights = torch_np.asarray([1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0], dtype=FLOAT_DTYPE)
         return TriangleQuadrature(points=points, weights=weights)
 
     raise ValueError(f"unsupported triangle quadrature order: {order}")
@@ -59,16 +59,16 @@ def triangle_quadrature(order: int = 2) -> TriangleQuadrature:
 def p1_shape_functions(points: Array) -> Array:
     """Evaluate P1 shape functions at reference coordinates."""
 
-    point_array = jnp.asarray(points, dtype=FLOAT_DTYPE)
+    point_array = torch_np.asarray(points, dtype=FLOAT_DTYPE)
     xi = point_array[..., 0]
     eta = point_array[..., 1]
-    return jnp.stack((1.0 - xi - eta, xi, eta), axis=-1)
+    return torch_np.stack((1.0 - xi - eta, xi, eta), axis=-1)
 
 
 def reference_shape_gradients() -> Array:
     """Return the constant reference gradients of the P1 basis."""
 
-    return jnp.asarray(
+    return torch_np.asarray(
         [
             [-1.0, -1.0],
             [1.0, 0.0],
@@ -124,11 +124,11 @@ def build_p1_element_data(mesh: Mesh, quadrature_order: int = 2) -> P1ElementDat
     cell_areas = 0.5 * np.abs(np.linalg.det(jacobians))
 
     return P1ElementData(
-        quadrature_points=jnp.asarray(quadrature_points, dtype=FLOAT_DTYPE),
-        quadrature_weights=jnp.asarray(quadrature_weights, dtype=FLOAT_DTYPE),
-        shape_values=jnp.asarray(shape_values, dtype=FLOAT_DTYPE),
-        reference_gradients=jnp.asarray(ref_gradients, dtype=FLOAT_DTYPE),
-        gradients=jnp.asarray(gradients, dtype=FLOAT_DTYPE),
-        cell_quadrature_points=jnp.asarray(cell_quadrature_points, dtype=FLOAT_DTYPE),
-        cell_areas=jnp.asarray(cell_areas, dtype=FLOAT_DTYPE),
+        quadrature_points=torch_np.asarray(quadrature_points, dtype=FLOAT_DTYPE),
+        quadrature_weights=torch_np.asarray(quadrature_weights, dtype=FLOAT_DTYPE),
+        shape_values=torch_np.asarray(shape_values, dtype=FLOAT_DTYPE),
+        reference_gradients=torch_np.asarray(ref_gradients, dtype=FLOAT_DTYPE),
+        gradients=torch_np.asarray(gradients, dtype=FLOAT_DTYPE),
+        cell_quadrature_points=torch_np.asarray(cell_quadrature_points, dtype=FLOAT_DTYPE),
+        cell_areas=torch_np.asarray(cell_areas, dtype=FLOAT_DTYPE),
     )

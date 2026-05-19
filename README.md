@@ -39,16 +39,6 @@ rhoa = response.apparent_resistivity
 jacobian = forward.jacobian(conductivity)
 ```
 
-`jit_cache_dir` and `DEEPERT_JIT_CACHE_DIR` are retained as compatibility
-knobs during the Torch migration:
-
-```python
-forward = ERTForward2p5D.from_mesh_survey(mesh, survey, jit_cache_dir=".deepert_jit_cache")
-```
-
-Torch eager execution does not require the old JAX/XLA persistent cache, so the
-directory is resolved and created but no executable cache entries are expected.
-
 `ERTForwardModeling` provides a small wrapper for mesh/data-like objects:
 
 ```python
@@ -156,16 +146,3 @@ uv run pytest
 uv run python -m compileall deepert
 uv build
 ```
-
-During the migration, compare Torch example outputs against a legacy JAX
-baseline artifact root with:
-
-```bash
-DEEPERT_EXAMPLE_PARITY_BASELINE_ROOT=result_jax_baseline \
-DEEPERT_EXAMPLE_PARITY_CANDIDATE_ROOT=result_torch_candidate \
-uv run pytest tests/test_example_parity.py -q
-```
-
-The parity gate covers `1_forward_t04368_deepert.py`,
-`1_forward_1year_deepert.py`, `2_single_inversion_t04368_deepert.py`, and
-`2_timelapsedERT_inversion_deepert.py`.

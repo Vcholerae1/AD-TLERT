@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from deepert.utils.torch_compat import jnp
+from deepert.utils.torch_runtime import torch_np
 import numpy as np
 
 from deepert.forward import ERTForward2p5D
@@ -124,7 +124,6 @@ class TerrainForwardRunner:
         linear_solver_backend: str = "auto",
         reuse_solver_state: bool = True,
         terrain_cache_dir: str | Path | None = None,
-        jit_cache_dir: str | Path | None = None,
         prepare_forward: bool = False,
     ) -> "TerrainForwardRunner":
         """Build a reusable forward operator from one terrain case.
@@ -137,8 +136,6 @@ class TerrainForwardRunner:
         forward_kwargs = {"linear_solver_backend": linear_solver_backend}
         if terrain_cache_dir is not None:
             forward_kwargs["terrain_cache_dir"] = terrain_cache_dir
-        if jit_cache_dir is not None:
-            forward_kwargs["jit_cache_dir"] = jit_cache_dir
         forward = ERTForward2p5D.from_mesh_survey(case.mesh, case.survey, **forward_kwargs)
         runner = cls(case_template=case, forward=forward, reuse_solver_state=bool(reuse_solver_state))
         if prepare_forward:
@@ -153,7 +150,7 @@ class TerrainForwardRunner:
     def solve_resistivity(self, resistivity: np.ndarray) -> np.ndarray:
         """Compute apparent resistivity for a cell resistivity vector."""
 
-        conductivity = jnp.asarray(1.0 / np.asarray(resistivity, dtype=float), dtype=FLOAT_DTYPE)
+        conductivity = torch_np.asarray(1.0 / np.asarray(resistivity, dtype=float), dtype=FLOAT_DTYPE)
 
         if not self.reuse_solver_state:
             self.forward.close()
@@ -179,7 +176,7 @@ class TerrainForwardRunner:
     def prepare_resistivity(self, resistivity: np.ndarray) -> None:
         """Pre-populate caches for a representative terrain resistivity vector."""
 
-        conductivity = jnp.asarray(1.0 / np.asarray(resistivity, dtype=float), dtype=FLOAT_DTYPE)
+        conductivity = torch_np.asarray(1.0 / np.asarray(resistivity, dtype=float), dtype=FLOAT_DTYPE)
         self.forward.prepare(conductivity, include_solver_state=self.reuse_solver_state)
 
     def solve_case(self, case: TerrainForwardCase) -> np.ndarray:
@@ -760,17 +757,17 @@ def build_source_position_triangle_inversion_case(
         parameter_cell_ids = triangle_arrays.parameter_cell_ids
 
     mesh = Mesh.from_arrays(
-        jnp.asarray(nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(cells, dtype=jnp.int32),
-        surface_node_ids=None if surface_node_ids is None else jnp.asarray(surface_node_ids, dtype=jnp.int32),
+        torch_np.asarray(nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(cells, dtype=torch_np.int32),
+        surface_node_ids=None if surface_node_ids is None else torch_np.asarray(surface_node_ids, dtype=torch_np.int32),
     )
     forward_mesh = Mesh.from_arrays(
-        jnp.asarray(full_nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(full_cells, dtype=jnp.int32),
+        torch_np.asarray(full_nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(full_cells, dtype=torch_np.int32),
     )
     survey = Survey.from_arrays(
-        jnp.asarray(np.column_stack((elec_x_array, elec_z_array)), dtype=FLOAT_DTYPE),
-        jnp.asarray(measurement_array),
+        torch_np.asarray(np.column_stack((elec_x_array, elec_z_array)), dtype=FLOAT_DTYPE),
+        torch_np.asarray(measurement_array),
     )
     return SourcePositionInversionCase(
         mesh=mesh,
@@ -858,13 +855,13 @@ def build_terrain_forward_case(
     measurements = build_wenner_alpha_measurements(electrode_count)
 
     mesh = Mesh.from_arrays(
-        jnp.asarray(nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(cells),
-        surface_node_ids=jnp.arange(grid.nx + 1, dtype=jnp.int32),
+        torch_np.asarray(nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(cells),
+        surface_node_ids=torch_np.arange(grid.nx + 1, dtype=torch_np.int32),
     )
     survey = Survey.from_arrays(
-        jnp.asarray(np.column_stack((elec_x, elec_z)), dtype=FLOAT_DTYPE),
-        jnp.asarray(measurements),
+        torch_np.asarray(np.column_stack((elec_x, elec_z)), dtype=FLOAT_DTYPE),
+        torch_np.asarray(measurements),
     )
     return TerrainForwardCase(
         mesh=mesh,
@@ -885,7 +882,6 @@ def run_terrain_forward(
     linear_solver_backend: str = "auto",
     reuse_solver_state: bool = True,
     terrain_cache_dir: str | Path | None = None,
-    jit_cache_dir: str | Path | None = None,
     prepare_forward: bool = False,
 ) -> np.ndarray:
     """Compute apparent resistivity for a terrain case."""
@@ -895,7 +891,6 @@ def run_terrain_forward(
         linear_solver_backend=linear_solver_backend,
         reuse_solver_state=reuse_solver_state,
         terrain_cache_dir=terrain_cache_dir,
-        jit_cache_dir=jit_cache_dir,
         prepare_forward=prepare_forward,
     )
     try:
@@ -998,7 +993,6 @@ def run_terrain_forward_file(
     linear_solver_backend: str = "auto",
     reuse_solver_state: bool = True,
     terrain_cache_dir: str | Path | None = None,
-    jit_cache_dir: str | Path | None = None,
     prepare_forward: bool = False,
 ) -> TerrainForwardRecord:
     """Run and save one terrain-forward timestep from a resistivity ``.npy`` file."""
@@ -1038,7 +1032,6 @@ def run_terrain_forward_file(
         linear_solver_backend=linear_solver_backend,
         reuse_solver_state=reuse_solver_state,
         terrain_cache_dir=terrain_cache_dir,
-        jit_cache_dir=jit_cache_dir,
         prepare_forward=prepare_forward,
     )
     save_terrain_forward_dat(dat_file, case, rhoa, relative_error=relative_error)
@@ -1068,7 +1061,6 @@ def run_terrain_forward_series(
     linear_solver_backend: str = "auto",
     reuse_solver_state: bool = True,
     terrain_cache_dir: str | Path | None = None,
-    jit_cache_dir: str | Path | None = None,
     prepare_forward: bool = False,
 ) -> tuple[list[TerrainForwardRecord], list[TerrainForwardRecord]]:
     """Run a sequential terrain-forward series and return ``(manifest, failures)``.
@@ -1134,7 +1126,6 @@ def run_terrain_forward_series(
                         linear_solver_backend=linear_solver_backend,
                         reuse_solver_state=reuse_solver_state,
                         terrain_cache_dir=terrain_cache_dir,
-                        jit_cache_dir=jit_cache_dir,
                         prepare_forward=prepare_forward,
                     )
                     runners[resolved_y_index] = runner

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from deepert.utils.torch_compat import Array
-from deepert.utils.torch_compat import jnp
-from deepert.utils.torch_compat import BCOO
+from deepert.utils.torch_runtime import Array
+from deepert.utils.torch_runtime import torch_np
+from deepert.utils.torch_runtime import BCOO
 import numpy as np
 
 from deepert.fem.p1 import P1ElementData
@@ -24,14 +24,14 @@ class COORouting:
 
 
 def _expand_coefficient(coefficients: Array | float, element_data: P1ElementData) -> Array:
-    coefficient_array = jnp.asarray(coefficients, dtype=FLOAT_DTYPE)
+    coefficient_array = torch_np.asarray(coefficients, dtype=FLOAT_DTYPE)
     cell_count = element_data.cell_areas.shape[0]
     quadrature_count = element_data.quadrature_weights.shape[0]
 
     if coefficient_array.ndim == 0:
-        return jnp.broadcast_to(coefficient_array, (cell_count, quadrature_count))
+        return torch_np.broadcast_to(coefficient_array, (cell_count, quadrature_count))
     if coefficient_array.shape == (cell_count,):
-        return jnp.broadcast_to(coefficient_array[:, None], (cell_count, quadrature_count))
+        return torch_np.broadcast_to(coefficient_array[:, None], (cell_count, quadrature_count))
     if coefficient_array.shape == (cell_count, quadrature_count):
         return coefficient_array
 
@@ -56,12 +56,12 @@ def _expand_coefficient_generic(
     cell_count: int,
     quadrature_count: int,
 ) -> Array:
-    coefficient_array = jnp.asarray(coefficients, dtype=FLOAT_DTYPE)
+    coefficient_array = torch_np.asarray(coefficients, dtype=FLOAT_DTYPE)
 
     if coefficient_array.ndim == 0:
-        return jnp.broadcast_to(coefficient_array, (cell_count, quadrature_count))
+        return torch_np.broadcast_to(coefficient_array, (cell_count, quadrature_count))
     if coefficient_array.shape == (cell_count,):
-        return jnp.broadcast_to(coefficient_array[:, None], (cell_count, quadrature_count))
+        return torch_np.broadcast_to(coefficient_array[:, None], (cell_count, quadrature_count))
     if coefficient_array.shape == (cell_count, quadrature_count):
         return coefficient_array
 
@@ -78,7 +78,7 @@ def build_coo_routing(mesh: Mesh) -> COORouting:
     row_indices = np.broadcast_to(cells[:, :, None], (mesh.cell_count, local_dof, local_dof)).reshape(-1)
     col_indices = np.broadcast_to(cells[:, None, :], (mesh.cell_count, local_dof, local_dof)).reshape(-1)
     indices = np.stack((row_indices, col_indices), axis=1).astype(np.int32)
-    return COORouting(indices=jnp.asarray(indices, dtype=INT_DTYPE), shape=(mesh.node_count, mesh.node_count))
+    return COORouting(indices=torch_np.asarray(indices, dtype=INT_DTYPE), shape=(mesh.node_count, mesh.node_count))
 
 
 def build_coo_routing_from_connectivity(connectivity: Array, node_count: int) -> COORouting:
@@ -95,7 +95,7 @@ def build_coo_routing_from_connectivity(connectivity: Array, node_count: int) ->
         (connectivity_np.shape[0], local_dof, local_dof),
     ).reshape(-1)
     indices = np.stack((row_indices, col_indices), axis=1).astype(np.int32)
-    return COORouting(indices=jnp.asarray(indices, dtype=INT_DTYPE), shape=(node_count, node_count))
+    return COORouting(indices=torch_np.asarray(indices, dtype=INT_DTYPE), shape=(node_count, node_count))
 
 
 def assemble_local_stiffness(element_data: P1ElementData, conductivity: Array | float) -> Array:
@@ -111,11 +111,11 @@ def assemble_local_stiffness(element_data: P1ElementData, conductivity: Array | 
             * np.asarray(element_data.quadrature_weights, dtype=dtype)[None, :]
         )
         local = np.einsum("eqid,eqjd,eq->eij", gradients, gradients, static_conductivity * weights)
-        return jnp.asarray(local, dtype=FLOAT_DTYPE)
+        return torch_np.asarray(local, dtype=FLOAT_DTYPE)
 
     conductivity_values = _expand_coefficient(conductivity, element_data)
     weights = 2.0 * element_data.cell_areas[:, None] * element_data.quadrature_weights[None, :]
-    return jnp.einsum(
+    return torch_np.einsum(
         "eqid,eqjd,eq->eij",
         element_data.gradients,
         element_data.gradients,
@@ -138,11 +138,11 @@ def assemble_local_mass(
             * np.asarray(element_data.quadrature_weights, dtype=dtype)[None, :]
         )
         local = np.einsum("qi,qj,eq->eij", shape_values, shape_values, static_coefficient * weights)
-        return jnp.asarray(local, dtype=FLOAT_DTYPE)
+        return torch_np.asarray(local, dtype=FLOAT_DTYPE)
 
     coefficient_values = _expand_coefficient(coefficients, element_data)
     weights = 2.0 * element_data.cell_areas[:, None] * element_data.quadrature_weights[None, :]
-    return jnp.einsum(
+    return torch_np.einsum(
         "qi,qj,eq->eij",
         element_data.shape_values,
         element_data.shape_values,
@@ -162,7 +162,7 @@ def assemble_local_stiffness_p2(
         quadrature_count=element_data.quadrature_weights.shape[0],
     )
     weights = 2.0 * element_data.cell_areas[:, None] * element_data.quadrature_weights[None, :]
-    return jnp.einsum(
+    return torch_np.einsum(
         "eqid,eqjd,eq->eij",
         element_data.gradients,
         element_data.gradients,
@@ -182,7 +182,7 @@ def assemble_local_mass_p2(
         quadrature_count=element_data.quadrature_weights.shape[0],
     )
     weights = 2.0 * element_data.cell_areas[:, None] * element_data.quadrature_weights[None, :]
-    return jnp.einsum(
+    return torch_np.einsum(
         "qi,qj,eq->eij",
         element_data.shape_values,
         element_data.shape_values,
@@ -209,7 +209,7 @@ def assemble_helmholtz_operator(
 ) -> BCOO:
     """Assemble a sparse Helmholtz-type operator K + k^2 M."""
 
-    conductivity_values = jnp.asarray(conductivity, dtype=FLOAT_DTYPE)
+    conductivity_values = torch_np.asarray(conductivity, dtype=FLOAT_DTYPE)
     local_operator = assemble_local_stiffness(
         element_data=element_data,
         conductivity=conductivity,

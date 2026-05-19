@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 import time
 from typing import Any
 
-from deepert.utils.torch_compat import jnp
+from deepert.utils.torch_runtime import torch_np
 import numpy as np
 import scipy.sparse as sp
 from scipy.spatial import cKDTree
@@ -353,7 +353,7 @@ class ParameterizedERTForward2p5D:
             and (normal_sensitivity is None or bool(normal_sensitivity))
             and not (bool(include_robin_boundary_derivative) if include_robin_boundary_derivative is not None else False)
         ):
-            conductivity = jnp.asarray(np.exp(-full_log_model), dtype=FLOAT_DTYPE)
+            conductivity = torch_np.asarray(np.exp(-full_log_model), dtype=FLOAT_DTYPE)
             response, resistance_jacobian = self.forward_operator.solve_with_jacobian(
                 conductivity,
                 include_robin_boundary_derivative=False,
@@ -361,8 +361,8 @@ class ParameterizedERTForward2p5D:
                 jacobian_cell_parameter_ids=self.forward_cell_parameter_ids,
                 jacobian_parameter_count=self.cell_count,
             )
-            apparent_jacobian_sigma = jnp.abs(self.forward_operator._geometric_factors())[:, None] * resistance_jacobian
-            parameter_conductivity = jnp.asarray(np.exp(-log_model), dtype=apparent_jacobian_sigma.dtype)
+            apparent_jacobian_sigma = torch_np.abs(self.forward_operator._geometric_factors())[:, None] * resistance_jacobian
+            parameter_conductivity = torch_np.asarray(np.exp(-log_model), dtype=apparent_jacobian_sigma.dtype)
             jacobian = apparent_jacobian_sigma * (-parameter_conductivity[None, :])
             jacobian = jacobian / response.apparent_resistivity[:, None]
             return (
@@ -837,13 +837,13 @@ def _forward_and_jacobian_log(
         raise TypeError("forward must be ERTForward2p5D, ERTForwardModeling, or expose forward_and_jacobian")
 
     resistivity = np.exp(log_resistivity)
-    conductivity = jnp.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
+    conductivity = torch_np.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
     response, resistance_jacobian = forward.solve_with_jacobian(
         conductivity,
         include_robin_boundary_derivative=include_robin_boundary_derivative,
         normal_sensitivity=normal_sensitivity,
     )
-    apparent_jacobian_sigma = jnp.abs(forward._geometric_factors())[:, None] * resistance_jacobian
+    apparent_jacobian_sigma = torch_np.abs(forward._geometric_factors())[:, None] * resistance_jacobian
     jacobian = apparent_jacobian_sigma * (-conductivity[None, :])
     jacobian = jacobian / response.apparent_resistivity[:, None]
     return (
@@ -911,7 +911,7 @@ def _forward_log_response(
         raise TypeError("forward must be ERTForward2p5D, ERTForwardModeling, or expose forward")
 
     resistivity = np.exp(log_resistivity)
-    conductivity = jnp.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
+    conductivity = torch_np.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
     response = forward.apparent_resistivity_values(conductivity)
     return np.log(np.asarray(response, dtype=float))
 
@@ -1052,7 +1052,7 @@ def _cupy_timelapse_cgls(
         import cupy as cp
         import cupyx.scipy.sparse as cupy_sparse
     except ImportError as exc:
-        raise ImportError("linearized_solver='gpu_cgls' requires CuPy") from exc
+        raise ImportError("linearized_solver='gpu_timelapse_cgls' requires CuPy") from exc
 
     jacobian_cpu = np.stack(
         [

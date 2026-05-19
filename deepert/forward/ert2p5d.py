@@ -8,10 +8,10 @@ import logging
 import os
 from pathlib import Path
 
-from deepert.utils.torch_compat import Array
-from deepert.utils.torch_compat import torch_runtime
-from deepert.utils.torch_compat import jnp
-from deepert.utils.torch_compat import CSR
+from deepert.utils.torch_runtime import Array
+from deepert.utils.torch_runtime import torch_runtime
+from deepert.utils.torch_runtime import torch_np
+from deepert.utils.torch_runtime import CSR
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
@@ -37,7 +37,6 @@ from deepert.forward.integration import build_inverse_cosine_weights, survey_wav
 from deepert.mesh import Mesh
 from deepert.survey import Survey
 from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE, NP_FLOAT_DTYPE
-from deepert.utils.jax_cache import configure_torch_jit_cache
 
 _SOURCE_INSET_FACTOR = 0.69
 _VALID_LINEAR_SOLVER_BACKENDS = frozenset({"auto", "cudss", "scipy"})
@@ -77,11 +76,11 @@ def _update_digest_array(digest: "hashlib._Hash", label: str, values: Array | np
 
 
 def _numpy_dtype(dtype) -> np.dtype:
-    if dtype == jnp.float64:
+    if dtype == torch_np.float64:
         return np.dtype(np.float64)
-    if dtype == jnp.float32:
+    if dtype == torch_np.float32:
         return np.dtype(np.float32)
-    if dtype == jnp.int32:
+    if dtype == torch_np.int32:
         return np.dtype(np.int32)
     return np.dtype(dtype)
 
@@ -198,7 +197,7 @@ def _find_source_node_ids(mesh: Mesh, positions: Array, tol: float = 1e-8) -> Ar
         nearest = int(np.argmin(distances))
         if distances[nearest] <= tol:
             node_ids[idx] = nearest
-    return jnp.asarray(node_ids, dtype=INT_DTYPE)
+    return torch_np.asarray(node_ids, dtype=INT_DTYPE)
 
 
 def _find_nearest_node_electrode_ids(mesh: Mesh, positions: Array, tol: float = 1e-2) -> Array:
@@ -223,7 +222,7 @@ def _find_entity_node_ids(mesh: Mesh, positions: Array, cell_ids: Array, tol: fl
         if distances[nearest] <= tol:
             node_ids[idx] = int(cell_nodes[nearest])
 
-    return jnp.asarray(node_ids, dtype=INT_DTYPE)
+    return torch_np.asarray(node_ids, dtype=INT_DTYPE)
 
 
 def _locate_point_cells(mesh: Mesh, points: Array) -> Array:
@@ -239,7 +238,7 @@ def _build_interpolation_matrix(mesh: Mesh, points: Array) -> Array:
     matrix = np.zeros((points.shape[0], mesh.node_count), dtype=NP_FLOAT_DTYPE)
     row_indices = np.repeat(np.arange(points.shape[0], dtype=np.int32), cell_nodes.shape[1])
     np.add.at(matrix, (row_indices, cell_nodes.reshape(-1)), weights_np.reshape(-1))
-    return jnp.asarray(matrix, dtype=FLOAT_DTYPE)
+    return torch_np.asarray(matrix, dtype=FLOAT_DTYPE)
 
 
 def _build_quadratic_interpolation_matrix(
@@ -270,7 +269,7 @@ def _build_quadratic_interpolation_matrix(
     matrix = np.zeros((points.shape[0], node_count), dtype=NP_FLOAT_DTYPE)
     row_indices = np.repeat(np.arange(points.shape[0], dtype=np.int32), cell_connectivity.shape[1])
     np.add.at(matrix, (row_indices, cell_dofs.reshape(-1)), shape_values.reshape(-1))
-    return jnp.asarray(matrix, dtype=FLOAT_DTYPE)
+    return torch_np.asarray(matrix, dtype=FLOAT_DTYPE)
 
 
 def _build_discretization_interpolation_matrix(
@@ -327,7 +326,7 @@ def _surface_inward_normals(mesh: Mesh, points: Array, tol: float = 1e-8) -> tup
     surface_edge_mask = np.asarray(mesh.surface_edge_mask, dtype=bool)
     if not np.any(surface_edge_mask):
         normals = np.zeros((points_np.shape[0], 2), dtype=float)
-        return jnp.asarray(normals, dtype=FLOAT_DTYPE), jnp.zeros((points_np.shape[0],), dtype=bool)
+        return torch_np.asarray(normals, dtype=FLOAT_DTYPE), torch_np.zeros((points_np.shape[0],), dtype=bool)
 
     surface_edges = boundary_edges[surface_edge_mask]
     surface_edge_nodes = np.asarray(mesh.nodes[surface_edges], dtype=float)
@@ -342,25 +341,25 @@ def _surface_inward_normals(mesh: Mesh, points: Array, tol: float = 1e-8) -> tup
         if norm > tol:
             averaged[point_id] = normal / norm
 
-    return jnp.asarray(averaged, dtype=FLOAT_DTYPE), jnp.asarray(on_surface, dtype=bool)
+    return torch_np.asarray(averaged, dtype=FLOAT_DTYPE), torch_np.asarray(on_surface, dtype=bool)
 
 
 def _build_source_positions(mesh: Mesh, survey: Survey, source_cell_ids: Array) -> Array:
     """Regularize surface point sources by moving them slightly into the domain."""
 
-    positions = jnp.asarray(survey.electrode_positions, dtype=FLOAT_DTYPE)
+    positions = torch_np.asarray(survey.electrode_positions, dtype=FLOAT_DTYPE)
     if np.all(np.asarray(source_cell_ids, dtype=np.int32) >= 0):
         return positions
 
     inward_normals, on_surface = _surface_inward_normals(mesh, positions)
-    if not bool(jnp.any(on_surface)):
+    if not bool(torch_np.any(on_surface)):
         return positions
 
-    cell_centers = jnp.mean(mesh.nodes[mesh.cells[source_cell_ids]], axis=1)
+    cell_centers = torch_np.mean(mesh.nodes[mesh.cells[source_cell_ids]], axis=1)
     center_offsets = cell_centers - positions
-    projected_depth = jnp.sum(center_offsets * inward_normals, axis=1)
-    fallback_depth = jnp.linalg.norm(center_offsets, axis=1)
-    source_depth = jnp.where(projected_depth > 1e-8, projected_depth, fallback_depth)
+    projected_depth = torch_np.sum(center_offsets * inward_normals, axis=1)
+    fallback_depth = torch_np.linalg.norm(center_offsets, axis=1)
+    source_depth = torch_np.where(projected_depth > 1e-8, projected_depth, fallback_depth)
     source_inset = _SOURCE_INSET_FACTOR * source_depth
     normal_candidate = positions + inward_normals * source_inset[:, None]
     center_candidate = positions + _SOURCE_INSET_FACTOR * center_offsets
@@ -372,18 +371,18 @@ def _build_source_positions(mesh: Mesh, survey: Survey, source_cell_ids: Array) 
 
     for point_id in np.flatnonzero(on_surface_np):
         try:
-            mesh.locate_points(jnp.asarray(source_positions_np[point_id][None, :], dtype=FLOAT_DTYPE))
+            mesh.locate_points(torch_np.asarray(source_positions_np[point_id][None, :], dtype=FLOAT_DTYPE))
             continue
         except ValueError:
             pass
 
         try:
-            mesh.locate_points(jnp.asarray(normal_candidate_np[point_id][None, :], dtype=FLOAT_DTYPE))
+            mesh.locate_points(torch_np.asarray(normal_candidate_np[point_id][None, :], dtype=FLOAT_DTYPE))
             source_positions_np[point_id] = normal_candidate_np[point_id]
         except ValueError:
             source_positions_np[point_id] = center_candidate_np[point_id]
 
-    return jnp.asarray(source_positions_np, dtype=FLOAT_DTYPE)
+    return torch_np.asarray(source_positions_np, dtype=FLOAT_DTYPE)
 
 
 def _exact_dcsolution_on_nodes(mesh: Mesh, source: Array, wavenumber: float) -> Array:
@@ -399,14 +398,14 @@ def _exact_dcsolution_on_nodes(mesh: Mesh, source: Array, wavenumber: float) -> 
     if abs(source_np[1] - surface_level) <= 1e-8:
         valid = distances > 1e-12
         values[valid] = besselk0(distances[valid] * wavenumber) / np.pi
-        return jnp.asarray(values, dtype=FLOAT_DTYPE)
+        return torch_np.asarray(values, dtype=FLOAT_DTYPE)
 
     mirrored_distances = np.linalg.norm(nodes - mirrored_source, axis=1)
     valid = (distances > 1e-12) & (mirrored_distances > 1e-12)
     values[valid] = (
         besselk0(distances[valid] * wavenumber) + besselk0(mirrored_distances[valid] * wavenumber)
     ) / (2.0 * np.pi)
-    return jnp.asarray(values, dtype=FLOAT_DTYPE)
+    return torch_np.asarray(values, dtype=FLOAT_DTYPE)
 
 
 def _node_singularity_value(mesh: Mesh, node_id: int, wavenumber: float) -> float:
@@ -425,25 +424,25 @@ def _node_singularity_value(mesh: Mesh, node_id: int, wavenumber: float) -> floa
 
 
 def _expand_conductivity(conductivity: Array | float, cell_count: int) -> Array:
-    conductivity_array = jnp.asarray(conductivity, dtype=FLOAT_DTYPE)
+    conductivity_array = torch_np.asarray(conductivity, dtype=FLOAT_DTYPE)
     if conductivity_array.ndim == 0:
-        return jnp.broadcast_to(conductivity_array, (cell_count,))
+        return torch_np.broadcast_to(conductivity_array, (cell_count,))
     if conductivity_array.shape != (cell_count,):
         raise ValueError(f"conductivity must be scalar or shape ({cell_count},)")
     return conductivity_array
 
 
 def _expand_measurement_vector(values: Array | float, measurement_count: int, *, name: str) -> Array:
-    measurement_array = jnp.asarray(values, dtype=FLOAT_DTYPE)
+    measurement_array = torch_np.asarray(values, dtype=FLOAT_DTYPE)
     if measurement_array.ndim == 0:
-        return jnp.broadcast_to(measurement_array, (measurement_count,))
+        return torch_np.broadcast_to(measurement_array, (measurement_count,))
     if measurement_array.shape != (measurement_count,):
         raise ValueError(f"{name} must be scalar or shape ({measurement_count},)")
     return measurement_array
 
 
 def _expand_measurement_matrix(values: Array | float, measurement_count: int, *, name: str) -> Array:
-    measurement_array = jnp.asarray(values, dtype=FLOAT_DTYPE)
+    measurement_array = torch_np.asarray(values, dtype=FLOAT_DTYPE)
     if measurement_array.ndim == 1:
         measurement_array = measurement_array[None, :]
     if measurement_array.ndim != 2 or measurement_array.shape[1] != measurement_count:
@@ -498,9 +497,9 @@ def _build_sparse_operator_pattern(routing, boundary_routing) -> SparseOperatorP
     volume_size = volume_indices.shape[0]
     return SparseOperatorPattern(
         shape=routing.shape,
-        unique_indices=jnp.asarray(unique_indices, dtype=INT_DTYPE),
-        volume_inverse=jnp.asarray(inverse[:volume_size], dtype=INT_DTYPE),
-        boundary_inverse=jnp.asarray(inverse[volume_size:], dtype=INT_DTYPE),
+        unique_indices=torch_np.asarray(unique_indices, dtype=INT_DTYPE),
+        volume_inverse=torch_np.asarray(inverse[:volume_size], dtype=INT_DTYPE),
+        boundary_inverse=torch_np.asarray(inverse[volume_size:], dtype=INT_DTYPE),
         row_indices=row_indices,
         col_indices=col_indices,
         csr_indptr=indptr,
@@ -527,8 +526,8 @@ def _quad_boundary_topology(cells: Array) -> tuple[Array, Array]:
 
     order = sorted(range(len(boundary_edges)), key=lambda idx: boundary_edges[idx])
     return (
-        jnp.asarray([boundary_edges[idx] for idx in order], dtype=INT_DTYPE),
-        jnp.asarray([boundary_cells[idx] for idx in order], dtype=INT_DTYPE),
+        torch_np.asarray([boundary_edges[idx] for idx in order], dtype=INT_DTYPE),
+        torch_np.asarray([boundary_cells[idx] for idx in order], dtype=INT_DTYPE),
     )
 
 
@@ -556,9 +555,9 @@ def _quad_boundary_geometry(
     signs = np.where(orientation >= 0.0, 1.0, -1.0).astype(NP_FLOAT_DTYPE)
     normals = candidate_normals * signs[:, None]
     return (
-        jnp.asarray(centers, dtype=FLOAT_DTYPE),
-        jnp.asarray(lengths, dtype=FLOAT_DTYPE),
-        jnp.asarray(normals, dtype=FLOAT_DTYPE),
+        torch_np.asarray(centers, dtype=FLOAT_DTYPE),
+        torch_np.asarray(lengths, dtype=FLOAT_DTYPE),
+        torch_np.asarray(normals, dtype=FLOAT_DTYPE),
     )
 
 
@@ -589,11 +588,11 @@ def _quad_surface_metadata(
         flat_surface = bool(np.max(np.abs(surface_nodes[:, 1] - surface_nodes[0, 1])) <= tol)
         reference_level = float(np.mean(surface_nodes[:, 1]))
     return (
-        jnp.asarray(surface_node_ids_np, dtype=INT_DTYPE),
-        jnp.asarray(surface_edge_mask, dtype=bool),
-        jnp.asarray(surface_nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(reference_level, dtype=FLOAT_DTYPE),
-        jnp.asarray(flat_surface, dtype=bool),
+        torch_np.asarray(surface_node_ids_np, dtype=INT_DTYPE),
+        torch_np.asarray(surface_edge_mask, dtype=bool),
+        torch_np.asarray(surface_nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(reference_level, dtype=FLOAT_DTYPE),
+        torch_np.asarray(flat_surface, dtype=bool),
     )
 
 
@@ -615,8 +614,8 @@ def _structured_quad_mesh_from_arrays(
         surface_node_ids,
     )
     return StructuredQuadMesh(
-        nodes=jnp.asarray(nodes, dtype=FLOAT_DTYPE),
-        cells=jnp.asarray(cells, dtype=INT_DTYPE),
+        nodes=torch_np.asarray(nodes, dtype=FLOAT_DTYPE),
+        cells=torch_np.asarray(cells, dtype=INT_DTYPE),
         boundary_edges=boundary_edges,
         boundary_edge_cells=boundary_edge_cells,
         boundary_edge_centers=boundary_edge_centers,
@@ -640,7 +639,7 @@ def _build_structured_quad_mesh(mesh: Mesh) -> tuple[StructuredQuadMesh, Array] 
                 mesh.cells,
                 mesh.surface_node_ids,
             ),
-            jnp.arange(mesh.cell_count, dtype=INT_DTYPE),
+            torch_np.arange(mesh.cell_count, dtype=INT_DTYPE),
         )
 
     expanded = mesh.expand_columnar_cells()
@@ -681,10 +680,10 @@ def _build_structured_quad_mesh(mesh: Mesh) -> tuple[StructuredQuadMesh, Array] 
 
     quad_mesh = _structured_quad_mesh_from_arrays(
         expanded_mesh.nodes,
-        jnp.asarray(quad_cells, dtype=INT_DTYPE),
+        torch_np.asarray(quad_cells, dtype=INT_DTYPE),
         expanded_mesh.surface_node_ids,
     )
-    return quad_mesh, jnp.asarray(quad_parents, dtype=INT_DTYPE)
+    return quad_mesh, torch_np.asarray(quad_parents, dtype=INT_DTYPE)
 
 
 def _refine_structured_quad_mesh(
@@ -737,20 +736,20 @@ def _refine_structured_quad_mesh(
         refined_surface_node_ids.extend((midpoint_id, int(stop_node)))
 
     refined_mesh = _structured_quad_mesh_from_arrays(
-        jnp.asarray(refined_nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(refined_cells, dtype=INT_DTYPE),
-        jnp.asarray(refined_surface_node_ids, dtype=INT_DTYPE),
+        torch_np.asarray(refined_nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(refined_cells, dtype=INT_DTYPE),
+        torch_np.asarray(refined_surface_node_ids, dtype=INT_DTYPE),
     )
-    return refined_mesh, jnp.asarray(refined_parents, dtype=INT_DTYPE)
+    return refined_mesh, torch_np.asarray(refined_parents, dtype=INT_DTYPE)
 
 
 def _q1_shape_functions(points: Array) -> Array:
     """Evaluate bilinear Q1 shape functions on [-1, 1]^2."""
 
-    point_array = jnp.asarray(points, dtype=FLOAT_DTYPE)
+    point_array = torch_np.asarray(points, dtype=FLOAT_DTYPE)
     xi = point_array[..., 0]
     eta = point_array[..., 1]
-    return 0.25 * jnp.stack(
+    return 0.25 * torch_np.stack(
         (
             (1.0 - xi) * (1.0 - eta),
             (1.0 + xi) * (1.0 - eta),
@@ -764,12 +763,12 @@ def _q1_shape_functions(points: Array) -> Array:
 def _q1_reference_shape_gradients(points: Array) -> Array:
     """Return bilinear Q1 reference gradients on [-1, 1]^2."""
 
-    point_array = jnp.asarray(points, dtype=FLOAT_DTYPE)
+    point_array = torch_np.asarray(points, dtype=FLOAT_DTYPE)
     xi = point_array[:, 0]
     eta = point_array[:, 1]
-    dxi = 0.25 * jnp.stack((-(1.0 - eta), (1.0 - eta), (1.0 + eta), -(1.0 + eta)), axis=1)
-    deta = 0.25 * jnp.stack((-(1.0 - xi), -(1.0 + xi), (1.0 + xi), (1.0 - xi)), axis=1)
-    return jnp.stack((dxi, deta), axis=-1)
+    dxi = 0.25 * torch_np.stack((-(1.0 - eta), (1.0 - eta), (1.0 + eta), -(1.0 + eta)), axis=1)
+    deta = 0.25 * torch_np.stack((-(1.0 - xi), -(1.0 + xi), (1.0 + xi), (1.0 - xi)), axis=1)
+    return torch_np.stack((dxi, deta), axis=-1)
 
 
 def _build_q1_operator_templates(mesh: StructuredQuadMesh) -> OperatorTemplates:
@@ -815,9 +814,9 @@ def _build_q1_operator_templates(mesh: StructuredQuadMesh) -> OperatorTemplates:
     boundary_lengths = np.asarray(mesh.boundary_edge_lengths, dtype=NP_FLOAT_DTYPE)
     boundary_mass = boundary_lengths[:, None, None] * boundary_reference[None, :, :]
     return OperatorTemplates(
-        stiffness=jnp.asarray(stiffness, dtype=FLOAT_DTYPE),
-        mass=jnp.asarray(mass, dtype=FLOAT_DTYPE),
-        boundary_mass=jnp.asarray(boundary_mass, dtype=FLOAT_DTYPE),
+        stiffness=torch_np.asarray(stiffness, dtype=FLOAT_DTYPE),
+        mass=torch_np.asarray(mass, dtype=FLOAT_DTYPE),
+        boundary_mass=torch_np.asarray(boundary_mass, dtype=FLOAT_DTYPE),
     )
 
 
@@ -916,11 +915,11 @@ def _build_q2_operator_templates(mesh: StructuredQuadMesh) -> OperatorTemplates:
     ) / 30.0
     boundary_lengths = np.asarray(mesh.boundary_edge_lengths, dtype=dtype)
     boundary_mass = boundary_lengths[:, None, None] * boundary_reference[None, :, :]
-    torch_dtype = jnp.float64 if torch_runtime.config.torch_enable_float64 else FLOAT_DTYPE
+    torch_dtype = torch_np.float64 if torch_runtime.config.torch_enable_float64 else FLOAT_DTYPE
     return OperatorTemplates(
-        stiffness=jnp.asarray(stiffness, dtype=torch_dtype),
-        mass=jnp.asarray(mass, dtype=torch_dtype),
-        boundary_mass=jnp.asarray(boundary_mass, dtype=torch_dtype),
+        stiffness=torch_np.asarray(stiffness, dtype=torch_dtype),
+        mass=torch_np.asarray(mass, dtype=torch_dtype),
+        boundary_mass=torch_np.asarray(boundary_mass, dtype=torch_dtype),
     )
 
 
@@ -967,9 +966,9 @@ def _build_structured_quad_q2_topology(mesh: StructuredQuadMesh) -> tuple[Array,
         for node_a, node_b in boundary_edges_np.tolist()
     ]
     return (
-        jnp.asarray(q2_nodes, dtype=FLOAT_DTYPE),
-        jnp.asarray(q2_cells, dtype=INT_DTYPE),
-        jnp.asarray(q2_boundary_edges, dtype=INT_DTYPE),
+        torch_np.asarray(q2_nodes, dtype=FLOAT_DTYPE),
+        torch_np.asarray(q2_cells, dtype=INT_DTYPE),
+        torch_np.asarray(q2_boundary_edges, dtype=INT_DTYPE),
     )
 
 
@@ -1011,7 +1010,7 @@ def _build_exact_node_selection_matrix(
     indices = _exact_node_selection_indices(dof_nodes, points, tol=tol)
     matrix = np.zeros((indices.shape[0], np.asarray(dof_nodes).shape[0]), dtype=NP_FLOAT_DTYPE)
     matrix[np.arange(indices.shape[0]), indices] = 1.0
-    return jnp.asarray(matrix, dtype=FLOAT_DTYPE)
+    return torch_np.asarray(matrix, dtype=FLOAT_DTYPE)
 
 
 def _build_surface_interpolation_matrix(
@@ -1054,7 +1053,7 @@ def _build_surface_interpolation_matrix(
         matrix[row_id, surface_node_ids_np[segment_id]] = weight_start
         matrix[row_id, surface_node_ids_np[segment_id + 1]] = weight_stop
 
-    return jnp.asarray(matrix, dtype=FLOAT_DTYPE)
+    return torch_np.asarray(matrix, dtype=FLOAT_DTYPE)
 
 
 def _build_surface_q2_interpolation_matrix(
@@ -1107,7 +1106,7 @@ def _build_surface_q2_interpolation_matrix(
         matrix[row_id, midpoint_id] = 4.0 * t * (1.0 - t)
         matrix[row_id, stop_id] = 2.0 * t * (t - 0.5)
 
-    return jnp.asarray(matrix, dtype=FLOAT_DTYPE)
+    return torch_np.asarray(matrix, dtype=FLOAT_DTYPE)
 
 
 def _build_structured_quad_auxiliary_discretization(
@@ -1128,7 +1127,7 @@ def _build_structured_quad_auxiliary_discretization(
     if use_h2:
         geometry_mesh, parent_cell_ids = _refine_structured_quad_mesh(geometry_mesh, parent_cell_ids)
 
-    source_positions = jnp.asarray(survey.electrode_positions, dtype=FLOAT_DTYPE)
+    source_positions = torch_np.asarray(survey.electrode_positions, dtype=FLOAT_DTYPE)
     if use_p2:
         dof_nodes, cell_connectivity, boundary_connectivity = _build_structured_quad_q2_topology(geometry_mesh)
         operator_templates = _build_q2_operator_templates(geometry_mesh)
@@ -1158,7 +1157,7 @@ def _build_structured_quad_auxiliary_discretization(
     original_node_matrix = _build_exact_node_selection_matrix(dof_nodes, mesh.nodes)
     # The terrain-strip H2 mesh keeps these outer boundaries as
     # homogeneous natural boundaries, not mixed/Robin boundaries.
-    boundary_geometries = jnp.asarray(
+    boundary_geometries = torch_np.asarray(
         np.zeros((wavenumbers.shape[0], geometry_mesh.boundary_edges.shape[0]), dtype=NP_FLOAT_DTYPE),
         dtype=FLOAT_DTYPE,
     )
@@ -1203,7 +1202,7 @@ def _build_auxiliary_discretization(
         return structured_quad
 
     geometry_mesh = mesh
-    parent_cell_ids = jnp.arange(mesh.cell_count, dtype=INT_DTYPE)
+    parent_cell_ids = torch_np.arange(mesh.cell_count, dtype=INT_DTYPE)
     if not use_p2:
         expanded = geometry_mesh.expand_columnar_cells()
         if expanded is not None:
@@ -1260,8 +1259,8 @@ def _build_auxiliary_discretization(
         mesh.nodes,
     )
     operator_pattern = _build_sparse_operator_pattern(routing, boundary_routing)
-    source_center = jnp.asarray(np.mean(np.asarray(survey.electrode_positions, dtype=float), axis=0), dtype=FLOAT_DTYPE)
-    boundary_geometries = jnp.stack(
+    source_center = torch_np.asarray(np.mean(np.asarray(survey.electrode_positions, dtype=float), axis=0), dtype=FLOAT_DTYPE)
+    boundary_geometries = torch_np.stack(
         [
             robin_boundary_coefficients(
                 mesh=geometry_mesh,
@@ -1306,8 +1305,8 @@ def _build_source_resistivity_data(mesh: Mesh, source_node_ids: Array) -> Source
         counts[source_idx] = float(np.count_nonzero(mask))
 
     return SourceResistivityData(
-        node_cell_weights=jnp.asarray(weights, dtype=FLOAT_DTYPE),
-        node_cell_counts=jnp.asarray(counts, dtype=FLOAT_DTYPE),
+        node_cell_weights=torch_np.asarray(weights, dtype=FLOAT_DTYPE),
+        node_cell_counts=torch_np.asarray(counts, dtype=FLOAT_DTYPE),
     )
 
 
@@ -1345,7 +1344,6 @@ class ERTForward2p5D:
     auxiliary_discretization: AuxiliaryDiscretization | None
     linear_solver_backend: str
     terrain_cache_dir: Path | None
-    jit_cache_dir: Path | None
     _unit_primary_cache: dict[float, Array] = field(default_factory=dict, init=False, repr=False, compare=False)
     _reference_rhs_cache: dict[float, Array] = field(default_factory=dict, init=False, repr=False, compare=False)
     _cudss_state: dict[str, object] = field(default_factory=dict, init=False, repr=False, compare=False)
@@ -1363,18 +1361,16 @@ class ERTForward2p5D:
         topographic_geometric_factor_mode: str = "analytic",
         linear_solver_backend: str = "auto",
         terrain_cache_dir: str | Path | None = None,
-        jit_cache_dir: str | Path | None = None,
     ) -> "ERTForward2p5D":
         """Build the single supported forward configuration."""
 
-        resolved_jit_cache_dir = configure_torch_jit_cache(jit_cache_dir)
         routing = build_coo_routing(mesh)
         boundary_routing = build_boundary_routing(mesh)
         source_cell_ids = _locate_point_cells(mesh, survey.electrode_positions)
         source_positions = _build_source_positions(mesh, survey, source_cell_ids)
         matched_node_ids = _find_nearest_node_electrode_ids(mesh, survey.electrode_positions)
         entity_node_ids = _find_entity_node_ids(mesh, survey.electrode_positions, source_cell_ids)
-        source_node_ids = jnp.where(matched_node_ids >= 0, matched_node_ids, entity_node_ids)
+        source_node_ids = torch_np.where(matched_node_ids >= 0, matched_node_ids, entity_node_ids)
         electrode_matrix = _build_interpolation_matrix(mesh, survey.electrode_positions)
         if _same_point_locations(source_positions, survey.electrode_positions):
             source_matrix = electrode_matrix
@@ -1382,7 +1378,7 @@ class ERTForward2p5D:
             source_matrix = _build_interpolation_matrix(mesh, source_positions)
         r_min, r_max = survey_wavenumber_bounds(survey)
         cosine_weights = build_inverse_cosine_weights(r_min, r_max)
-        source_center = jnp.asarray(
+        source_center = torch_np.asarray(
             np.mean(np.asarray(survey.electrode_positions, dtype=float), axis=0),
             dtype=FLOAT_DTYPE,
         )
@@ -1404,7 +1400,7 @@ class ERTForward2p5D:
                 )
             )
         source_resistivity_data = _build_source_resistivity_data(mesh, source_node_ids)
-        boundary_geometries = jnp.stack(
+        boundary_geometries = torch_np.stack(
             [
                 robin_boundary_coefficients(
                     mesh=mesh,
@@ -1497,7 +1493,6 @@ class ERTForward2p5D:
             auxiliary_discretization=auxiliary_discretization,
             linear_solver_backend=_normalize_linear_solver_backend(linear_solver_backend),
             terrain_cache_dir=_normalize_cache_dir(terrain_cache_dir),
-            jit_cache_dir=resolved_jit_cache_dir,
         )
 
     def _wavenumber_index(self, wavenumber: float) -> int:
@@ -1516,13 +1511,12 @@ class ERTForward2p5D:
         boundary_inverse = self.operator_pattern.boundary_inverse
         nnz = self.operator_pattern.unique_indices.shape[0]
 
-        @torch_runtime.jit
         def kernel(conductivity: Array, wavenumber_sq: Array, boundary_geometry: Array) -> Array:
             volume_values = conductivity[:, None, None] * (stiffness + wavenumber_sq * mass)
             boundary_values = (
                 conductivity[boundary_edge_cells] * boundary_geometry
             )[:, None, None] * boundary_mass
-            data = jnp.zeros((nnz,), dtype=FLOAT_DTYPE)
+            data = torch_np.zeros((nnz,), dtype=FLOAT_DTYPE)
             data = data.at[volume_inverse].add(volume_values.reshape(-1))
             data = data.at[boundary_inverse].add(boundary_values.reshape(-1))
             return data
@@ -1540,13 +1534,12 @@ class ERTForward2p5D:
         boundary_mass = self.operator_templates.boundary_mass
         boundary_edge_cells = self.mesh.boundary_edge_cells
         boundary_geometries = self.boundary_geometries
-        wavenumber_sq = jnp.square(self.wavenumbers).astype(FLOAT_DTYPE)
+        wavenumber_sq = torch_np.square(self.wavenumbers).astype(FLOAT_DTYPE)
         volume_inverse = self.operator_pattern.volume_inverse
         boundary_inverse = self.operator_pattern.boundary_inverse
         nnz = self.operator_pattern.unique_indices.shape[0]
         wave_count = int(self.wavenumbers.shape[0])
 
-        @torch_runtime.jit
         def kernel(conductivity: Array) -> Array:
             conductivity_boundary = conductivity[boundary_edge_cells]
             volume_values = conductivity[None, :, None, None] * (
@@ -1555,7 +1548,7 @@ class ERTForward2p5D:
             boundary_values = (
                 conductivity_boundary[None, :] * boundary_geometries
             )[:, :, None, None] * boundary_mass[None, :, :, :]
-            data = jnp.zeros((wave_count, nnz), dtype=FLOAT_DTYPE)
+            data = torch_np.zeros((wave_count, nnz), dtype=FLOAT_DTYPE)
             data = data.at[:, volume_inverse].add(volume_values.reshape(wave_count, -1))
             data = data.at[:, boundary_inverse].add(boundary_values.reshape(wave_count, -1))
             return data
@@ -1569,10 +1562,9 @@ class ERTForward2p5D:
             return kernel
 
         shape = self.operator_pattern.shape
-        csr_indices = jnp.asarray(self.operator_pattern.csr_indices, dtype=INT_DTYPE)
-        csr_indptr = jnp.asarray(self.operator_pattern.csr_indptr, dtype=INT_DTYPE)
+        csr_indices = torch_np.asarray(self.operator_pattern.csr_indices, dtype=INT_DTYPE)
+        csr_indptr = torch_np.asarray(self.operator_pattern.csr_indptr, dtype=INT_DTYPE)
 
-        @torch_runtime.jit
         def kernel(values: Array, vectors: Array) -> Array:
             operator = CSR((values, csr_indices, csr_indptr), shape=shape)
             return (operator @ vectors.T).T
@@ -1586,17 +1578,16 @@ class ERTForward2p5D:
             return kernel
 
         shape = self.operator_pattern.shape
-        csr_indices = jnp.asarray(self.operator_pattern.csr_indices, dtype=INT_DTYPE)
-        csr_indptr = jnp.asarray(self.operator_pattern.csr_indptr, dtype=INT_DTYPE)
+        csr_indices = torch_np.asarray(self.operator_pattern.csr_indices, dtype=INT_DTYPE)
+        csr_indptr = torch_np.asarray(self.operator_pattern.csr_indptr, dtype=INT_DTYPE)
 
         def apply_single(args: tuple[Array, Array]) -> Array:
             values, vectors = args
             operator = CSR((values, csr_indices, csr_indptr), shape=shape)
             return (operator @ vectors.T).T
 
-        @torch_runtime.jit
         def kernel(values: Array, vectors: Array) -> Array:
-            return torch_runtime.lax.map(apply_single, (values, vectors))
+            return torch_runtime.map(apply_single, (values, vectors))
 
         self._kernel_cache["apply_operator_values_batch"] = kernel
         return kernel
@@ -1639,7 +1630,7 @@ class ERTForward2p5D:
 
     def _auxiliary_float_dtype(self):
         if self.use_numerical_primary and torch_runtime.config.torch_enable_float64:
-            return jnp.float64
+            return torch_np.float64
         return FLOAT_DTYPE
 
     def _cupy_from_torch(self, values: Array, *, transpose: bool = False, fortran: bool = False, dtype=FLOAT_DTYPE):
@@ -1675,14 +1666,14 @@ class ERTForward2p5D:
         values = cp.ascontiguousarray(values)
         if self._cudss_state.get("gpu_zero_copy", False):
             return torch_runtime.dlpack.from_dlpack(values).astype(dtype).copy()
-        return jnp.asarray(cp.asnumpy(values), dtype=dtype)
+        return torch_np.asarray(cp.asnumpy(values), dtype=dtype)
 
     def _torch_batch_rhs_from_cupy(self, values, *, dtype=FLOAT_DTYPE):
         cp, _ = self._cupy_sparse_modules()
         transposed = cp.ascontiguousarray(values.transpose((0, 2, 1)))
         if self._cudss_state.get("gpu_zero_copy", False):
             return torch_runtime.dlpack.from_dlpack(transposed).astype(dtype).copy()
-        return jnp.asarray(cp.asnumpy(transposed), dtype=dtype)
+        return torch_np.asarray(cp.asnumpy(transposed), dtype=dtype)
 
     def _terrain_cache_key(
         self,
@@ -1754,7 +1745,7 @@ class ERTForward2p5D:
             return None
         if cached.dtype != expected_dtype:
             cached = cached.astype(expected_dtype, copy=False)
-        return jnp.asarray(cached, dtype=dtype)
+        return torch_np.asarray(cached, dtype=dtype)
 
     def _store_terrain_cached_array(self, cache_key: str | None, values: Array) -> None:
         cache_path = self._terrain_cache_path(cache_key)
@@ -1785,13 +1776,12 @@ class ERTForward2p5D:
             parent_cell_ids = discretization.parent_cell_ids
             boundary_parent_cells = parent_cell_ids[discretization.geometry_mesh.boundary_edge_cells]
             boundary_geometries = discretization.boundary_geometries.astype(dtype)
-            wavenumber_sq = jnp.square(self.wavenumbers.astype(dtype)).astype(dtype)
+            wavenumber_sq = torch_np.square(self.wavenumbers.astype(dtype)).astype(dtype)
             volume_inverse = discretization.operator_pattern.volume_inverse
             boundary_inverse = discretization.operator_pattern.boundary_inverse
             nnz = discretization.operator_pattern.unique_indices.shape[0]
             wave_count = int(self.wavenumbers.shape[0])
 
-            @torch_runtime.jit
             def kernel(model_conductivity: Array) -> Array:
                 model_conductivity = model_conductivity.astype(dtype)
                 discretization_conductivity = model_conductivity[parent_cell_ids]
@@ -1802,7 +1792,7 @@ class ERTForward2p5D:
                 boundary_values = (
                     conductivity_boundary[None, :] * boundary_geometries
                 )[:, :, None, None] * boundary_mass[None, :, :, :]
-                data = jnp.zeros((wave_count, nnz), dtype=dtype)
+                data = torch_np.zeros((wave_count, nnz), dtype=dtype)
                 data = data.at[:, volume_inverse].add(volume_values.reshape(wave_count, -1))
                 data = data.at[:, boundary_inverse].add(boundary_values.reshape(wave_count, -1))
                 return data
@@ -1810,7 +1800,7 @@ class ERTForward2p5D:
             self._kernel_cache[cache_key] = kernel
 
         if conductivity is None:
-            conductivity_array = jnp.ones((self.mesh.cell_count,), dtype=FLOAT_DTYPE)
+            conductivity_array = torch_np.ones((self.mesh.cell_count,), dtype=FLOAT_DTYPE)
         else:
             conductivity_array = _expand_conductivity(conductivity, self.mesh.cell_count)
         return self._kernel_cache[cache_key](conductivity_array)
@@ -1826,17 +1816,16 @@ class ERTForward2p5D:
         kernel = self._kernel_cache.get(cache_key)
         if kernel is None:
             shape = operator_pattern.shape
-            csr_indices = jnp.asarray(operator_pattern.csr_indices, dtype=INT_DTYPE)
-            csr_indptr = jnp.asarray(operator_pattern.csr_indptr, dtype=INT_DTYPE)
+            csr_indices = torch_np.asarray(operator_pattern.csr_indices, dtype=INT_DTYPE)
+            csr_indptr = torch_np.asarray(operator_pattern.csr_indptr, dtype=INT_DTYPE)
 
             def apply_single(args: tuple[Array, Array]) -> Array:
                 single_values, single_vectors = args
                 operator = CSR((single_values, csr_indices, csr_indptr), shape=shape)
                 return (operator @ single_vectors.T).T
 
-            @torch_runtime.jit
             def kernel(values_batch: Array, vectors_batch: Array) -> Array:
-                return torch_runtime.lax.map(apply_single, (values_batch, vectors_batch))
+                return torch_runtime.map(apply_single, (values_batch, vectors_batch))
 
             self._kernel_cache[cache_key] = kernel
 
@@ -1962,7 +1951,7 @@ class ERTForward2p5D:
             if solution.ndim == 1:
                 solution = solution[:, None]
             solutions.append(np.asarray(solution.T, dtype=NP_FLOAT_DTYPE))
-        return jnp.asarray(np.stack(solutions, axis=0), dtype=FLOAT_DTYPE)
+        return torch_np.asarray(np.stack(solutions, axis=0), dtype=FLOAT_DTYPE)
 
     def _solve_batch_with_pattern(
         self,
@@ -1993,7 +1982,7 @@ class ERTForward2p5D:
         kernel = self._assemble_operator_values_kernel()
         return kernel(
             conductivity,
-            jnp.asarray(self.wavenumbers[wavenumber_index] ** 2, dtype=FLOAT_DTYPE),
+            torch_np.asarray(self.wavenumbers[wavenumber_index] ** 2, dtype=FLOAT_DTYPE),
             self.boundary_geometries[wavenumber_index],
         )
 
@@ -2044,7 +2033,7 @@ class ERTForward2p5D:
         return cached
 
     def _integrate_potentials(self, sub_potentials: Array) -> Array:
-        return jnp.tensordot(self.weights.astype(sub_potentials.dtype), sub_potentials, axes=(0, 0))
+        return torch_np.tensordot(self.weights.astype(sub_potentials.dtype), sub_potentials, axes=(0, 0))
 
     def _apply_source_difference(
         self,
@@ -2052,15 +2041,15 @@ class ERTForward2p5D:
         positive_sources: Array,
         negative_sources: Array,
     ) -> Array:
-        measurement_ids = jnp.arange(self.survey.measurement_count, dtype=INT_DTYPE)
-        safe_positive = jnp.maximum(positive_sources, 0)
-        safe_negative = jnp.maximum(negative_sources, 0)
-        positive = jnp.where(
+        measurement_ids = torch_np.arange(self.survey.measurement_count, dtype=INT_DTYPE)
+        safe_positive = torch_np.maximum(positive_sources, 0)
+        safe_negative = torch_np.maximum(negative_sources, 0)
+        positive = torch_np.where(
             positive_sources >= 0,
             source_potentials[safe_positive, measurement_ids],
             0.0,
         )
-        negative = jnp.where(
+        negative = torch_np.where(
             negative_sources >= 0,
             source_potentials[safe_negative, measurement_ids],
             0.0,
@@ -2119,7 +2108,7 @@ class ERTForward2p5D:
         return self._apply_measurement_map_from_integrated(self._integrate_potentials(phi_stack))
 
     def _combine_reciprocal_resistances(self, normal: Array, reciprocal: Array) -> Array:
-        return jnp.sqrt(jnp.abs(normal * reciprocal))
+        return torch_np.sqrt(torch_np.abs(normal * reciprocal))
 
     def _combine_reciprocal_resistance_jvp(
         self,
@@ -2130,8 +2119,8 @@ class ERTForward2p5D:
     ) -> Array:
         product = normal * reciprocal
         combined = self._combine_reciprocal_resistances(normal, reciprocal)
-        safe_combined = jnp.maximum(combined, jnp.asarray(1e-30, dtype=combined.dtype))
-        return 0.5 * jnp.sign(product) * (delta_normal * reciprocal + normal * delta_reciprocal) / safe_combined
+        safe_combined = torch_np.maximum(combined, torch_np.asarray(1e-30, dtype=combined.dtype))
+        return 0.5 * torch_np.sign(product) * (delta_normal * reciprocal + normal * delta_reciprocal) / safe_combined
 
     def _apply_measurement_map_transpose_with_receiver_and_sources(
         self,
@@ -2148,12 +2137,12 @@ class ERTForward2p5D:
             self.survey.measurement_count,
             name="cotangent",
         ).astype(rhs_dtype)
-        source_rhs = jnp.zeros((self.survey.electrode_count, node_count), dtype=rhs_dtype)
+        source_rhs = torch_np.zeros((self.survey.electrode_count, node_count), dtype=rhs_dtype)
         weighted_receivers = cotangent_array[:, None] * receiver_matrix
         positive_mask = positive_sources >= 0
         negative_mask = negative_sources >= 0
-        source_rhs = source_rhs.at[jnp.maximum(positive_sources, 0)].add(weighted_receivers * positive_mask[:, None])
-        source_rhs = source_rhs.at[jnp.maximum(negative_sources, 0)].add(-weighted_receivers * negative_mask[:, None])
+        source_rhs = source_rhs.at[torch_np.maximum(positive_sources, 0)].add(weighted_receivers * positive_mask[:, None])
+        source_rhs = source_rhs.at[torch_np.maximum(negative_sources, 0)].add(-weighted_receivers * negative_mask[:, None])
         return self.weights.astype(rhs_dtype)[:, None, None] * source_rhs[None, :, :]
 
     def _apply_measurement_map_transpose_batch_with_receiver_and_sources(
@@ -2173,14 +2162,14 @@ class ERTForward2p5D:
         ).astype(rhs_dtype)
         batch_size = int(cotangent_matrix.shape[0])
         source_count = int(self.survey.electrode_count)
-        source_rhs = jnp.zeros((batch_size, source_count, node_count), dtype=rhs_dtype)
+        source_rhs = torch_np.zeros((batch_size, source_count, node_count), dtype=rhs_dtype)
         weighted_receivers = cotangent_matrix[:, :, None] * receiver_matrix[None, :, :]
         positive_mask = positive_sources >= 0
         negative_mask = negative_sources >= 0
-        source_rhs = source_rhs.at[:, jnp.maximum(positive_sources, 0), :].add(
+        source_rhs = source_rhs.at[:, torch_np.maximum(positive_sources, 0), :].add(
             weighted_receivers * positive_mask[None, :, None]
         )
-        source_rhs = source_rhs.at[:, jnp.maximum(negative_sources, 0), :].add(
+        source_rhs = source_rhs.at[:, torch_np.maximum(negative_sources, 0), :].add(
             -weighted_receivers * negative_mask[None, :, None]
         )
         rhs = self.weights.astype(rhs_dtype)[:, None, None, None] * source_rhs[None, :, :, :]
@@ -2274,13 +2263,12 @@ class ERTForward2p5D:
         source_node_ids = self.source_node_ids
         source_cell_ids = self.source_cell_ids
 
-        @torch_runtime.jit
         def kernel(conductivity: Array) -> Array:
-            log_resistivity = -jnp.log(conductivity)
-            node_log_rho = jnp.einsum("ec,c->e", node_cell_weights, log_resistivity) / node_cell_counts
-            node_rho = jnp.exp(node_log_rho)
+            log_resistivity = -torch_np.log(conductivity)
+            node_log_rho = torch_np.einsum("ec,c->e", node_cell_weights, log_resistivity) / node_cell_counts
+            node_rho = torch_np.exp(node_log_rho)
             entity_rho = 1.0 / conductivity[source_cell_ids]
-            return jnp.where(source_node_ids >= 0, node_rho, entity_rho)
+            return torch_np.where(source_node_ids >= 0, node_rho, entity_rho)
 
         self._kernel_cache["source_resistivities"] = kernel
         return kernel
@@ -2291,10 +2279,9 @@ class ERTForward2p5D:
             return kernel
 
         shape = self.operator_pattern.shape
-        csr_indices = jnp.asarray(self.operator_pattern.csr_indices, dtype=INT_DTYPE)
-        csr_indptr = jnp.asarray(self.operator_pattern.csr_indptr, dtype=INT_DTYPE)
+        csr_indices = torch_np.asarray(self.operator_pattern.csr_indices, dtype=INT_DTYPE)
+        csr_indptr = torch_np.asarray(self.operator_pattern.csr_indptr, dtype=INT_DTYPE)
 
-        @torch_runtime.jit
         def kernel(operator_values: Array, unit_primary: Array, source_resistivities: Array, reference_rhs: Array):
             operator = CSR((operator_values, csr_indices, csr_indptr), shape=shape)
             primary = unit_primary * source_resistivities[:, None]
@@ -2312,7 +2299,6 @@ class ERTForward2p5D:
 
         apply_batch = self._apply_operator_values_batch_kernel()
 
-        @torch_runtime.jit
         def kernel(
             operator_values: Array,
             unit_primary: Array,
@@ -2374,7 +2360,7 @@ class ERTForward2p5D:
             solution_transposed = cp.ascontiguousarray(solution.T)
             cp.cuda.get_current_stream().synchronize()
             return torch_runtime.dlpack.from_dlpack(solution_transposed).astype(FLOAT_DTYPE).copy()
-        return jnp.asarray(cp.asnumpy(solution.T), dtype=FLOAT_DTYPE)
+        return torch_np.asarray(cp.asnumpy(solution.T), dtype=FLOAT_DTYPE)
 
     def _solve_cudss_batch(self, operator_values: Array, rhs: Array) -> Array:
         """Solve a batched family of sparse SPD systems with NVIDIA cuDSS."""
@@ -2456,7 +2442,7 @@ class ERTForward2p5D:
         return self._solve_cudss_batch(operator_values, rhs)
 
     def _check_finite(self, values: Array, *, context: str, wavenumber: float | None = None) -> None:
-        if bool(jnp.all(jnp.isfinite(values))):
+        if bool(torch_np.all(torch_np.isfinite(values))):
             return
 
         details = [f"{context} produced non-finite values"]
@@ -2592,13 +2578,13 @@ class ERTForward2p5D:
                 raise ValueError("primary auxiliary discretization is not available")
 
             discretization = self.primary_auxiliary_discretization
-            wavenumber_sq = jnp.square(self.wavenumbers).astype(FLOAT_DTYPE)
+            wavenumber_sq = torch_np.square(self.wavenumbers).astype(FLOAT_DTYPE)
             volume_templates = discretization.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[
                 :, None, None, None
             ] * discretization.operator_templates.mass[None, :, :, :]
             phi_local = phi_stack[:, :, discretization.cell_connectivity]
             lambda_local = lambda_stack[:, :, discretization.cell_connectivity]
-            auxiliary_gradient = -jnp.einsum("wsci,wcij,wscj->c", lambda_local, volume_templates, phi_local)
+            auxiliary_gradient = -torch_np.einsum("wsci,wcij,wscj->c", lambda_local, volume_templates, phi_local)
 
             if include_robin_boundary_derivative:
                 boundary_templates = (
@@ -2607,21 +2593,21 @@ class ERTForward2p5D:
                 )
                 phi_boundary = phi_stack[:, :, discretization.boundary_connectivity]
                 lambda_boundary = lambda_stack[:, :, discretization.boundary_connectivity]
-                boundary_gradient = -jnp.einsum("wsbi,wbij,wsbj->b", lambda_boundary, boundary_templates, phi_boundary)
+                boundary_gradient = -torch_np.einsum("wsbi,wbij,wsbj->b", lambda_boundary, boundary_templates, phi_boundary)
                 auxiliary_gradient = auxiliary_gradient.at[discretization.geometry_mesh.boundary_edge_cells].add(
                     boundary_gradient
                 )
 
-            gradient = jnp.zeros((self.mesh.cell_count,), dtype=auxiliary_gradient.dtype)
+            gradient = torch_np.zeros((self.mesh.cell_count,), dtype=auxiliary_gradient.dtype)
             return gradient.at[discretization.parent_cell_ids].add(auxiliary_gradient)
 
-        wavenumber_sq = jnp.square(self.wavenumbers).astype(FLOAT_DTYPE)
+        wavenumber_sq = torch_np.square(self.wavenumbers).astype(FLOAT_DTYPE)
         volume_templates = self.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[:, None, None, None] * (
             self.operator_templates.mass[None, :, :, :]
         )
         phi_local = phi_stack[:, :, self.mesh.cells]
         lambda_local = lambda_stack[:, :, self.mesh.cells]
-        gradient = -jnp.einsum("wsci,wcij,wscj->c", lambda_local, volume_templates, phi_local)
+        gradient = -torch_np.einsum("wsci,wcij,wscj->c", lambda_local, volume_templates, phi_local)
 
         if not include_robin_boundary_derivative:
             return gradient
@@ -2629,7 +2615,7 @@ class ERTForward2p5D:
         boundary_templates = self.boundary_geometries[:, :, None, None] * self.operator_templates.boundary_mass[None, :, :, :]
         phi_boundary = phi_stack[:, :, self.mesh.boundary_edges]
         lambda_boundary = lambda_stack[:, :, self.mesh.boundary_edges]
-        boundary_gradient = -jnp.einsum("wsbi,wbij,wsbj->b", lambda_boundary, boundary_templates, phi_boundary)
+        boundary_gradient = -torch_np.einsum("wsbi,wbij,wsbj->b", lambda_boundary, boundary_templates, phi_boundary)
         return gradient.at[self.mesh.boundary_edge_cells].add(boundary_gradient)
 
     def _accumulate_adjoint_cell_gradient_batch(
@@ -2646,13 +2632,13 @@ class ERTForward2p5D:
                 raise ValueError("primary auxiliary discretization is not available")
 
             discretization = self.primary_auxiliary_discretization
-            wavenumber_sq = jnp.square(self.wavenumbers).astype(FLOAT_DTYPE)
+            wavenumber_sq = torch_np.square(self.wavenumbers).astype(FLOAT_DTYPE)
             volume_templates = discretization.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[
                 :, None, None, None
             ] * discretization.operator_templates.mass[None, :, :, :]
             phi_local = phi_stack[:, :, discretization.cell_connectivity]
             lambda_local = lambda_stack[:, :, :, discretization.cell_connectivity]
-            auxiliary_gradient = -jnp.einsum("wqeci,wcij,wecj->qc", lambda_local, volume_templates, phi_local)
+            auxiliary_gradient = -torch_np.einsum("wqeci,wcij,wecj->qc", lambda_local, volume_templates, phi_local)
 
             if include_robin_boundary_derivative:
                 boundary_templates = (
@@ -2661,21 +2647,21 @@ class ERTForward2p5D:
                 )
                 phi_boundary = phi_stack[:, :, discretization.boundary_connectivity]
                 lambda_boundary = lambda_stack[:, :, :, discretization.boundary_connectivity]
-                boundary_gradient = -jnp.einsum("wqeri,wrij,werj->qr", lambda_boundary, boundary_templates, phi_boundary)
+                boundary_gradient = -torch_np.einsum("wqeri,wrij,werj->qr", lambda_boundary, boundary_templates, phi_boundary)
                 auxiliary_gradient = auxiliary_gradient.at[:, discretization.geometry_mesh.boundary_edge_cells].add(
                     boundary_gradient
                 )
 
-            gradient = jnp.zeros((lambda_stack.shape[1], self.mesh.cell_count), dtype=auxiliary_gradient.dtype)
+            gradient = torch_np.zeros((lambda_stack.shape[1], self.mesh.cell_count), dtype=auxiliary_gradient.dtype)
             return gradient.at[:, discretization.parent_cell_ids].add(auxiliary_gradient)
 
-        wavenumber_sq = jnp.square(self.wavenumbers).astype(FLOAT_DTYPE)
+        wavenumber_sq = torch_np.square(self.wavenumbers).astype(FLOAT_DTYPE)
         volume_templates = self.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[:, None, None, None] * (
             self.operator_templates.mass[None, :, :, :]
         )
         phi_local = phi_stack[:, :, self.mesh.cells]
         lambda_local = lambda_stack[:, :, :, self.mesh.cells]
-        gradient = -jnp.einsum("wqeci,wcij,wecj->qc", lambda_local, volume_templates, phi_local)
+        gradient = -torch_np.einsum("wqeci,wcij,wecj->qc", lambda_local, volume_templates, phi_local)
 
         if not include_robin_boundary_derivative:
             return gradient
@@ -2683,7 +2669,7 @@ class ERTForward2p5D:
         boundary_templates = self.boundary_geometries[:, :, None, None] * self.operator_templates.boundary_mass[None, :, :, :]
         phi_boundary = phi_stack[:, :, self.mesh.boundary_edges]
         lambda_boundary = lambda_stack[:, :, :, self.mesh.boundary_edges]
-        boundary_gradient = -jnp.einsum("wqeri,wrij,werj->qr", lambda_boundary, boundary_templates, phi_boundary)
+        boundary_gradient = -torch_np.einsum("wqeri,wrij,werj->qr", lambda_boundary, boundary_templates, phi_boundary)
         return gradient.at[:, self.mesh.boundary_edge_cells].add(boundary_gradient)
 
     def _normal_sensitivity_direct_kernel(
@@ -2699,8 +2685,8 @@ class ERTForward2p5D:
         if kernel is not None:
             return kernel
 
-        cell_connectivity = jnp.asarray(cell_connectivity, dtype=INT_DTYPE)
-        parent_cell_ids = jnp.asarray(parent_cell_ids, dtype=INT_DTYPE)
+        cell_connectivity = torch_np.asarray(cell_connectivity, dtype=INT_DTYPE)
+        parent_cell_ids = torch_np.asarray(parent_cell_ids, dtype=INT_DTYPE)
         weighted_templates = (self.weights.astype(volume_templates.dtype)[:, None, None, None] * volume_templates).astype(
             volume_templates.dtype
         )
@@ -2889,7 +2875,7 @@ class ERTForward2p5D:
                 )
                 if phi_stack.is_cuda:
                     return torch_runtime.dlpack.from_dlpack(gradient_cp).to(dtype=solve_dtype).clone()
-                return jnp.asarray(cp.asnumpy(gradient_cp), dtype=solve_dtype)
+                return torch_np.asarray(cp.asnumpy(gradient_cp), dtype=solve_dtype)
             except Exception:
                 cupy_disabled = True
                 return None
@@ -2914,7 +2900,7 @@ class ERTForward2p5D:
             local_shape = (int(phi_stack.shape[0]), int(current_fields.shape[1]), cell_count, nodes_per_cell)
             current_local = torch.index_select(current_fields, 2, flat_cell_connectivity_work).reshape(local_shape)
             receiver_local = torch.index_select(receiver_fields, 2, flat_cell_connectivity_work).reshape(local_shape)
-            auxiliary_gradient = -jnp.einsum(
+            auxiliary_gradient = -torch_np.einsum(
                 "wbci,wcij,wbcj->bc",
                 receiver_local,
                 weighted_templates_work,
@@ -2927,7 +2913,6 @@ class ERTForward2p5D:
             )
             return gradient.index_add_(1, parent_cell_ids_work, auxiliary_gradient)
 
-        @torch_runtime.jit
         def kernel(
             phi_stack: Array,
             current_positive: Array,
@@ -2996,14 +2981,14 @@ class ERTForward2p5D:
             chunk = measurements[start:stop]
             gradient_rows = kernel(
                 phi_stack,
-                jnp.asarray(chunk[:, 0], dtype=INT_DTYPE),
-                jnp.asarray(chunk[:, 1], dtype=INT_DTYPE),
-                jnp.asarray(chunk[:, 2], dtype=INT_DTYPE),
-                jnp.asarray(chunk[:, 3], dtype=INT_DTYPE),
+                torch_np.asarray(chunk[:, 0], dtype=INT_DTYPE),
+                torch_np.asarray(chunk[:, 1], dtype=INT_DTYPE),
+                torch_np.asarray(chunk[:, 2], dtype=INT_DTYPE),
+                torch_np.asarray(chunk[:, 3], dtype=INT_DTYPE),
             )
             rows.append(gradient_rows)
 
-        return jnp.concatenate(rows, axis=0)
+        return torch_np.concatenate(rows, axis=0)
 
     def _direct_sensitivity_inputs(
         self,
@@ -3042,7 +3027,7 @@ class ERTForward2p5D:
         if np.any(active_parameter_ids >= resolved_parameter_count):
             raise ValueError("sensitivity_cell_parameter_ids contain ids outside sensitivity_parameter_count")
 
-        active_cell_ids_torch = jnp.asarray(active_cell_ids, dtype=INT_DTYPE)
+        active_cell_ids_torch = torch_np.asarray(active_cell_ids, dtype=INT_DTYPE)
         digest = hashlib.sha256()
         _update_digest_value(digest, "parameter_count", resolved_parameter_count)
         _update_digest_array(digest, "cell_parameter_ids", cell_parameter_ids)
@@ -3050,10 +3035,10 @@ class ERTForward2p5D:
             f"{cache_key}_param_{resolved_parameter_count}_{active_cell_ids.size}_{digest.hexdigest()[:16]}"
         )
         return (
-            jnp.take(cell_connectivity, active_cell_ids_torch, axis=0),
-            jnp.asarray(active_parameter_ids, dtype=INT_DTYPE),
+            torch_np.take(cell_connectivity, active_cell_ids_torch, axis=0),
+            torch_np.asarray(active_parameter_ids, dtype=INT_DTYPE),
             resolved_parameter_count,
-            jnp.take(volume_templates, active_cell_ids_torch, axis=1),
+            torch_np.take(volume_templates, active_cell_ids_torch, axis=1),
             parameterized_cache_key,
         )
 
@@ -3087,7 +3072,7 @@ class ERTForward2p5D:
             discretization,
             cache_key=f"{cache_key}_operator_values",
         )
-        rhs = jnp.broadcast_to(
+        rhs = torch_np.broadcast_to(
             discretization.source_matrix[None, :, :],
             (self.wavenumbers.shape[0], discretization.source_matrix.shape[0], discretization.source_matrix.shape[1]),
         ).astype(operator_values.dtype)
@@ -3138,7 +3123,7 @@ class ERTForward2p5D:
             self.primary_potential_discretization.dof_nodes,
             self.primary_auxiliary_discretization.dof_nodes,
         )
-        cached = jnp.take(primary_potentials, jnp.asarray(selection_indices, dtype=INT_DTYPE), axis=-1)
+        cached = torch_np.take(primary_potentials, torch_np.asarray(selection_indices, dtype=INT_DTYPE), axis=-1)
         self._derived_cache["auxiliary_sub_potentials"] = cached
         self._store_terrain_cached_array(disk_cache_key, cached)
         return cached
@@ -3169,13 +3154,13 @@ class ERTForward2p5D:
             cache_key="auxiliary_geometric_sub_potentials",
             state_prefix="auxiliary_geometric",
         )
-        integrated_potentials = jnp.tensordot(self.weights, sub_potentials, axes=(0, 0))
+        integrated_potentials = torch_np.tensordot(self.weights, sub_potentials, axes=(0, 0))
         electrode_potentials = integrated_potentials @ discretization.electrode_matrix.T
         source_potentials = electrode_potentials[self.survey.measurements[:, 0]] - electrode_potentials[
             self.survey.measurements[:, 1]
         ]
-        resistance = source_potentials[jnp.arange(self.survey.measurement_count), self.survey.measurements[:, 2]] - source_potentials[
-            jnp.arange(self.survey.measurement_count), self.survey.measurements[:, 3]
+        resistance = source_potentials[torch_np.arange(self.survey.measurement_count), self.survey.measurements[:, 2]] - source_potentials[
+            torch_np.arange(self.survey.measurement_count), self.survey.measurements[:, 3]
         ]
         cached = 1.0 / resistance
         self._derived_cache["auxiliary_geometric_factors"] = cached
@@ -3197,7 +3182,7 @@ class ERTForward2p5D:
             if node_id >= 0:
                 primary = primary.at[node_id].set(_node_singularity_value(self.mesh, node_id, wavenumber))
             primaries.append(primary)
-        cached = jnp.stack(primaries, axis=0)
+        cached = torch_np.stack(primaries, axis=0)
         self._unit_primary_cache[wavenumber] = cached
         return cached
 
@@ -3209,7 +3194,7 @@ class ERTForward2p5D:
         if self.use_numerical_primary:
             cached = self._projected_auxiliary_unit_primary_stack()
         else:
-            cached = jnp.stack(
+            cached = torch_np.stack(
                 [self._unit_primary_potentials(wavenumber_index) for wavenumber_index in range(self.wavenumbers.shape[0])],
                 axis=0,
             )
@@ -3233,12 +3218,12 @@ class ERTForward2p5D:
 
         if self.use_numerical_primary:
             reference_values = self._assemble_operator_values_batch(
-                jnp.ones((self.mesh.cell_count,), dtype=FLOAT_DTYPE)
+                torch_np.ones((self.mesh.cell_count,), dtype=FLOAT_DTYPE)
             )
             cached = self._apply_operator_values_batch(reference_values, self._unit_primary_stack())
         else:
             reference_values = self._assemble_operator_values_batch(
-                jnp.ones((self.mesh.cell_count,), dtype=FLOAT_DTYPE)
+                torch_np.ones((self.mesh.cell_count,), dtype=FLOAT_DTYPE)
             )
             cached = self._apply_operator_values_batch(reference_values, self._unit_primary_stack())
         self._reference_rhs_cache["__stack__"] = cached
@@ -3429,8 +3414,8 @@ class ERTForward2p5D:
         """Solve the multi-wavenumber 2.5D forward problem for a conductivity model."""
 
         integrated_potentials, electrode_potentials, resistance = self._compute_measurement_response(conductivity)
-        current_array = jnp.asarray(currents, dtype=FLOAT_DTYPE)
-        apparent_resistivity = jnp.abs(self._geometric_factors()) * resistance / current_array
+        current_array = torch_np.asarray(currents, dtype=FLOAT_DTYPE)
+        apparent_resistivity = torch_np.abs(self._geometric_factors()) * resistance / current_array
 
         return ForwardResponse(
             apparent_resistivity=apparent_resistivity,
@@ -3512,7 +3497,7 @@ class ERTForward2p5D:
             )
             resistance = self._combine_reciprocal_resistances(normal_resistance, reciprocal_resistance)
             if normal_sensitivity and not include_robin_boundary_derivative:
-                wavenumber_sq = jnp.square(self.wavenumbers).astype(sub_potentials.dtype)
+                wavenumber_sq = torch_np.square(self.wavenumbers).astype(sub_potentials.dtype)
                 volume_templates = discretization.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[
                     :, None, None, None
                 ] * discretization.operator_templates.mass[None, :, :, :]
@@ -3575,7 +3560,7 @@ class ERTForward2p5D:
             reciprocal_resistance = self._apply_reciprocal_measurement_map_from_integrated(integrated_potentials)
             resistance = self._combine_reciprocal_resistances(normal_resistance, reciprocal_resistance)
             if normal_sensitivity and not include_robin_boundary_derivative:
-                wavenumber_sq = jnp.square(self.wavenumbers).astype(sub_potentials.dtype)
+                wavenumber_sq = torch_np.square(self.wavenumbers).astype(sub_potentials.dtype)
                 volume_templates = self.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[:, None, None, None] * (
                     self.operator_templates.mass[None, :, :, :]
                 )
@@ -3587,7 +3572,7 @@ class ERTForward2p5D:
                     sensitivity_cache_key,
                 ) = self._direct_sensitivity_inputs(
                     cell_connectivity=self.mesh.cells,
-                    parent_cell_ids=jnp.arange(self.mesh.cell_count, dtype=INT_DTYPE),
+                    parent_cell_ids=torch_np.arange(self.mesh.cell_count, dtype=INT_DTYPE),
                     parameter_count=int(self.mesh.cell_count),
                     volume_templates=volume_templates,
                     cache_key="normal_sensitivity_direct",
@@ -3619,8 +3604,8 @@ class ERTForward2p5D:
                     normal_sensitivity=normal_sensitivity,
                 )
 
-        current_array = jnp.asarray(currents, dtype=FLOAT_DTYPE)
-        apparent_resistivity = jnp.abs(self._geometric_factors()) * resistance / current_array
+        current_array = torch_np.asarray(currents, dtype=FLOAT_DTYPE)
+        apparent_resistivity = torch_np.abs(self._geometric_factors()) * resistance / current_array
         response = ForwardResponse(
             apparent_resistivity=apparent_resistivity,
             resistance=resistance,
@@ -3639,40 +3624,40 @@ class ERTForward2p5D:
     def apparent_resistivity_values(self, conductivity: Array | float, currents: Array | float = 1.0) -> Array:
         """Return apparent resistivity values without allocating a ForwardResponse."""
 
-        current_array = jnp.asarray(currents, dtype=FLOAT_DTYPE)
-        return jnp.abs(self._geometric_factors()) * self._compute_resistance(conductivity) / current_array
+        current_array = torch_np.asarray(currents, dtype=FLOAT_DTYPE)
+        return torch_np.abs(self._geometric_factors()) * self._compute_resistance(conductivity) / current_array
 
     def apparent_resistivity_series(self, conductivities: Array | float, currents: Array | float = 1.0) -> Array:
         """Return apparent resistivity for a sequence of conductivity models.
 
-        The forward operator, geometric factors, JIT kernels, cuDSS plan, sparse
+        The forward operator, geometric factors, cuDSS plan, sparse
         matrix buffers, and RHS buffers are reused across all timesteps. This is
         the preferred path for time-lapse forward prediction when electrode
         potentials and unintegrated fields are not needed.
         """
 
-        conductivity_array = jnp.asarray(conductivities, dtype=self._auxiliary_float_dtype())
+        conductivity_array = torch_np.asarray(conductivities, dtype=self._auxiliary_float_dtype())
         if conductivity_array.ndim != 2 or conductivity_array.shape[1] != self.mesh.cell_count:
             raise ValueError(f"conductivities must have shape (n_steps, {self.mesh.cell_count})")
 
-        currents_array = jnp.asarray(currents, dtype=FLOAT_DTYPE)
+        currents_array = torch_np.asarray(currents, dtype=FLOAT_DTYPE)
         rows = []
         for step_index in range(int(conductivity_array.shape[0])):
             step_currents = currents_array[step_index] if currents_array.ndim == 2 else currents_array
             rows.append(self.apparent_resistivity_values(conductivity_array[step_index], currents=step_currents))
-        return jnp.stack(rows, axis=0)
+        return torch_np.stack(rows, axis=0)
 
     def prepare(self, conductivity: Array | float | None = None, *, include_solver_state: bool = True) -> None:
-        """Populate geometry, JIT, cache, and optional cuDSS plan state before timed solves.
+        """Populate geometry, cache, and optional cuDSS plan state before timed solves.
 
         The preparation conductivity is only a representative model used to
-        compile kernels and size cuDSS buffers. Later solves still update matrix
+        size cuDSS buffers. Later solves still update matrix
         values and run a fresh numeric factorization whenever conductivity
         changes.
         """
 
         if conductivity is None:
-            solve_conductivity = jnp.ones((self.mesh.cell_count,), dtype=FLOAT_DTYPE)
+            solve_conductivity = torch_np.ones((self.mesh.cell_count,), dtype=FLOAT_DTYPE)
         else:
             solve_conductivity = _expand_conductivity(conductivity, self.mesh.cell_count)
 
@@ -3718,7 +3703,7 @@ class ERTForward2p5D:
                 integrated_potentials = self._integrate_potentials(total_fields)
                 electrode_potentials = integrated_potentials @ discretization.electrode_matrix.T
                 resistance = self._auxiliary_resistance_from_integrated(discretization, integrated_potentials)
-                apparent_resistivity = jnp.abs(geometric_factors) * resistance
+                apparent_resistivity = torch_np.abs(geometric_factors) * resistance
                 torch_runtime.block_until_ready((prepared, integrated_potentials, electrode_potentials, resistance, apparent_resistivity))
                 total_fields = torch_runtime.block_until_ready(total_fields)
                 self._store_prepared_total_fields(solve_conductivity, operator_values, total_fields)
@@ -3749,7 +3734,7 @@ class ERTForward2p5D:
             integrated_potentials = self._integrate_potentials(total_fields)
             electrode_potentials = integrated_potentials @ self.electrode_matrix.T
             resistance = self._native_resistance_from_integrated(integrated_potentials)
-            apparent_resistivity = jnp.abs(geometric_factors) * resistance
+            apparent_resistivity = torch_np.abs(geometric_factors) * resistance
             torch_runtime.block_until_ready((prepared, integrated_potentials, electrode_potentials, resistance, apparent_resistivity))
             total_fields = torch_runtime.block_until_ready(total_fields)
             self._store_prepared_total_fields(solve_conductivity, operator_values, total_fields)
@@ -3837,13 +3822,13 @@ class ERTForward2p5D:
             )
             product = normal * reciprocal
             combined = self._combine_reciprocal_resistances(normal, reciprocal)
-            safe_combined = jnp.maximum(combined, jnp.asarray(1e-30, dtype=combined.dtype))
+            safe_combined = torch_np.maximum(combined, torch_np.asarray(1e-30, dtype=combined.dtype))
             cotangent_array = _expand_measurement_vector(
                 cotangent,
                 self.survey.measurement_count,
                 name="cotangent",
             ).astype(combined.dtype)
-            common = 0.5 * cotangent_array * jnp.sign(product) / safe_combined
+            common = 0.5 * cotangent_array * torch_np.sign(product) / safe_combined
             normal_cotangent = common * reciprocal
             reciprocal_cotangent = common * normal
             adjoint_rhs = self._apply_measurement_map_transpose_with_receiver(
@@ -3872,13 +3857,13 @@ class ERTForward2p5D:
         reciprocal = self._apply_reciprocal_measurement_map_from_integrated(integrated_phi)
         product = normal * reciprocal
         combined = self._combine_reciprocal_resistances(normal, reciprocal)
-        safe_combined = jnp.maximum(combined, jnp.asarray(1e-30, dtype=combined.dtype))
+        safe_combined = torch_np.maximum(combined, torch_np.asarray(1e-30, dtype=combined.dtype))
         cotangent_array = _expand_measurement_vector(
             cotangent,
             self.survey.measurement_count,
             name="cotangent",
         ).astype(combined.dtype)
-        common = 0.5 * cotangent_array * jnp.sign(product) / safe_combined
+        common = 0.5 * cotangent_array * torch_np.sign(product) / safe_combined
         normal_cotangent = common * reciprocal
         reciprocal_cotangent = common * normal
         adjoint_rhs = self._apply_measurement_map_transpose(normal_cotangent) + self._apply_reciprocal_measurement_map_transpose(
@@ -3910,17 +3895,17 @@ class ERTForward2p5D:
         source_count = int(self.survey.electrode_count)
         product = normal * reciprocal
         combined = self._combine_reciprocal_resistances(normal, reciprocal)
-        safe_combined = jnp.maximum(combined, jnp.asarray(1e-30, dtype=combined.dtype))
+        safe_combined = torch_np.maximum(combined, torch_np.asarray(1e-30, dtype=combined.dtype))
         rows = []
         refactorize = True
 
         for start in range(0, measurement_count, batch_size):
             stop = min(start + batch_size, measurement_count)
             chunk_size = stop - start
-            cotangent = jnp.eye(measurement_count, dtype=combined.dtype)[start:stop]
+            cotangent = torch_np.eye(measurement_count, dtype=combined.dtype)[start:stop]
             if chunk_size < batch_size:
-                padding = jnp.zeros((batch_size - chunk_size, measurement_count), dtype=combined.dtype)
-                cotangent = jnp.concatenate((cotangent, padding), axis=0)
+                padding = torch_np.zeros((batch_size - chunk_size, measurement_count), dtype=combined.dtype)
+                cotangent = torch_np.concatenate((cotangent, padding), axis=0)
 
             if normal_sensitivity:
                 adjoint_rhs = self._apply_measurement_map_transpose_batch_with_receiver(
@@ -3929,7 +3914,7 @@ class ERTForward2p5D:
                     node_count=node_count,
                 )
             else:
-                common = 0.5 * cotangent * jnp.sign(product)[None, :] / safe_combined[None, :]
+                common = 0.5 * cotangent * torch_np.sign(product)[None, :] / safe_combined[None, :]
                 normal_cotangent = common * reciprocal[None, :]
                 reciprocal_cotangent = common * normal[None, :]
                 adjoint_rhs = self._apply_measurement_map_transpose_batch_with_receiver(
@@ -3964,7 +3949,7 @@ class ERTForward2p5D:
             )
             rows.append(gradient_rows[:chunk_size])
 
-        return jnp.concatenate(rows, axis=0)
+        return torch_np.concatenate(rows, axis=0)
 
     def jacobian(
         self,
@@ -4008,7 +3993,7 @@ class ERTForward2p5D:
                 current_receiver,
             )
             if normal_sensitivity and not include_robin_boundary_derivative:
-                wavenumber_sq = jnp.square(self.wavenumbers).astype(phi_stack.dtype)
+                wavenumber_sq = torch_np.square(self.wavenumbers).astype(phi_stack.dtype)
                 volume_templates = discretization.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[
                     :, None, None, None
                 ] * discretization.operator_templates.mass[None, :, :, :]
@@ -4041,7 +4026,7 @@ class ERTForward2p5D:
         normal = self._apply_measurement_map_from_integrated(integrated_phi)
         reciprocal = self._apply_reciprocal_measurement_map_from_integrated(integrated_phi)
         if normal_sensitivity and not include_robin_boundary_derivative:
-            wavenumber_sq = jnp.square(self.wavenumbers).astype(phi_stack.dtype)
+            wavenumber_sq = torch_np.square(self.wavenumbers).astype(phi_stack.dtype)
             volume_templates = self.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[:, None, None, None] * (
                 self.operator_templates.mass[None, :, :, :]
             )
@@ -4049,7 +4034,7 @@ class ERTForward2p5D:
                 phi_stack,
                 batch_size=batch_size,
                 cell_connectivity=self.mesh.cells,
-                parent_cell_ids=jnp.arange(self.mesh.cell_count, dtype=INT_DTYPE),
+                parent_cell_ids=torch_np.arange(self.mesh.cell_count, dtype=INT_DTYPE),
                 parameter_count=int(self.mesh.cell_count),
                 volume_templates=volume_templates,
                 cache_key="normal_sensitivity_direct",
@@ -4072,9 +4057,9 @@ class ERTForward2p5D:
     def jacobian_columnwise(self, conductivity: Array | float) -> Array:
         """Materialize the explicit resistance Jacobian with one JVP per cell."""
 
-        basis = jnp.eye(self.mesh.cell_count, dtype=FLOAT_DTYPE)
+        basis = torch_np.eye(self.mesh.cell_count, dtype=FLOAT_DTYPE)
         columns = [self.jvp(conductivity, basis[cell_index]) for cell_index in range(self.mesh.cell_count)]
-        return jnp.stack(columns, axis=1)
+        return torch_np.stack(columns, axis=1)
 
     def close(self) -> None:
         solver_keys = [

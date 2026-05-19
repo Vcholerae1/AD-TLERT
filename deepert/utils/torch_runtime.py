@@ -1,4 +1,4 @@
-"""Small Torch runtime compatibility layer used during the JAX migration."""
+"""Torch-first array helpers used throughout Deepert."""
 
 from __future__ import annotations
 
@@ -113,18 +113,12 @@ def block_until_ready(values: Any) -> Any:
 
 class _Config:
     @property
-    def jax_enable_x64(self) -> bool:
+    def torch_enable_float64(self) -> bool:
         return torch.get_default_dtype() == torch.float64
 
-    @property
-    def torch_enable_float64(self) -> bool:
-        return self.jax_enable_x64
-
     def update(self, key: str, value: Any) -> None:
-        if key in {"jax_enable_x64", "torch_enable_float64"}:
+        if key == "torch_enable_float64":
             torch.set_default_dtype(torch.float64 if bool(value) else torch.float32)
-            return
-        if key.startswith("jax_"):
             return
         raise ValueError(f"unsupported Torch runtime config key: {key}")
 
@@ -135,12 +129,12 @@ class _Dlpack:
         return torch.from_dlpack(values)
 
 
-class _Lax:
+class _MapNamespace:
     @staticmethod
     def map(function: Callable[[tuple[torch.Tensor, ...]], torch.Tensor], xs: Iterable[torch.Tensor]) -> torch.Tensor:
         arrays = tuple(xs)
         if not arrays:
-            raise ValueError("lax.map compatibility requires at least one input")
+            raise ValueError("torch_runtime.map requires at least one input")
         outputs = [function(tuple(array[index] for array in arrays)) for index in range(int(arrays[0].shape[0]))]
         return torch.stack(outputs, dim=0)
 
@@ -148,13 +142,11 @@ class _Lax:
 class _TorchRuntime:
     config = _Config()
     dlpack = _Dlpack()
-    lax = _Lax()
+    _map = _MapNamespace()
 
     @staticmethod
-    def jit(function: Callable[..., Any] | None = None, **_: Any):
-        if function is None:
-            return lambda fn: fn
-        return function
+    def map(function: Callable[[tuple[torch.Tensor, ...]], torch.Tensor], xs: Iterable[torch.Tensor]) -> torch.Tensor:
+        return _TorchRuntime._map.map(function, xs)
 
     @staticmethod
     def block_until_ready(values: Any) -> Any:
@@ -175,7 +167,7 @@ class _LinalgNamespace:
         return torch.linalg.norm(_ensure_tensor(values), dim=axis, **kwargs)
 
 
-class _JnpNamespace:
+class _TorchArrayNamespace:
     float64 = torch.float64
     float32 = torch.float32
     int32 = torch.int32
@@ -331,17 +323,15 @@ class CSR:
         return torch.matmul(self._tensor(), _ensure_tensor(other))
 
 
-jnp = _JnpNamespace()
+torch_np = _TorchArrayNamespace()
 torch_runtime = _TorchRuntime()
-jax = torch_runtime
 
 __all__ = [
     "Array",
     "BCOO",
     "CSR",
     "block_until_ready",
-    "jax",
-    "jnp",
+    "torch_np",
     "to_numpy",
     "torch_runtime",
 ]

@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from deepert.utils.torch_compat import Array
-from deepert.utils.torch_compat import jnp
+from deepert.utils.torch_runtime import Array
+from deepert.utils.torch_runtime import torch_np
 
 from deepert.mesh import Mesh
 from deepert.utils.dtypes import FLOAT_DTYPE
@@ -27,7 +27,7 @@ class P2ElementData:
 def triangle_quadrature_p2() -> tuple[Array, Array]:
     """Return a degree-4 triangle rule exact for P2 mass matrices."""
 
-    points = jnp.asarray(
+    points = torch_np.asarray(
         [
             [0.445948490915965, 0.445948490915965],
             [0.445948490915965, 0.108103018168070],
@@ -38,7 +38,7 @@ def triangle_quadrature_p2() -> tuple[Array, Array]:
         ],
         dtype=FLOAT_DTYPE,
     )
-    weights = jnp.asarray(
+    weights = torch_np.asarray(
         [
             0.1116907948390055,
             0.1116907948390055,
@@ -55,11 +55,11 @@ def triangle_quadrature_p2() -> tuple[Array, Array]:
 def p2_shape_functions(points: Array) -> Array:
     """Evaluate P2 shape functions at reference coordinates."""
 
-    point_array = jnp.asarray(points, dtype=FLOAT_DTYPE)
+    point_array = torch_np.asarray(points, dtype=FLOAT_DTYPE)
     l2 = point_array[..., 0]
     l3 = point_array[..., 1]
     l1 = 1.0 - l2 - l3
-    return jnp.stack(
+    return torch_np.stack(
         (
             l1 * (2.0 * l1 - 1.0),
             l2 * (2.0 * l2 - 1.0),
@@ -75,15 +75,15 @@ def p2_shape_functions(points: Array) -> Array:
 def reference_shape_gradients_p2(points: Array) -> Array:
     """Evaluate P2 reference gradients at reference coordinates."""
 
-    point_array = jnp.asarray(points, dtype=FLOAT_DTYPE)
+    point_array = torch_np.asarray(points, dtype=FLOAT_DTYPE)
     l2 = point_array[..., 0]
     l3 = point_array[..., 1]
     l1 = 1.0 - l2 - l3
-    grad_l1 = jnp.asarray([-1.0, -1.0], dtype=FLOAT_DTYPE)
-    grad_l2 = jnp.asarray([1.0, 0.0], dtype=FLOAT_DTYPE)
-    grad_l3 = jnp.asarray([0.0, 1.0], dtype=FLOAT_DTYPE)
+    grad_l1 = torch_np.asarray([-1.0, -1.0], dtype=FLOAT_DTYPE)
+    grad_l2 = torch_np.asarray([1.0, 0.0], dtype=FLOAT_DTYPE)
+    grad_l3 = torch_np.asarray([0.0, 1.0], dtype=FLOAT_DTYPE)
 
-    return jnp.stack(
+    return torch_np.stack(
         (
             (4.0 * l1 - 1.0)[..., None] * grad_l1,
             (4.0 * l2 - 1.0)[..., None] * grad_l2,
@@ -106,9 +106,9 @@ def build_p2_element_data(mesh: Mesh) -> P2ElementData:
     cell_nodes = mesh.nodes[mesh.cells]
     edge_1 = cell_nodes[:, 1] - cell_nodes[:, 0]
     edge_2 = cell_nodes[:, 2] - cell_nodes[:, 0]
-    jacobians = jnp.stack((edge_1, edge_2), axis=-1)
-    inverse_jacobian_t = jnp.linalg.inv(jacobians).permute(0, 2, 1)
-    gradients = jnp.einsum("eij,qnj->eqni", inverse_jacobian_t, reference_gradients)
+    jacobians = torch_np.stack((edge_1, edge_2), axis=-1)
+    inverse_jacobian_t = torch_np.linalg.inv(jacobians).permute(0, 2, 1)
+    gradients = torch_np.einsum("eij,qnj->eqni", inverse_jacobian_t, reference_gradients)
 
     return P2ElementData(
         quadrature_points=quadrature_points,

@@ -7,9 +7,9 @@ import numpy as np
 from scipy.special import k0 as besselk0
 from scipy.special import k1 as besselk1
 
-from deepert.utils.torch_compat import Array
-from deepert.utils.torch_compat import jnp
-from deepert.utils.torch_compat import BCOO
+from deepert.utils.torch_runtime import Array
+from deepert.utils.torch_runtime import torch_np
+from deepert.utils.torch_runtime import BCOO
 
 from deepert.mesh import Mesh
 from deepert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE, NP_FLOAT_DTYPE
@@ -38,7 +38,7 @@ def build_boundary_routing_from_connectivity(boundary_connectivity: Array, node_
     row_indices = np.broadcast_to(connectivity_np[:, :, None], (edge_count, local_dof, local_dof)).reshape(-1)
     col_indices = np.broadcast_to(connectivity_np[:, None, :], (edge_count, local_dof, local_dof)).reshape(-1)
     indices = np.stack((row_indices, col_indices), axis=1).astype(np.int32)
-    return BoundaryRouting(indices=jnp.asarray(indices, dtype=INT_DTYPE), shape=(node_count, node_count))
+    return BoundaryRouting(indices=torch_np.asarray(indices, dtype=INT_DTYPE), shape=(node_count, node_count))
 
 
 def _static_scalar_value(value: Array | float) -> float | None:
@@ -60,15 +60,15 @@ def assemble_local_boundary_mass(mesh: Mesh, coefficients: Array | float) -> Arr
         reference = np.asarray([[2.0, 1.0], [1.0, 2.0]], dtype=dtype) / 6.0
         lengths = np.asarray(mesh.boundary_edge_lengths, dtype=dtype)
         local = static_coefficient * lengths[:, None, None] * reference[None, :, :]
-        return jnp.asarray(local, dtype=FLOAT_DTYPE)
+        return torch_np.asarray(local, dtype=FLOAT_DTYPE)
 
-    coefficient_array = jnp.asarray(coefficients, dtype=FLOAT_DTYPE)
+    coefficient_array = torch_np.asarray(coefficients, dtype=FLOAT_DTYPE)
     if coefficient_array.ndim == 0:
-        coefficient_array = jnp.broadcast_to(coefficient_array, (mesh.boundary_edges.shape[0],))
+        coefficient_array = torch_np.broadcast_to(coefficient_array, (mesh.boundary_edges.shape[0],))
     elif coefficient_array.shape != (mesh.boundary_edges.shape[0],):
         raise ValueError("boundary coefficients must be scalar or shape (num_boundary_edges,)")
 
-    reference = jnp.asarray([[2.0, 1.0], [1.0, 2.0]], dtype=FLOAT_DTYPE) / 6.0
+    reference = torch_np.asarray([[2.0, 1.0], [1.0, 2.0]], dtype=FLOAT_DTYPE) / 6.0
     return coefficient_array[:, None, None] * mesh.boundary_edge_lengths[:, None, None] * reference
 
 
@@ -88,16 +88,16 @@ def assemble_local_boundary_mass_p2(lengths: Array, coefficients: Array | float)
             dtype=dtype,
         ) / 30.0
         local = static_coefficient * length_array_np[:, None, None] * reference[None, :, :]
-        return jnp.asarray(local, dtype=FLOAT_DTYPE)
+        return torch_np.asarray(local, dtype=FLOAT_DTYPE)
 
-    length_array = jnp.asarray(lengths, dtype=FLOAT_DTYPE)
-    coefficient_array = jnp.asarray(coefficients, dtype=FLOAT_DTYPE)
+    length_array = torch_np.asarray(lengths, dtype=FLOAT_DTYPE)
+    coefficient_array = torch_np.asarray(coefficients, dtype=FLOAT_DTYPE)
     if coefficient_array.ndim == 0:
-        coefficient_array = jnp.broadcast_to(coefficient_array, (length_array.shape[0],))
+        coefficient_array = torch_np.broadcast_to(coefficient_array, (length_array.shape[0],))
     elif coefficient_array.shape != (length_array.shape[0],):
         raise ValueError("boundary coefficients must be scalar or shape (num_boundary_edges,)")
 
-    reference = jnp.asarray(
+    reference = torch_np.asarray(
         [
             [4.0, 2.0, -1.0],
             [2.0, 16.0, 2.0],
@@ -120,9 +120,9 @@ def assemble_boundary_bcoo(local_matrices: Array, routing: BoundaryRouting) -> B
 
 
 def _expand_cell_coefficient(coefficients: Array | float, mesh: Mesh) -> Array:
-    coefficient_array = jnp.asarray(coefficients, dtype=FLOAT_DTYPE)
+    coefficient_array = torch_np.asarray(coefficients, dtype=FLOAT_DTYPE)
     if coefficient_array.ndim == 0:
-        return jnp.broadcast_to(coefficient_array, (mesh.cell_count,))
+        return torch_np.broadcast_to(coefficient_array, (mesh.cell_count,))
     if coefficient_array.shape == (mesh.cell_count,):
         return coefficient_array
     raise ValueError("cell coefficients must be scalar or shape (num_cells,)")
@@ -172,5 +172,5 @@ def robin_boundary_coefficients(
             geometry[stable_indices] = wavenumber * numerator / denominator[stable]
 
     if static_conductivity is not None:
-        return jnp.asarray(boundary_sigma * geometry, dtype=FLOAT_DTYPE)
-    return boundary_sigma * jnp.asarray(geometry, dtype=FLOAT_DTYPE)
+        return torch_np.asarray(boundary_sigma * geometry, dtype=FLOAT_DTYPE)
+    return boundary_sigma * torch_np.asarray(geometry, dtype=FLOAT_DTYPE)

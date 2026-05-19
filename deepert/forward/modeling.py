@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from deepert.utils.torch_compat import jnp
+from deepert.utils.torch_runtime import torch_np
 import numpy as np
 
 from deepert.forward.ert2p5d import ERTForward2p5D
@@ -62,7 +62,7 @@ def mesh_to_deepert(mesh: Any) -> Mesh:
     raw_cells = cells_attr() if callable(cells_attr) else cells_attr
     nodes = np.asarray([_point_xy(node) for node in raw_nodes], dtype=float)
     cells = np.asarray([_cell_node_ids(cell) for cell in raw_cells], dtype=np.int32)
-    return Mesh.from_arrays(jnp.asarray(nodes), jnp.asarray(cells))
+    return Mesh.from_arrays(torch_np.asarray(nodes), torch_np.asarray(cells))
 
 
 def survey_to_deepert(data: Any) -> Survey:
@@ -97,7 +97,7 @@ def survey_to_deepert(data: Any) -> Survey:
             np.asarray(data["n"], dtype=np.int32),
         )
     )
-    return Survey.from_arrays(jnp.asarray(electrodes), jnp.asarray(measurements))
+    return Survey.from_arrays(torch_np.asarray(electrodes), torch_np.asarray(measurements))
 
 
 def _prepare_resistivity_model(resistivity_model: Any, *, log_transform: bool, expected_size: int) -> np.ndarray:
@@ -131,7 +131,6 @@ class ERTForwardModeling:
     topographic_geometric_factor_mode: str = "analytic"
     linear_solver_backend: str = "auto"
     terrain_cache_dir: str | Path | None = None
-    jit_cache_dir: str | Path | None = None
     include_robin_boundary_derivative: bool = False
     normal_sensitivity: bool = True
 
@@ -194,7 +193,6 @@ class ERTForwardModeling:
                 topographic_geometric_factor_mode=self.topographic_geometric_factor_mode,
                 linear_solver_backend=self.linear_solver_backend,
                 terrain_cache_dir=self.terrain_cache_dir,
-                jit_cache_dir=self.jit_cache_dir,
             )
         return self._forward
 
@@ -205,7 +203,7 @@ class ERTForwardModeling:
         *,
         include_solver_state: bool = True,
     ) -> None:
-        """Warm geometry, JIT kernels, caches, and optional solver state."""
+        """Warm geometry, cache, and optional solver state."""
 
         if resistivity_model is None:
             self.forward_operator.prepare(None, include_solver_state=include_solver_state)
@@ -216,7 +214,7 @@ class ERTForwardModeling:
             log_transform=log_transform,
             expected_size=self.cell_count,
         )
-        conductivity = jnp.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
+        conductivity = torch_np.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
         self.forward_operator.prepare(conductivity, include_solver_state=include_solver_state)
 
     def forward(self, resistivity_model: Any, log_transform: bool = True) -> np.ndarray:
@@ -227,7 +225,7 @@ class ERTForwardModeling:
             log_transform=log_transform,
             expected_size=self.cell_count,
         )
-        conductivity = jnp.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
+        conductivity = torch_np.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
         values = np.asarray(self.forward_operator.apparent_resistivity_values(conductivity), dtype=float)
         if log_transform:
             return np.log(values)
@@ -260,7 +258,7 @@ class ERTForwardModeling:
             log_transform=log_transform,
             expected_size=self.cell_count,
         )
-        conductivity = jnp.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
+        conductivity = torch_np.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
         forward = self.forward_operator
         if include_robin_boundary_derivative is None:
             include_robin_boundary_derivative = self.include_robin_boundary_derivative
@@ -271,7 +269,7 @@ class ERTForwardModeling:
             include_robin_boundary_derivative=include_robin_boundary_derivative,
             normal_sensitivity=normal_sensitivity,
         )
-        apparent_jacobian_sigma = jnp.abs(forward._geometric_factors())[:, None] * resistance_jacobian
+        apparent_jacobian_sigma = torch_np.abs(forward._geometric_factors())[:, None] * resistance_jacobian
 
         if log_transform:
             jacobian = apparent_jacobian_sigma * (-conductivity[None, :])
@@ -302,7 +300,6 @@ class MappedERTForwardModeling:
     topographic_geometric_factor_mode: str = "analytic"
     linear_solver_backend: str = "auto"
     terrain_cache_dir: str | Path | None = None
-    jit_cache_dir: str | Path | None = None
     include_robin_boundary_derivative: bool = False
     normal_sensitivity: bool = True
 
@@ -316,7 +313,6 @@ class MappedERTForwardModeling:
             topographic_geometric_factor_mode=self.topographic_geometric_factor_mode,
             linear_solver_backend=self.linear_solver_backend,
             terrain_cache_dir=self.terrain_cache_dir,
-            jit_cache_dir=self.jit_cache_dir,
             include_robin_boundary_derivative=self.include_robin_boundary_derivative,
             normal_sensitivity=self.normal_sensitivity,
         )
@@ -375,7 +371,7 @@ class MappedERTForwardModeling:
         *,
         include_solver_state: bool = True,
     ) -> None:
-        """Warm geometry, JIT kernels, caches, and optional solver state."""
+        """Warm geometry, cache, and optional solver state."""
 
         if resistivity_model is None:
             self._forward_modeling.prepare(None, include_solver_state=include_solver_state)
