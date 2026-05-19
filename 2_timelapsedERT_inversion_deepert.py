@@ -394,7 +394,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--regularization", type=float, default=50.0)
     parser.add_argument("--temporal-regularization", type=float, default=10.0)
     parser.add_argument("--regularization-mode", choices=("model", "update"), default="model")
-    parser.add_argument("--linearized-solver", choices=("lsqr", "pyhydro_cgls", "normal_cg"), default="lsqr")
+    parser.add_argument(
+        "--linearized-solver",
+        choices=("lsqr", "pyhydro_cgls", "normal_cg", "gpu_cgls", "gpu_timelapse_cgls"),
+        default="gpu_cgls",
+    )
+    parser.add_argument("--cgls-tolerance", type=float, default=1.0e-12)
+    parser.add_argument("--cgls-max-iterations", type=int, default=60)
     parser.add_argument("--relative-error", type=float, default=0.05)
     parser.add_argument("--max-iterations", type=int, default=15)
     parser.add_argument("--model-min", type=float, default=0.001)
@@ -480,6 +486,8 @@ def main(argv: list[str] | None = None) -> int:
         regularization_mode=args.regularization_mode,
         temporal_regularization=args.temporal_regularization,
         linearized_solver=args.linearized_solver,
+        cgls_tolerance=args.cgls_tolerance,
+        cgls_max_iterations=args.cgls_max_iterations,
         spatial_regularization="first_order",
         z_weight=1.0,
         model_bounds=(args.model_min, args.model_max),
@@ -604,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
         "initial_model_source": "per_timestep_median_rhoa",
         "method": str(args.linearized_solver),
         "linearized_solver": str(args.linearized_solver),
+        "cgls_tolerance": float(args.cgls_tolerance),
+        "cgls_max_iterations": int(args.cgls_max_iterations),
         "regularization_mode": str(args.regularization_mode),
         "coverage_percentile": float(args.coverage_percentile),
         "coverage_source": "deepert_pygimli_style_sumabs_area",

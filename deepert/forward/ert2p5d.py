@@ -1673,7 +1673,6 @@ class ERTForward2p5D:
     def _torch_from_cupy(self, values, *, dtype=FLOAT_DTYPE):
         cp, _ = self._cupy_sparse_modules()
         values = cp.ascontiguousarray(values)
-        cp.cuda.get_current_stream().synchronize()
         if self._cudss_state.get("gpu_zero_copy", False):
             return torch_runtime.dlpack.from_dlpack(values).astype(dtype).copy()
         return jnp.asarray(cp.asnumpy(values), dtype=dtype)
@@ -1681,7 +1680,6 @@ class ERTForward2p5D:
     def _torch_batch_rhs_from_cupy(self, values, *, dtype=FLOAT_DTYPE):
         cp, _ = self._cupy_sparse_modules()
         transposed = cp.ascontiguousarray(values.transpose((0, 2, 1)))
-        cp.cuda.get_current_stream().synchronize()
         if self._cudss_state.get("gpu_zero_copy", False):
             return torch_runtime.dlpack.from_dlpack(transposed).astype(dtype).copy()
         return jnp.asarray(cp.asnumpy(transposed), dtype=dtype)

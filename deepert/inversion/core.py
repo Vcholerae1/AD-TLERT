@@ -421,8 +421,10 @@ def _check_config(config: InversionConfig) -> None:
         raise ValueError("max_log_step must be positive when set")
     if config.target_chi2 is not None and config.target_chi2 <= 0.0:
         raise ValueError("target_chi2 must be positive when set")
-    if config.linearized_solver not in ("lsqr", "pyhydro_cgls", "normal_cg"):
-        raise ValueError("linearized_solver must be 'lsqr', 'pyhydro_cgls', or 'normal_cg'")
+    if config.linearized_solver not in ("lsqr", "pyhydro_cgls", "normal_cg", "gpu_cgls", "gpu_timelapse_cgls"):
+        raise ValueError(
+            "linearized_solver must be 'lsqr', 'pyhydro_cgls', 'normal_cg', 'gpu_cgls', or 'gpu_timelapse_cgls'"
+        )
     if config.cgls_max_iterations < 1:
         raise ValueError("cgls_max_iterations must be >= 1")
     if config.cgls_tolerance <= 0.0:
@@ -919,6 +921,14 @@ def _solve_increment(
     rhs: np.ndarray,
     config: InversionConfig,
 ) -> np.ndarray:
+    if config.linearized_solver == "gpu_cgls":
+        return _cupy_cgls(
+            matrix,
+            rhs,
+            max_iterations=config.cgls_max_iterations,
+            tolerance=config.cgls_tolerance,
+        )
+
     if config.linearized_solver == "pyhydro_cgls":
         normal_matrix = (matrix.T @ matrix).tocsr()
         normal_rhs = np.asarray(matrix.T @ rhs, dtype=float).reshape(-1, 1)
@@ -958,6 +968,185 @@ def _solve_increment(
     if not np.all(np.isfinite(solution)):
         raise ValueError("linearized inversion update contains non-finite values")
     return solution
+
+
+def _cupy_cgls(
+    matrix: sp.spmatrix,
+    rhs: np.ndarray,
+    *,
+    max_iterations: int,
+    tolerance: float,
+) -> np.ndarray:
+    """Solve ``min ||A x - b||`` with CGLS using CuPy sparse matvecs."""
+
+    try:
+        import cupy as cp
+        import cupyx.scipy.sparse as cupy_sparse
+    except ImportError as exc:
+        raise ImportError("linearized_solver='gpu_cgls' requires CuPy") from exc
+
+    system_cpu = matrix.tocsr()
+    dtype = np.float64 if system_cpu.dtype == np.float64 or np.asarray(rhs).dtype == np.float64 else np.float32
+    system = cupy_sparse.csr_matrix(
+        (
+            cp.asarray(system_cpu.data, dtype=dtype),
+            cp.asarray(system_cpu.indices, dtype=cp.int32),
+            cp.asarray(system_cpu.indptr, dtype=cp.int32),
+        ),
+        shape=system_cpu.shape,
+    )
+    b = cp.asarray(np.asarray(rhs, dtype=dtype).ravel())
+    x = cp.zeros((system.shape[1],), dtype=dtype)
+    r = b.copy()
+    s = system.T @ r
+    p = s.copy()
+    gamma = cp.dot(s, s)
+    rr0 = cp.dot(r, r)
+    gamma_value = float(gamma)
+    gamma0_value = gamma_value
+    rr0_value = float(rr0)
+    if gamma_value <= 0.0 or rr0_value <= 0.0:
+        return cp.asnumpy(x)
+
+    for _ in range(int(max_iterations)):
+        q = system @ p
+        denominator = cp.dot(q, q)
+        denominator_value = float(denominator)
+        if denominator_value <= 0.0:
+            break
+        alpha = gamma / denominator
+        x = x + alpha * p
+        r = r - alpha * q
+        s = system.T @ r
+        gamma_new = cp.dot(s, s)
+        gamma_new_value = float(gamma_new)
+        if gamma_new_value <= 0.0:
+            break
+        if gamma_new_value / gamma0_value < float(tolerance):
+            break
+        p = s + (gamma_new / gamma) * p
+        gamma = gamma_new
+
+    solution = cp.asnumpy(x)
+    if not np.all(np.isfinite(solution)):
+        raise ValueError("linearized inversion update contains non-finite values")
+    return np.asarray(solution, dtype=float)
+
+
+def _cupy_timelapse_cgls(
+    *,
+    jacobians: list[np.ndarray],
+    weight: np.ndarray,
+    data_rhs: np.ndarray,
+    spatial_regularization: sp.spmatrix | None,
+    spatial_scale: float,
+    spatial_rhs: np.ndarray | None,
+    temporal_scale: float,
+    temporal_rhs: np.ndarray | None,
+    max_iterations: int,
+    tolerance: float,
+) -> np.ndarray:
+    """Matrix-free CGLS for the default sliding-window time-lapse system."""
+
+    try:
+        import cupy as cp
+        import cupyx.scipy.sparse as cupy_sparse
+    except ImportError as exc:
+        raise ImportError("linearized_solver='gpu_cgls' requires CuPy") from exc
+
+    jacobian_cpu = np.stack(
+        [
+            np.asarray(jac_t, dtype=np.float64) * np.asarray(w_t, dtype=np.float64)[:, None]
+            for jac_t, w_t in zip(jacobians, weight)
+        ]
+    )
+    data_rhs_cpu = np.asarray(data_rhs, dtype=np.float64)
+    n_times, n_measurements, n_cells = jacobian_cpu.shape
+    total_size = n_times * n_cells
+
+    jacobian_gpu = cp.asarray(jacobian_cpu)
+    data_rhs_gpu = cp.asarray(data_rhs_cpu)
+    rhs_parts = [data_rhs_gpu.reshape(-1)]
+
+    spatial_gpu = None
+    if spatial_regularization is not None and spatial_scale > 0.0 and spatial_rhs is not None:
+        spatial_cpu = spatial_regularization.tocsr()
+        spatial_gpu = cupy_sparse.csr_matrix(
+            (
+                cp.asarray(spatial_cpu.data, dtype=cp.float64),
+                cp.asarray(spatial_cpu.indices, dtype=cp.int32),
+                cp.asarray(spatial_cpu.indptr, dtype=cp.int32),
+            ),
+            shape=spatial_cpu.shape,
+        )
+        rhs_parts.append(cp.asarray(np.asarray(spatial_rhs, dtype=np.float64).reshape(-1)))
+
+    has_temporal = temporal_scale > 0.0 and temporal_rhs is not None and n_times > 1
+    if has_temporal:
+        rhs_parts.append(cp.asarray(np.asarray(temporal_rhs, dtype=np.float64).reshape(-1)))
+
+    b = cp.concatenate(rhs_parts)
+
+    def matvec(vector):
+        model = vector.reshape((n_times, n_cells))
+        parts = [cp.einsum("tmc,tc->tm", jacobian_gpu, model).reshape(-1)]
+        if spatial_gpu is not None:
+            spatial_rows = [spatial_scale * (spatial_gpu @ model[time_index]) for time_index in range(n_times)]
+            parts.append(cp.stack(spatial_rows, axis=0).reshape(-1))
+        if has_temporal:
+            parts.append((temporal_scale * (model[1:] - model[:-1])).reshape(-1))
+        return cp.concatenate(parts)
+
+    def rmatvec(vector):
+        offset = 0
+        data_size = n_times * n_measurements
+        data_part = vector[offset : offset + data_size].reshape((n_times, n_measurements))
+        offset += data_size
+        gradient = cp.einsum("tmc,tm->tc", jacobian_gpu, data_part)
+        if spatial_gpu is not None:
+            spatial_rows = int(spatial_gpu.shape[0])
+            spatial_part = vector[offset : offset + n_times * spatial_rows].reshape((n_times, spatial_rows))
+            offset += n_times * spatial_rows
+            for time_index in range(n_times):
+                gradient[time_index] += spatial_scale * (spatial_gpu.T @ spatial_part[time_index])
+        if has_temporal:
+            temporal_part = vector[offset:].reshape((n_times - 1, n_cells))
+            gradient[:-1] -= temporal_scale * temporal_part
+            gradient[1:] += temporal_scale * temporal_part
+        return gradient.reshape(-1)
+
+    x = cp.zeros((total_size,), dtype=cp.float64)
+    r = b.copy()
+    s = rmatvec(r)
+    p = s.copy()
+    gamma = cp.dot(s, s)
+    gamma0_value = float(gamma)
+    if gamma0_value <= 0.0:
+        return cp.asnumpy(x)
+
+    for _ in range(int(max_iterations)):
+        q = matvec(p)
+        denominator = cp.dot(q, q)
+        denominator_value = float(denominator)
+        if denominator_value <= 0.0:
+            break
+        alpha = gamma / denominator
+        x = x + alpha * p
+        r = r - alpha * q
+        s = rmatvec(r)
+        gamma_new = cp.dot(s, s)
+        gamma_new_value = float(gamma_new)
+        if gamma_new_value <= 0.0:
+            break
+        if gamma_new_value / gamma0_value < float(tolerance):
+            break
+        p = s + (gamma_new / gamma) * p
+        gamma = gamma_new
+
+    solution = cp.asnumpy(x)
+    if not np.all(np.isfinite(solution)):
+        raise ValueError("linearized inversion update contains non-finite values")
+    return np.asarray(solution, dtype=float)
 
 
 def _pyhydro_cgls(
@@ -1352,11 +1541,16 @@ def invert_timelapse_log_resistivity(
             w_t = weight[time_index]
             data_blocks.append(sp.csr_matrix(jac_t * w_t[:, None]))
             rhs_blocks.append((observed_log[time_index] - predicted_log[time_index]) * w_t)
+        data_rhs_matrix = np.vstack(rhs_blocks)
 
         matrix_blocks: list[sp.spmatrix] = [sp.block_diag(data_blocks, format="csr")]
         rhs_all: list[np.ndarray] = [np.concatenate(rhs_blocks)]
         objective_blocks: list[sp.spmatrix] = []
         objective_references: list[np.ndarray] = []
+        gpu_spatial_rhs: np.ndarray | None = None
+        gpu_spatial_scale = 0.0
+        gpu_temporal_rhs: np.ndarray | None = None
+        gpu_temporal_scale = 0.0
 
         current_vec = models.reshape(total_size, order="F")
         reference_vec = None if reference is None else reference.reshape(total_size, order="F")
@@ -1400,6 +1594,10 @@ def invert_timelapse_log_resistivity(
             rhs_all.append(scale * (reference_roughness - current_roughness))
             objective_blocks.append(scale * spatial_regularization_all)
             objective_references.append(scale * reference_roughness)
+            gpu_spatial_scale = scale
+            gpu_spatial_rhs = (scale * (reference_roughness - current_roughness)).reshape(
+                (n_times, spatial_regularization.shape[0])
+            )
 
         if config.temporal_regularization_mode == "separate" and config.temporal_regularization > 0.0:
             scale = float(np.sqrt(config.temporal_regularization))
@@ -1409,10 +1607,26 @@ def invert_timelapse_log_resistivity(
             rhs_all.append(scale * (temporal_reference - temporal_roughness))
             objective_blocks.append(scale * temporal_difference)
             objective_references.append(scale * temporal_reference)
+            gpu_temporal_scale = scale
+            gpu_temporal_rhs = (scale * (temporal_reference - temporal_roughness)).reshape((n_times - 1, n_cells))
 
-        matrix = sp.vstack(matrix_blocks, format="csr")
-        rhs = np.concatenate(rhs_all)
-        delta_vec = _solve_increment(matrix, rhs, config)
+        if config.linearized_solver == "gpu_timelapse_cgls" and config.temporal_regularization_mode == "separate":
+            delta_vec = _cupy_timelapse_cgls(
+                jacobians=jacobians,
+                weight=weight,
+                data_rhs=data_rhs_matrix,
+                spatial_regularization=spatial_regularization if config.regularization > 0.0 else None,
+                spatial_scale=gpu_spatial_scale,
+                spatial_rhs=gpu_spatial_rhs,
+                temporal_scale=gpu_temporal_scale,
+                temporal_rhs=gpu_temporal_rhs,
+                max_iterations=config.cgls_max_iterations,
+                tolerance=config.cgls_tolerance,
+            )
+        else:
+            matrix = sp.vstack(matrix_blocks, format="csr")
+            rhs = np.concatenate(rhs_all)
+            delta_vec = _solve_increment(matrix, rhs, config)
         delta_vec = _limit_delta(delta_vec, config.max_log_step)
         delta = delta_vec.reshape((n_cells, n_times), order="F")
         step = config.step_length * delta
