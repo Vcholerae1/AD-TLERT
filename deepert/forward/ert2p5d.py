@@ -2035,6 +2035,14 @@ class ERTForward2p5D:
     def _integrate_potentials(self, sub_potentials: Array) -> Array:
         return torch_np.tensordot(self.weights.astype(sub_potentials.dtype), sub_potentials, axes=(0, 0))
 
+    def _project_from_integrated(self, integrated_potentials: Array, projection_matrix: Array) -> Array:
+        """Project integrated potentials onto electrodes/receivers with dtype alignment."""
+
+        matrix = projection_matrix
+        if getattr(matrix, "dtype", None) != getattr(integrated_potentials, "dtype", None):
+            matrix = matrix.astype(integrated_potentials.dtype)
+        return integrated_potentials @ matrix.T
+
     def _apply_source_difference(
         self,
         source_potentials: Array,
@@ -2063,7 +2071,7 @@ class ERTForward2p5D:
         positive_sources: Array,
         negative_sources: Array,
     ) -> Array:
-        receiver_potentials = integrated_potentials @ receiver_matrix.T
+        receiver_potentials = self._project_from_integrated(integrated_potentials, receiver_matrix)
         return self._apply_source_difference(receiver_potentials, positive_sources, negative_sources)
 
     def _apply_measurement_map_from_integrated_with_receiver(
@@ -3155,7 +3163,7 @@ class ERTForward2p5D:
             state_prefix="auxiliary_geometric",
         )
         integrated_potentials = torch_np.tensordot(self.weights, sub_potentials, axes=(0, 0))
-        electrode_potentials = integrated_potentials @ discretization.electrode_matrix.T
+        electrode_potentials = self._project_from_integrated(integrated_potentials, discretization.electrode_matrix)
         source_potentials = electrode_potentials[self.survey.measurements[:, 0]] - electrode_potentials[
             self.survey.measurements[:, 1]
         ]
@@ -3239,7 +3247,7 @@ class ERTForward2p5D:
             discretization, _, sub_potentials = self._solve_secondary_fields_auxiliary(solve_conductivity)
             integrated_potentials = self._integrate_potentials(sub_potentials)
             self._check_finite(integrated_potentials, context="integrated auxiliary potentials")
-            electrode_potentials = integrated_potentials @ discretization.electrode_matrix.T
+            electrode_potentials = self._project_from_integrated(integrated_potentials, discretization.electrode_matrix)
             resistance = self._auxiliary_resistance_from_integrated(discretization, integrated_potentials)
             return integrated_potentials, electrode_potentials, resistance
 
@@ -3248,7 +3256,7 @@ class ERTForward2p5D:
 
         self._check_finite(integrated_potentials, context="integrated potentials")
 
-        electrode_potentials = integrated_potentials @ self.electrode_matrix.T
+        electrode_potentials = self._project_from_integrated(integrated_potentials, self.electrode_matrix)
         resistance = self._native_resistance_from_integrated(integrated_potentials)
         return integrated_potentials, electrode_potentials, resistance
 
@@ -3478,7 +3486,7 @@ class ERTForward2p5D:
             discretization, operator_values, sub_potentials = self._solve_secondary_fields_auxiliary(conductivity)
             integrated_potentials = self._integrate_potentials(sub_potentials)
             self._check_finite(integrated_potentials, context="integrated auxiliary potentials")
-            electrode_potentials = integrated_potentials @ discretization.electrode_matrix.T
+            electrode_potentials = self._project_from_integrated(integrated_potentials, discretization.electrode_matrix)
             measurement_receiver = self._measurement_receiver_matrix_for(
                 discretization.electrode_matrix,
                 cache_key="primary_auxiliary_measurement_receiver_matrix",
@@ -3555,7 +3563,7 @@ class ERTForward2p5D:
             operator_values, sub_potentials = self._solve_total_fields(conductivity)
             integrated_potentials = self._integrate_potentials(sub_potentials)
             self._check_finite(integrated_potentials, context="integrated potentials")
-            electrode_potentials = integrated_potentials @ self.electrode_matrix.T
+            electrode_potentials = self._project_from_integrated(integrated_potentials, self.electrode_matrix)
             normal_resistance = self._apply_measurement_map_from_integrated(integrated_potentials)
             reciprocal_resistance = self._apply_reciprocal_measurement_map_from_integrated(integrated_potentials)
             resistance = self._combine_reciprocal_resistances(normal_resistance, reciprocal_resistance)
@@ -3701,7 +3709,7 @@ class ERTForward2p5D:
                 )
                 total_fields = prepared + primary
                 integrated_potentials = self._integrate_potentials(total_fields)
-                electrode_potentials = integrated_potentials @ discretization.electrode_matrix.T
+                electrode_potentials = self._project_from_integrated(integrated_potentials, discretization.electrode_matrix)
                 resistance = self._auxiliary_resistance_from_integrated(discretization, integrated_potentials)
                 apparent_resistivity = torch_np.abs(geometric_factors) * resistance
                 torch_runtime.block_until_ready((prepared, integrated_potentials, electrode_potentials, resistance, apparent_resistivity))
@@ -3732,7 +3740,7 @@ class ERTForward2p5D:
             prepared = self._solve_linear_system_batch(operator_values, rhs)
             total_fields = prepared + primary
             integrated_potentials = self._integrate_potentials(total_fields)
-            electrode_potentials = integrated_potentials @ self.electrode_matrix.T
+            electrode_potentials = self._project_from_integrated(integrated_potentials, self.electrode_matrix)
             resistance = self._native_resistance_from_integrated(integrated_potentials)
             apparent_resistivity = torch_np.abs(geometric_factors) * resistance
             torch_runtime.block_until_ready((prepared, integrated_potentials, electrode_potentials, resistance, apparent_resistivity))
