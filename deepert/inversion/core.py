@@ -15,6 +15,20 @@ from scipy.spatial import cKDTree
 from scipy.sparse.linalg import cg, lsqr
 
 from deepert.forward import ERTForward2p5D, ERTForwardModeling
+from deepert.inversion.misfit import (
+    DataMisfit,
+    build_data_misfit,
+)
+from deepert.inversion.optimizers import build_linearized_optimizer, build_optimization_algorithm
+from deepert.inversion.petrophysics import (
+    available_petrophysical_transforms,
+    build_petrophysical_transform,
+)
+from deepert.inversion.regularization import (
+    build_spatial_regularization,
+    build_temporal_regularization,
+    regularization_mesh,
+)
 from deepert.mesh import Mesh
 from deepert.utils.dtypes import FLOAT_DTYPE
 
@@ -25,24 +39,40 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 
 @dataclass(frozen=True)
 class InversionConfig:
-    """Controls for damped Gauss-Newton inversion in log-resistivity space."""
+    """Controls for nonlinear log-resistivity inversion."""
 
     max_iterations: int = 8
     data_std: float | ArrayLike = 0.05
+    data_misfit: str = "weighted_log_l2"
     regularization: float = 1.0e-2
     regularization_mode: str = "model"
     temporal_regularization: float = 0.0
     temporal_regularization_mode: str = "separate"
-    spatial_regularization: str = "identity"
+    temporal_regularization_type: str = "temporal_smoothness"
+    spatial_regularization: str = "damping"
+    regularization_domain: str = "state"
+    physical_regularization_quantity: str = "parameter"
     z_weight: float = 1.0
     model_transform: str = "log"
     model_bounds: tuple[float, float] | None = None
+    petrophysical_transform: str = "log_resistivity"
+    petrophysical_parameters: dict[str, ArrayLike] | None = field(default=None, repr=False, compare=False)
+    saturation_floor: float = 1.0e-4
     step_length: float = 1.0
     max_log_step: float | None = 1.0
     line_search: bool = False
     target_chi2: float | None = None
     step_tolerance: float = 1.0e-4
+    active_time_threshold: float = 0.05
+    active_time_minimum_weight: float = 0.05
+    optimization_algorithm: str = "gauss_newton_cgls"
     linearized_solver: str = "lsqr"
+    lm_damping: float = 1.0e-2
+    optimizer_max_step: float = 1.0
+    lbfgs_history: int = 10
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.999
+    adam_epsilon: float = 1.0e-8
     lsqr_atol: float = 1.0e-6
     lsqr_btol: float = 1.0e-6
     lsqr_iter_limit: int | None = None
@@ -69,6 +99,8 @@ class ERTInversionResult:
     predicted_log_data: np.ndarray
     coverage: np.ndarray
     iteration_chi2: list[float]
+    final_parameter_model: np.ndarray | None = None
+    final_parameter_name: str = "resistivity"
 
 
 @dataclass(frozen=True)
@@ -84,6 +116,8 @@ class TimeLapseERTInversionResult:
     all_chi2: np.ndarray
     iteration_chi2: list[float]
     window_reports: list[dict[str, float | int | None]] = field(default_factory=list)
+    final_parameter_models: np.ndarray | None = None
+    final_parameter_name: str = "resistivity"
 
 
 class ParameterizedERTForward2p5D:
@@ -399,32 +433,74 @@ class ParameterizedERTForward2p5D:
 def _check_config(config: InversionConfig) -> None:
     if config.max_iterations < 1:
         raise ValueError("max_iterations must be >= 1")
+    build_data_misfit(config.data_misfit)
     if config.regularization < 0.0:
         raise ValueError("regularization must be non-negative")
     if config.regularization_mode not in ("model", "update"):
         raise ValueError("regularization_mode must be 'model' or 'update'")
+    regularization_domain = _normalize_regularization_domain(config.regularization_domain)
+    if regularization_domain not in {"state", "physical"}:
+        raise ValueError("regularization_domain must be 'state' or 'physical'")
+    physical_quantity = _normalize_physical_regularization_quantity(config.physical_regularization_quantity)
+    if physical_quantity not in {"parameter", "water_content"}:
+        raise ValueError("physical_regularization_quantity must be 'parameter' or 'theta'/'water_content'")
     if config.temporal_regularization < 0.0:
         raise ValueError("temporal_regularization must be non-negative")
     if config.temporal_regularization_mode not in ("separate", "joint_frame"):
         raise ValueError("temporal_regularization_mode must be 'separate' or 'joint_frame'")
-    if config.spatial_regularization not in ("identity", "first_order"):
-        raise ValueError("spatial_regularization must be 'identity' or 'first_order'")
+    build_temporal_regularization(config.temporal_regularization_type)
+    build_spatial_regularization(config.spatial_regularization)
     if config.z_weight <= 0.0:
         raise ValueError("z_weight must be positive")
     if config.model_transform not in ("log", "log_lu"):
         raise ValueError("model_transform must be 'log' or 'log_lu'")
     if config.model_transform == "log_lu" and config.model_bounds is None:
         raise ValueError("model_bounds are required for model_transform='log_lu'")
+    petrophysical_key = str(config.petrophysical_transform).strip().lower().replace("-", "_")
+    petrophysical_choices = set(available_petrophysical_transforms()) | {
+        "resistivity",
+        "rho",
+        "conductivity",
+        "sigma",
+        "water_saturation",
+    }
+    if petrophysical_key not in petrophysical_choices:
+        choices = ", ".join(available_petrophysical_transforms())
+        raise ValueError(f"unknown petrophysical_transform={config.petrophysical_transform!r}; available choices: {choices}")
+    if (
+        regularization_domain == "physical"
+        and physical_quantity == "water_content"
+        and petrophysical_key not in {"saturation", "water_saturation"}
+    ):
+        raise ValueError(
+            "physical_regularization_quantity='theta'/'water_content' requires petrophysical_transform='saturation'"
+        )
+    if not (0.0 < config.saturation_floor < 1.0):
+        raise ValueError("saturation_floor must be in (0, 1)")
     if config.step_length <= 0.0:
         raise ValueError("step_length must be positive")
     if config.max_log_step is not None and config.max_log_step <= 0.0:
         raise ValueError("max_log_step must be positive when set")
     if config.target_chi2 is not None and config.target_chi2 <= 0.0:
         raise ValueError("target_chi2 must be positive when set")
-    if config.linearized_solver not in ("lsqr", "pyhydro_cgls", "normal_cg", "gpu_cgls", "gpu_timelapse_cgls"):
-        raise ValueError(
-            "linearized_solver must be 'lsqr', 'pyhydro_cgls', 'normal_cg', 'gpu_cgls', or 'gpu_timelapse_cgls'"
-        )
+    if config.active_time_threshold <= 0.0:
+        raise ValueError("active_time_threshold must be positive")
+    if not (0.0 <= config.active_time_minimum_weight <= 1.0):
+        raise ValueError("active_time_minimum_weight must be in [0, 1]")
+    build_optimization_algorithm(config.optimization_algorithm)
+    build_linearized_optimizer(config.linearized_solver)
+    if config.lm_damping < 0.0:
+        raise ValueError("lm_damping must be non-negative")
+    if config.optimizer_max_step <= 0.0:
+        raise ValueError("optimizer_max_step must be positive")
+    if config.lbfgs_history < 1:
+        raise ValueError("lbfgs_history must be >= 1")
+    if not (0.0 <= config.adam_beta1 < 1.0):
+        raise ValueError("adam_beta1 must be in [0, 1)")
+    if not (0.0 <= config.adam_beta2 < 1.0):
+        raise ValueError("adam_beta2 must be in [0, 1)")
+    if config.adam_epsilon <= 0.0:
+        raise ValueError("adam_epsilon must be positive")
     if config.cgls_max_iterations < 1:
         raise ValueError("cgls_max_iterations must be >= 1")
     if config.cgls_tolerance <= 0.0:
@@ -564,60 +640,120 @@ def _weights(data_std: float | ArrayLike, shape: tuple[int, ...]) -> np.ndarray:
     return 1.0 / std
 
 
-def _log_bounds(bounds: tuple[float, float] | None) -> tuple[float, float] | None:
-    if bounds is None:
-        return None
-    return float(np.log(bounds[0])), float(np.log(bounds[1]))
+def _model_cell_count_from_array(values: np.ndarray) -> int:
+    array = np.asarray(values)
+    if array.ndim == 2:
+        return int(array.shape[0])
+    return int(array.size)
 
 
-def _clip_log_model(log_model: np.ndarray, bounds: tuple[float, float] | None) -> np.ndarray:
-    log_bounds = _log_bounds(bounds)
-    if log_bounds is None:
-        return log_model
-    lo, hi = log_bounds
-    return np.clip(log_model, lo, hi)
+def _petrophysical_transform_for_array(config: InversionConfig, values: np.ndarray):
+    return build_petrophysical_transform(
+        config.petrophysical_transform,
+        n_cells=_model_cell_count_from_array(np.asarray(values)),
+        model_transform=config.model_transform,
+        model_bounds=config.model_bounds,
+        saturation_floor=float(config.saturation_floor),
+        parameters=config.petrophysical_parameters,
+    )
+
+
+def _normalize_regularization_domain(domain: str) -> str:
+    return str(domain).strip().lower().replace("-", "_")
+
+
+def _normalize_physical_regularization_quantity(quantity: str) -> str:
+    key = str(quantity).strip().lower().replace("-", "_")
+    if key in {"theta", "water_content", "moisture_content"}:
+        return "water_content"
+    if key in {"parameter", "native", "physical_parameter"}:
+        return "parameter"
+    return key
 
 
 def _log_model_to_state(log_model: np.ndarray, config: InversionConfig) -> np.ndarray:
-    if config.model_transform == "log":
-        return _clip_log_model(log_model, config.model_bounds)
-
-    if config.model_bounds is None:
-        raise ValueError("model_bounds are required for the LogLU model transform")
-    lo, hi = config.model_bounds
-    span = hi - lo
-    rho = np.exp(log_model)
-    rho = np.clip(rho, lo + span * 1.0e-12, hi - span * 1.0e-12)
-    return np.log(rho - lo) - np.log(hi - rho)
+    transform = _petrophysical_transform_for_array(config, np.asarray(log_model))
+    return transform.state_from_log_resistivity(np.asarray(log_model, dtype=float))
 
 
 def _state_to_log_model(state: np.ndarray, config: InversionConfig) -> np.ndarray:
-    if config.model_transform == "log":
-        return _clip_log_model(state, config.model_bounds)
-
-    if config.model_bounds is None:
-        raise ValueError("model_bounds are required for the LogLU model transform")
-    lo, hi = config.model_bounds
-    exp_state = np.exp(np.clip(state, -50.0, 50.0))
-    rho = (exp_state * hi + lo) / (exp_state + 1.0)
-    return np.log(rho)
+    transform = _petrophysical_transform_for_array(config, np.asarray(state))
+    return transform.log_resistivity_from_state(np.asarray(state, dtype=float))
 
 
 def _clip_model_state(state: np.ndarray, config: InversionConfig) -> np.ndarray:
-    if config.model_transform == "log":
-        return _clip_log_model(state, config.model_bounds)
-    return state
+    transform = _petrophysical_transform_for_array(config, np.asarray(state))
+    return transform.clip_state(np.asarray(state, dtype=float))
 
 
 def _d_log_model_d_state(state: np.ndarray, config: InversionConfig) -> np.ndarray:
-    if config.model_transform == "log":
-        return np.ones_like(state, dtype=float)
+    transform = _petrophysical_transform_for_array(config, np.asarray(state))
+    return transform.d_log_resistivity_d_state(np.asarray(state, dtype=float))
 
-    if config.model_bounds is None:
-        raise ValueError("model_bounds are required for the LogLU model transform")
-    lo, hi = config.model_bounds
-    rho = np.exp(_state_to_log_model(state, config))
-    return ((rho - lo) * (hi - rho)) / ((hi - lo) * rho)
+
+def _d_parameter_model_d_state(state: np.ndarray, config: InversionConfig) -> np.ndarray:
+    transform = _petrophysical_transform_for_array(config, np.asarray(state))
+    return transform.d_parameter_d_state(np.asarray(state, dtype=float))
+
+
+def _parameter_model_from_state(state: np.ndarray, config: InversionConfig) -> np.ndarray:
+    transform = _petrophysical_transform_for_array(config, np.asarray(state))
+    return transform.parameter_from_state(np.asarray(state, dtype=float))
+
+
+def _parameter_name_from_state(state: np.ndarray, config: InversionConfig) -> str:
+    transform = _petrophysical_transform_for_array(config, np.asarray(state))
+    return transform.parameter_name
+
+
+def _cell_parameter_array(values: ArrayLike, *, n_cells: int, name: str) -> np.ndarray:
+    array = np.asarray(values, dtype=float)
+    if array.ndim == 0:
+        result = np.full((int(n_cells),), float(array), dtype=float)
+    else:
+        result = np.asarray(array, dtype=float).reshape(-1)
+    if result.shape != (int(n_cells),):
+        raise ValueError(f"{name} must be scalar or have shape ({int(n_cells)},)")
+    if not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} contains non-finite values")
+    return result
+
+
+def _regularization_domain_value_and_derivative(
+    state: np.ndarray,
+    config: InversionConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    state_array = np.asarray(state, dtype=float)
+    if _normalize_regularization_domain(config.regularization_domain) == "state":
+        return state_array, np.ones_like(state_array, dtype=float)
+
+    parameter = _parameter_model_from_state(state_array, config)
+    derivative = _d_parameter_model_d_state(state_array, config)
+    quantity = _normalize_physical_regularization_quantity(config.physical_regularization_quantity)
+    if quantity == "parameter":
+        return np.asarray(parameter, dtype=float), np.asarray(derivative, dtype=float)
+
+    parameter_name = _parameter_name_from_state(state_array, config)
+    if parameter_name != "saturation":
+        raise ValueError(
+            "physical_regularization_quantity='theta'/'water_content' requires petrophysical_transform='saturation'"
+        )
+    parameters = config.petrophysical_parameters or {}
+    if "phi" not in parameters or parameters["phi"] is None:
+        raise ValueError(
+            "physical_regularization_quantity='theta'/'water_content' requires petrophysical_parameters['phi']"
+        )
+    phi = _cell_parameter_array(parameters["phi"], n_cells=int(state_array.shape[0]), name="phi")
+    if state_array.ndim == 2:
+        phi = phi[:, None]
+    return np.asarray(phi * parameter, dtype=float), np.asarray(phi * derivative, dtype=float)
+
+
+def _chain_rule_projection(derivative: np.ndarray, *, order: str = "C") -> sp.csr_matrix:
+    diagonal = np.asarray(derivative, dtype=float).reshape(-1, order=order)
+    if not np.all(np.isfinite(diagonal)):
+        raise ValueError("regularization projection derivative contains non-finite values")
+    return sp.diags(diagonal, format="csr")
 
 
 def _limit_delta(delta: np.ndarray, max_log_step: float | None) -> np.ndarray:
@@ -629,8 +765,48 @@ def _limit_delta(delta: np.ndarray, max_log_step: float | None) -> np.ndarray:
     return delta * (max_log_step / max_abs)
 
 
-def _weighted_chi2(predicted_log_data: np.ndarray, observed_log_data: np.ndarray, weights: np.ndarray) -> float:
-    residual = (predicted_log_data - observed_log_data) * weights
+def _is_log_data_difference_misfit(data_misfit: DataMisfit) -> bool:
+    return getattr(data_misfit, "name", "") == "log_data_difference_l2"
+
+
+def _difference_weights(weights: np.ndarray) -> np.ndarray:
+    weight_array = np.asarray(weights, dtype=float)
+    sigma = 1.0 / weight_array
+    baseline_sigma = sigma[0]
+    return 1.0 / np.sqrt(sigma[1:] ** 2 + baseline_sigma[None, :] ** 2)
+
+
+def _log_data_difference_residual(
+    predicted_log: np.ndarray,
+    observed_log: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    predicted = np.asarray(predicted_log, dtype=float)
+    observed = np.asarray(observed_log, dtype=float)
+    if predicted.shape != observed.shape:
+        raise ValueError("predicted_log and observed_log must have the same shape")
+    if predicted.ndim != 2 or predicted.shape[0] < 2:
+        raise ValueError("log data-difference misfit requires at least two time steps")
+    base = ((predicted[0] - observed[0]) * np.asarray(weights, dtype=float)[0]).reshape(1, -1)
+    diff = (predicted[1:] - predicted[0][None, :]) - (observed[1:] - observed[0][None, :])
+    return np.vstack((base, diff * _difference_weights(weights)))
+
+
+def _log_data_difference_phi(
+    predicted_log: np.ndarray,
+    observed_log: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    residual = _log_data_difference_residual(predicted_log, observed_log, weights).reshape(-1)
+    return float(np.dot(residual, residual))
+
+
+def _log_data_difference_chi2(
+    predicted_log: np.ndarray,
+    observed_log: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    residual = _log_data_difference_residual(predicted_log, observed_log, weights)
     return float(np.mean(residual**2))
 
 
@@ -662,7 +838,7 @@ def _pygimli_style_coverage_from_jacobian(
     """
 
     matrix = np.asarray(jacobian, dtype=float)
-    mesh = _regularization_mesh(forward)
+    mesh = regularization_mesh(forward)
     areas = _mesh_cell_areas_np(mesh)
     if matrix.shape[1] != areas.shape[0]:
         raise ValueError(
@@ -672,11 +848,6 @@ def _pygimli_style_coverage_from_jacobian(
     sensitivity_sum = np.sum(np.abs(matrix), axis=0)
     normalized = np.maximum(sensitivity_sum / areas, np.finfo(float).tiny)
     return np.log10(normalized)
-
-
-def _data_phi(predicted_log_data: np.ndarray, observed_log_data: np.ndarray, weights: np.ndarray) -> float:
-    residual = (predicted_log_data - observed_log_data) * weights
-    return float(np.sum(residual**2))
 
 
 def _model_phi(
@@ -699,15 +870,19 @@ def _line_search_tau(
     regularization_matrix: sp.spmatrix,
     reference_roughness: np.ndarray,
     regularization: float,
+    data_misfit: DataMisfit | None = None,
+    data_phi: Callable[[np.ndarray], float] | None = None,
 ) -> float:
     data_direction = candidate_predicted_log - predicted_log
+    data_misfit = data_misfit or build_data_misfit("weighted_log_l2")
+    objective_data_phi = data_phi or (lambda values: data_misfit.phi(values, observed_log, weights))
     best_tau = 0.0
-    best_phi = _data_phi(predicted_log, observed_log, weights) + regularization * _model_phi(
+    best_phi = objective_data_phi(predicted_log) + regularization * _model_phi(
         state,
         regularization_matrix,
         reference_roughness,
     )
-    candidate_phi = _data_phi(candidate_predicted_log, observed_log, weights) + regularization * _model_phi(
+    candidate_phi = objective_data_phi(candidate_predicted_log) + regularization * _model_phi(
         state + step,
         regularization_matrix,
         reference_roughness,
@@ -718,7 +893,7 @@ def _line_search_tau(
         tau = 0.01 * index
         state_tau = state + tau * step
         predicted_tau = predicted_log + tau * data_direction
-        phi = _data_phi(predicted_tau, observed_log, weights) + regularization * _model_phi(
+        phi = objective_data_phi(predicted_tau) + regularization * _model_phi(
             state_tau,
             regularization_matrix,
             reference_roughness,
@@ -731,84 +906,11 @@ def _line_search_tau(
     return best_tau
 
 
-def _regularization_mesh(forward: ERTForward2p5D | ERTForwardModeling) -> Mesh:
-    mesh = getattr(forward, "regularization_mesh", None)
-    if mesh is not None:
-        if isinstance(mesh, Mesh):
-            return mesh
-        raise TypeError("forward.regularization_mesh must be a deepert Mesh")
-    if isinstance(forward, ERTForward2p5D):
-        return forward.mesh
-    if isinstance(forward, ERTForwardModeling):
-        return forward._resolved_mesh()
-    if hasattr(forward, "_resolved_mesh"):
-        resolved = forward._resolved_mesh()
-        if isinstance(resolved, Mesh):
-            return resolved
-    mesh = getattr(forward, "mesh", None)
-    if isinstance(mesh, Mesh):
-        return mesh
-    raise TypeError("forward must expose a Mesh for first-order regularization")
-
-
 def _cell_edges(cell: np.ndarray) -> list[tuple[int, int]]:
     return [
         (int(cell[index]), int(cell[(index + 1) % cell.size]))
         for index in range(cell.size)
     ]
-
-
-def _first_order_constraint_matrix(mesh: Mesh, *, z_weight: float = 1.0) -> sp.csr_matrix:
-    """Build first-order neighbor constraints for cell models."""
-
-    nodes = np.asarray(mesh.nodes, dtype=float)
-    cells = np.asarray(mesh.cells, dtype=np.int32)
-    edge_cells: dict[tuple[int, int], list[int]] = {}
-    for cell_index, cell in enumerate(cells):
-        for edge in _cell_edges(cell):
-            key = tuple(sorted(edge))
-            edge_cells.setdefault(key, []).append(cell_index)
-
-    rows: list[int] = []
-    cols: list[int] = []
-    data: list[float] = []
-    row = 0
-    for edge, owners in edge_cells.items():
-        if len(owners) != 2:
-            continue
-        p0, p1 = nodes[list(edge)]
-        tangent = p1 - p0
-        length = float(np.linalg.norm(tangent))
-        if length <= 0.0:
-            continue
-        normal_z = abs(float(tangent[0])) / length
-        weight = 1.0 + normal_z * (float(z_weight) - 1.0)
-        left, right = owners
-        rows.extend((row, row))
-        cols.extend((left, right))
-        data.extend((weight, -weight))
-        row += 1
-
-    return sp.coo_matrix((data, (rows, cols)), shape=(row, int(mesh.cell_count))).tocsr()
-
-
-def _spatial_regularization_matrix(
-    forward: ERTForward2p5D | ERTForwardModeling,
-    config: InversionConfig,
-    n_cells: int,
-) -> sp.csr_matrix:
-    if config.spatial_regularization == "identity":
-        return sp.eye(n_cells, format="csr")
-    matrix = _first_order_constraint_matrix(
-        _regularization_mesh(forward),
-        z_weight=config.z_weight,
-    )
-    if matrix.shape[1] != n_cells:
-        raise ValueError(
-            "regularization mesh cell count does not match inversion model size "
-            f"({matrix.shape[1]} != {n_cells})"
-        )
-    return matrix
 
 
 def _forward_and_jacobian_log(
@@ -914,6 +1016,175 @@ def _forward_log_response(
     conductivity = torch_np.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
     response = forward.apparent_resistivity_values(conductivity)
     return np.log(np.asarray(response, dtype=float))
+
+
+def _linearized_objective_gradient(matrix: sp.spmatrix, rhs: np.ndarray) -> np.ndarray:
+    """Gradient of ``||A dm - b||^2`` at ``dm = 0`` up to a constant factor."""
+
+    return -np.asarray(matrix.T @ np.asarray(rhs, dtype=float).reshape(-1), dtype=float).reshape(-1)
+
+
+def _step_limit(config: InversionConfig) -> float | None:
+    """Use the explicit Gauss-Newton cap when set, otherwise cap first-order methods."""
+
+    if config.max_log_step is not None:
+        return config.max_log_step
+    return config.optimizer_max_step
+
+
+def _as_descent_direction(direction: np.ndarray, gradient: np.ndarray) -> np.ndarray:
+    """Fall back to steepest descent if a quasi-Newton/CG update loses descent."""
+
+    direction = np.asarray(direction, dtype=float).reshape(-1)
+    gradient = np.asarray(gradient, dtype=float).reshape(-1)
+    if direction.shape != gradient.shape:
+        raise ValueError("optimizer direction and gradient shape mismatch")
+    if not np.all(np.isfinite(direction)) or float(np.dot(direction, gradient)) >= 0.0:
+        return -gradient
+    return direction
+
+
+def _lbfgs_direction(gradient: np.ndarray, history: list[tuple[np.ndarray, np.ndarray, float]]) -> np.ndarray:
+    """Return the L-BFGS inverse-Hessian direction from stored ``(s, y, rho)`` pairs."""
+
+    if not history:
+        return -gradient
+
+    q = np.asarray(gradient, dtype=float).copy()
+    alphas: list[float] = []
+    for s_vec, y_vec, rho in reversed(history):
+        alpha = float(rho * np.dot(s_vec, q))
+        alphas.append(alpha)
+        q -= alpha * y_vec
+
+    s_last, y_last, _ = history[-1]
+    yy = float(np.dot(y_last, y_last))
+    gamma = float(np.dot(s_last, y_last) / yy) if yy > 0.0 else 1.0
+    r = gamma * q
+
+    for (s_vec, y_vec, rho), alpha in zip(history, reversed(alphas)):
+        beta = float(rho * np.dot(y_vec, r))
+        r += s_vec * (alpha - beta)
+    return -r
+
+
+def _first_order_optimizer_direction(
+    *,
+    current_state: np.ndarray,
+    gradient: np.ndarray,
+    optimizer_state: dict[str, Any],
+    config: InversionConfig,
+) -> np.ndarray:
+    """Build a first-order/quasi-Newton model increment from the current gradient."""
+
+    algorithm = build_optimization_algorithm(config.optimization_algorithm).name
+    current = np.asarray(current_state, dtype=float).reshape(-1)
+    grad = np.asarray(gradient, dtype=float).reshape(-1)
+    if current.shape != grad.shape:
+        raise ValueError("current_state and gradient shape mismatch")
+    if not np.all(np.isfinite(grad)):
+        raise ValueError("optimizer gradient contains non-finite values")
+    if not np.any(grad):
+        return np.zeros_like(grad)
+
+    if algorithm == "nonlinear_cg":
+        previous_gradient = optimizer_state.get("nonlinear_cg_gradient")
+        previous_direction = optimizer_state.get("nonlinear_cg_direction")
+        if previous_gradient is None or previous_direction is None:
+            direction = -grad
+        else:
+            prev_grad = np.asarray(previous_gradient, dtype=float).reshape(-1)
+            prev_dir = np.asarray(previous_direction, dtype=float).reshape(-1)
+            denominator = max(float(np.dot(prev_grad, prev_grad)), np.finfo(float).eps)
+            beta = max(0.0, float(np.dot(grad, grad - prev_grad) / denominator))
+            direction = -grad + beta * prev_dir
+        direction = _as_descent_direction(direction, grad)
+        optimizer_state["nonlinear_cg_gradient"] = grad.copy()
+        optimizer_state["nonlinear_cg_direction"] = direction.copy()
+        return _limit_delta(direction, _step_limit(config))
+
+    if algorithm in ("lbfgs", "lbfgs_b"):
+        history = optimizer_state.setdefault("lbfgs_history", [])
+        previous_state = optimizer_state.get("lbfgs_state")
+        previous_gradient = optimizer_state.get("lbfgs_gradient")
+        if previous_state is not None and previous_gradient is not None:
+            s_vec = current - np.asarray(previous_state, dtype=float).reshape(-1)
+            y_vec = grad - np.asarray(previous_gradient, dtype=float).reshape(-1)
+            ys = float(np.dot(y_vec, s_vec))
+            if ys > 1.0e-12 and np.all(np.isfinite(s_vec)) and np.all(np.isfinite(y_vec)):
+                history.append((s_vec.copy(), y_vec.copy(), 1.0 / ys))
+                del history[:-int(config.lbfgs_history)]
+        direction = _as_descent_direction(_lbfgs_direction(grad, history), grad)
+        optimizer_state["lbfgs_state"] = current.copy()
+        optimizer_state["lbfgs_gradient"] = grad.copy()
+        return _limit_delta(direction, _step_limit(config))
+
+    if algorithm == "adam":
+        beta1 = float(config.adam_beta1)
+        beta2 = float(config.adam_beta2)
+        step_number = int(optimizer_state.get("adam_step", 0)) + 1
+        first_moment = np.asarray(optimizer_state.get("adam_m", np.zeros_like(grad)), dtype=float)
+        second_moment = np.asarray(optimizer_state.get("adam_v", np.zeros_like(grad)), dtype=float)
+        first_moment = beta1 * first_moment + (1.0 - beta1) * grad
+        second_moment = beta2 * second_moment + (1.0 - beta2) * (grad * grad)
+        m_hat = first_moment / (1.0 - beta1**step_number)
+        v_hat = second_moment / (1.0 - beta2**step_number)
+        direction = -m_hat / (np.sqrt(v_hat) + float(config.adam_epsilon))
+        optimizer_state["adam_step"] = step_number
+        optimizer_state["adam_m"] = first_moment
+        optimizer_state["adam_v"] = second_moment
+        return _limit_delta(direction, _step_limit(config))
+
+    raise ValueError(f"optimizer={config.optimization_algorithm!r} is not a first-order optimizer")
+
+
+def _add_levenberg_marquardt_damping(
+    matrix: sp.spmatrix,
+    rhs: np.ndarray,
+    *,
+    n_parameters: int,
+    config: InversionConfig,
+) -> tuple[sp.csr_matrix, np.ndarray]:
+    if config.lm_damping <= 0.0:
+        return matrix.tocsr(), np.asarray(rhs, dtype=float).reshape(-1)
+    damping = float(np.sqrt(config.lm_damping))
+    damping_matrix = damping * sp.eye(int(n_parameters), format="csr")
+    return (
+        sp.vstack((matrix, damping_matrix), format="csr"),
+        np.concatenate((np.asarray(rhs, dtype=float).reshape(-1), np.zeros(int(n_parameters), dtype=float))),
+    )
+
+
+def _optimizer_increment(
+    matrix: sp.spmatrix,
+    rhs: np.ndarray,
+    *,
+    current_state: np.ndarray,
+    optimizer_state: dict[str, Any],
+    config: InversionConfig,
+) -> np.ndarray:
+    """Compute a model increment using the configured outer optimization algorithm."""
+
+    algorithm = build_optimization_algorithm(config.optimization_algorithm)
+    if algorithm.uses_linearized_solver:
+        solve_matrix = matrix.tocsr()
+        solve_rhs = np.asarray(rhs, dtype=float).reshape(-1)
+        if algorithm.name == "levenberg_marquardt":
+            solve_matrix, solve_rhs = _add_levenberg_marquardt_damping(
+                solve_matrix,
+                solve_rhs,
+                n_parameters=int(np.asarray(current_state).size),
+                config=config,
+            )
+        return _limit_delta(_solve_increment(solve_matrix, solve_rhs, config), config.max_log_step)
+
+    gradient = _linearized_objective_gradient(matrix, rhs)
+    return _first_order_optimizer_direction(
+        current_state=np.asarray(current_state, dtype=float).reshape(-1),
+        gradient=gradient,
+        optimizer_state=optimizer_state,
+        config=config,
+    )
 
 
 def _solve_increment(
@@ -1033,122 +1304,6 @@ def _cupy_cgls(
     return np.asarray(solution, dtype=float)
 
 
-def _cupy_timelapse_cgls(
-    *,
-    jacobians: list[np.ndarray],
-    weight: np.ndarray,
-    data_rhs: np.ndarray,
-    spatial_regularization: sp.spmatrix | None,
-    spatial_scale: float,
-    spatial_rhs: np.ndarray | None,
-    temporal_scale: float,
-    temporal_rhs: np.ndarray | None,
-    max_iterations: int,
-    tolerance: float,
-) -> np.ndarray:
-    """Matrix-free CGLS for the default sliding-window time-lapse system."""
-
-    try:
-        import cupy as cp
-        import cupyx.scipy.sparse as cupy_sparse
-    except ImportError as exc:
-        raise ImportError("linearized_solver='gpu_timelapse_cgls' requires CuPy") from exc
-
-    jacobian_cpu = np.stack(
-        [
-            np.asarray(jac_t, dtype=np.float64) * np.asarray(w_t, dtype=np.float64)[:, None]
-            for jac_t, w_t in zip(jacobians, weight)
-        ]
-    )
-    data_rhs_cpu = np.asarray(data_rhs, dtype=np.float64)
-    n_times, n_measurements, n_cells = jacobian_cpu.shape
-    total_size = n_times * n_cells
-
-    jacobian_gpu = cp.asarray(jacobian_cpu)
-    data_rhs_gpu = cp.asarray(data_rhs_cpu)
-    rhs_parts = [data_rhs_gpu.reshape(-1)]
-
-    spatial_gpu = None
-    if spatial_regularization is not None and spatial_scale > 0.0 and spatial_rhs is not None:
-        spatial_cpu = spatial_regularization.tocsr()
-        spatial_gpu = cupy_sparse.csr_matrix(
-            (
-                cp.asarray(spatial_cpu.data, dtype=cp.float64),
-                cp.asarray(spatial_cpu.indices, dtype=cp.int32),
-                cp.asarray(spatial_cpu.indptr, dtype=cp.int32),
-            ),
-            shape=spatial_cpu.shape,
-        )
-        rhs_parts.append(cp.asarray(np.asarray(spatial_rhs, dtype=np.float64).reshape(-1)))
-
-    has_temporal = temporal_scale > 0.0 and temporal_rhs is not None and n_times > 1
-    if has_temporal:
-        rhs_parts.append(cp.asarray(np.asarray(temporal_rhs, dtype=np.float64).reshape(-1)))
-
-    b = cp.concatenate(rhs_parts)
-
-    def matvec(vector):
-        model = vector.reshape((n_times, n_cells))
-        parts = [cp.einsum("tmc,tc->tm", jacobian_gpu, model).reshape(-1)]
-        if spatial_gpu is not None:
-            spatial_rows = [spatial_scale * (spatial_gpu @ model[time_index]) for time_index in range(n_times)]
-            parts.append(cp.stack(spatial_rows, axis=0).reshape(-1))
-        if has_temporal:
-            parts.append((temporal_scale * (model[1:] - model[:-1])).reshape(-1))
-        return cp.concatenate(parts)
-
-    def rmatvec(vector):
-        offset = 0
-        data_size = n_times * n_measurements
-        data_part = vector[offset : offset + data_size].reshape((n_times, n_measurements))
-        offset += data_size
-        gradient = cp.einsum("tmc,tm->tc", jacobian_gpu, data_part)
-        if spatial_gpu is not None:
-            spatial_rows = int(spatial_gpu.shape[0])
-            spatial_part = vector[offset : offset + n_times * spatial_rows].reshape((n_times, spatial_rows))
-            offset += n_times * spatial_rows
-            for time_index in range(n_times):
-                gradient[time_index] += spatial_scale * (spatial_gpu.T @ spatial_part[time_index])
-        if has_temporal:
-            temporal_part = vector[offset:].reshape((n_times - 1, n_cells))
-            gradient[:-1] -= temporal_scale * temporal_part
-            gradient[1:] += temporal_scale * temporal_part
-        return gradient.reshape(-1)
-
-    x = cp.zeros((total_size,), dtype=cp.float64)
-    r = b.copy()
-    s = rmatvec(r)
-    p = s.copy()
-    gamma = cp.dot(s, s)
-    gamma0_value = float(gamma)
-    if gamma0_value <= 0.0:
-        return cp.asnumpy(x)
-
-    for _ in range(int(max_iterations)):
-        q = matvec(p)
-        denominator = cp.dot(q, q)
-        denominator_value = float(denominator)
-        if denominator_value <= 0.0:
-            break
-        alpha = gamma / denominator
-        x = x + alpha * p
-        r = r - alpha * q
-        s = rmatvec(r)
-        gamma_new = cp.dot(s, s)
-        gamma_new_value = float(gamma_new)
-        if gamma_new_value <= 0.0:
-            break
-        if gamma_new_value / gamma0_value < float(tolerance):
-            break
-        p = s + (gamma_new / gamma) * p
-        gamma = gamma_new
-
-    solution = cp.asnumpy(x)
-    if not np.all(np.isfinite(solution)):
-        raise ValueError("linearized inversion update contains non-finite values")
-    return np.asarray(solution, dtype=float)
-
-
 def _pyhydro_cgls(
     matrix: sp.spmatrix,
     rhs: np.ndarray,
@@ -1230,6 +1385,9 @@ def invert_single_log_resistivity(
     n_data = _measurement_count(forward)
     observed_log = _as_observed_log_vector(observed_data, log_data=observed_log_data, expected_size=n_data)
     weight = _weights(config.data_std, observed_log.shape)
+    data_misfit = build_data_misfit(config.data_misfit)
+    if _is_log_data_difference_misfit(data_misfit):
+        raise ValueError("log data-difference misfit is only defined for time-lapse inversions")
     initial_log = _as_log_model(
         initial_model,
         expected_size=n_cells,
@@ -1252,7 +1410,9 @@ def invert_single_log_resistivity(
     predicted_log = np.empty_like(observed_log)
     jacobian = np.empty((n_data, n_cells), dtype=float)
     linearization_valid = False
-    regularization_matrix = _spatial_regularization_matrix(forward, config, n_cells)
+    optimizer_state: dict[str, Any] = {}
+    spatial_regularization = build_spatial_regularization(config.spatial_regularization)
+    regularization_matrix = spatial_regularization.matrix(forward, n_cells, z_weight=config.z_weight)
 
     _emit_progress(
         config,
@@ -1279,30 +1439,82 @@ def invert_single_log_resistivity(
                 normal_sensitivity=config.normal_sensitivity,
             )
             jacobian = jacobian_log * _d_log_model_d_state(model, config)[None, :]
-        data_matrix = sp.csr_matrix(jacobian * weight[:, None])
-        rhs_blocks = [(observed_log - predicted_log) * weight]
+        data_matrix_values, data_rhs = data_misfit.linearized_system(
+            predicted_log,
+            observed_log,
+            weight,
+            jacobian,
+        )
+        data_matrix = sp.csr_matrix(data_matrix_values)
+        rhs_blocks = [data_rhs]
         matrix_blocks: list[sp.spmatrix] = [data_matrix]
         reference_roughness = np.zeros(regularization_matrix.shape[0], dtype=float)
+        objective_matrix = regularization_matrix
+        objective_reference = reference_roughness
+        objective_regularization = config.regularization
 
         if config.regularization > 0.0:
             scale = float(np.sqrt(config.regularization))
-            matrix_blocks.append(scale * regularization_matrix)
-            current_roughness = regularization_matrix @ model
+            regularization_domain = _normalize_regularization_domain(config.regularization_domain)
+            if regularization_domain == "state":
+                domain_model = model
+                projection = None
+                reference_domain = reference
+            else:
+                domain_model, d_domain_d_state = _regularization_domain_value_and_derivative(model, config)
+                projection = _chain_rule_projection(d_domain_d_state)
+                reference_domain = (
+                    None
+                    if reference is None
+                    else _regularization_domain_value_and_derivative(reference, config)[0]
+                )
+
+            current_roughness = regularization_matrix @ domain_model
             if config.regularization_mode == "update":
                 reference_roughness = current_roughness
-            elif reference is None:
-                if config.spatial_regularization == "identity":
+            elif reference_domain is None:
+                if spatial_regularization.name == "identity":
                     reference_roughness = current_roughness
                 else:
                     reference_roughness = np.zeros_like(current_roughness)
             else:
-                reference_roughness = regularization_matrix @ reference
-            rhs_blocks.append(scale * (reference_roughness - current_roughness))
+                reference_roughness = regularization_matrix @ reference_domain
+
+            if spatial_regularization.name in ("identity", "first_order"):
+                spatial_matrix_domain = scale * regularization_matrix
+                spatial_rhs = scale * (reference_roughness - current_roughness)
+                if projection is None:
+                    spatial_matrix = spatial_matrix_domain
+                else:
+                    spatial_matrix = (spatial_matrix_domain @ projection).tocsr()
+            else:
+                spatial_matrix_domain, spatial_rhs = spatial_regularization.linearized_system(
+                    forward,
+                    np.asarray(domain_model, dtype=float),
+                    n_cells,
+                    reference_roughness=reference_roughness,
+                    scale=scale,
+                    z_weight=config.z_weight,
+                )
+                if projection is None:
+                    spatial_matrix = spatial_matrix_domain
+                else:
+                    spatial_matrix = (spatial_matrix_domain @ projection).tocsr()
+            objective_reference = spatial_matrix @ model + spatial_rhs
+            matrix_blocks.append(spatial_matrix)
+            rhs_blocks.append(spatial_rhs)
+            objective_matrix = spatial_matrix
+            objective_regularization = 1.0
 
         matrix = sp.vstack(matrix_blocks, format="csr")
         rhs = np.concatenate(rhs_blocks)
-        delta = _solve_increment(matrix, rhs, config)
-        delta = _limit_delta(delta, config.max_log_step)
+        delta = _optimizer_increment(
+            matrix,
+            rhs,
+            current_state=model,
+            optimizer_state=optimizer_state,
+            config=config,
+        )
         step = config.step_length * delta
         candidate_model = _clip_model_state(model + step, config)
         candidate_step = candidate_model - model
@@ -1325,9 +1537,10 @@ def invert_single_log_resistivity(
                 candidate_predicted_log=candidate_predicted_log,
                 observed_log=observed_log,
                 weights=weight,
-                regularization_matrix=regularization_matrix,
-                reference_roughness=reference_roughness,
-                regularization=config.regularization,
+                regularization_matrix=objective_matrix,
+                reference_roughness=np.asarray(objective_reference, dtype=float),
+                regularization=objective_regularization,
+                data_misfit=data_misfit,
             )
             actual_step = tau * candidate_step
             if tau < 0.95:
@@ -1350,7 +1563,7 @@ def invert_single_log_resistivity(
             jacobian = candidate_jacobian
 
         linearization_valid = True
-        chi2 = _weighted_chi2(predicted_log, observed_log, weight)
+        chi2 = data_misfit.chi2(predicted_log, observed_log, weight)
         iteration_chi2.append(chi2)
         step_metric = float(np.linalg.norm(actual_step) / max(float(np.sqrt(n_cells)), 1.0))
         _emit_progress(
@@ -1372,6 +1585,8 @@ def invert_single_log_resistivity(
     coverage = _pygimli_style_coverage_from_jacobian(forward, jacobian)
     predicted_data = np.exp(predicted_log)
     final_log_model = _state_to_log_model(model, config)
+    final_parameter_model = _parameter_model_from_state(model, config)
+    final_parameter_name = _parameter_name_from_state(model, config)
     _emit_progress(
         config,
         "single_done",
@@ -1387,25 +1602,127 @@ def invert_single_log_resistivity(
         predicted_log_data=predicted_log,
         coverage=coverage,
         iteration_chi2=iteration_chi2,
+        final_parameter_model=final_parameter_model,
+        final_parameter_name=final_parameter_name,
     )
 
 
-def _temporal_difference_matrix(n_cells: int, n_times: int, scale: float) -> sp.csr_matrix:
-    row_count = n_cells * (n_times - 1)
-    col_count = n_cells * n_times
-    rows: list[int] = []
-    cols: list[int] = []
-    data: list[float] = []
+def _timelapse_data_system(
+    data_misfit: DataMisfit,
+    predicted_log: np.ndarray,
+    observed_log: np.ndarray,
+    weight: np.ndarray,
+    jacobians: list[np.ndarray],
+) -> tuple[sp.csr_matrix, np.ndarray]:
+    """Build the time-lapse data term, including coupled data-difference rows."""
+
+    if not _is_log_data_difference_misfit(data_misfit):
+        data_blocks: list[sp.csr_matrix] = []
+        rhs_blocks: list[np.ndarray] = []
+        for time_index, jac_t in enumerate(jacobians):
+            data_matrix_t, data_rhs_t = data_misfit.linearized_system(
+                predicted_log[time_index],
+                observed_log[time_index],
+                weight[time_index],
+                jac_t,
+            )
+            data_blocks.append(sp.csr_matrix(data_matrix_t))
+            rhs_blocks.append(data_rhs_t)
+        return sp.block_diag(data_blocks, format="csr"), np.concatenate(rhs_blocks)
+
+    n_times = int(predicted_log.shape[0])
+    if n_times < 2:
+        raise ValueError("log data-difference misfit requires at least two time steps")
+    n_cells = int(jacobians[0].shape[1])
+    zero = sp.csr_matrix((predicted_log.shape[1], n_cells))
+    matrix_rows: list[sp.csr_matrix] = []
+    rhs_rows: list[np.ndarray] = []
+
+    w0 = weight[0]
+    row_blocks = [sp.csr_matrix(jacobians[0] * w0[:, None])]
+    row_blocks.extend([zero] * (n_times - 1))
+    matrix_rows.append(sp.hstack(row_blocks, format="csr"))
+    rhs_rows.append(-((predicted_log[0] - observed_log[0]) * w0))
+
+    diff_weights = _difference_weights(weight)
     for time_index in range(1, n_times):
-        row_offset = (time_index - 1) * n_cells
-        previous_offset = (time_index - 1) * n_cells
-        current_offset = time_index * n_cells
-        for cell_index in range(n_cells):
-            row = row_offset + cell_index
-            rows.extend((row, row))
-            cols.extend((current_offset + cell_index, previous_offset + cell_index))
-            data.extend((scale, -scale))
-    return sp.coo_matrix((data, (rows, cols)), shape=(row_count, col_count)).tocsr()
+        w_t = diff_weights[time_index - 1]
+        residual = (predicted_log[time_index] - predicted_log[0]) - (
+            observed_log[time_index] - observed_log[0]
+        )
+        row_blocks = []
+        for block_index in range(n_times):
+            if block_index == 0:
+                row_blocks.append(sp.csr_matrix(-jacobians[0] * w_t[:, None]))
+            elif block_index == time_index:
+                row_blocks.append(sp.csr_matrix(jacobians[time_index] * w_t[:, None]))
+            else:
+                row_blocks.append(zero)
+        matrix_rows.append(sp.hstack(row_blocks, format="csr"))
+        rhs_rows.append(-(residual * w_t))
+
+    rhs = np.concatenate(rhs_rows)
+    return sp.vstack(matrix_rows, format="csr"), rhs
+
+
+def _timelapse_data_chi2(
+    data_misfit: DataMisfit,
+    predicted_log: np.ndarray,
+    observed_log: np.ndarray,
+    weight: np.ndarray,
+) -> float:
+    if _is_log_data_difference_misfit(data_misfit):
+        return _log_data_difference_chi2(predicted_log, observed_log, weight)
+    return data_misfit.chi2(predicted_log, observed_log, weight)
+
+
+def _timelapse_data_phi(
+    data_misfit: DataMisfit,
+    predicted_log: np.ndarray,
+    observed_log: np.ndarray,
+    weight: np.ndarray,
+) -> float:
+    if _is_log_data_difference_misfit(data_misfit):
+        return _log_data_difference_phi(predicted_log, observed_log, weight)
+    return data_misfit.phi(predicted_log, observed_log, weight)
+
+
+def _model_difference_spatial_system(
+    spatial_regularization: sp.spmatrix,
+    current_vec: np.ndarray,
+    reference_vec: np.ndarray | None,
+    *,
+    n_cells: int,
+    n_times: int,
+    scale: float,
+    regularization_mode: str,
+) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
+    """Build spatial constraints on the baseline model and time-lapse changes."""
+
+    base = spatial_regularization.tocsr()
+    zero = sp.csr_matrix(base.shape)
+    rows: list[sp.csr_matrix] = []
+    rows.append(sp.hstack([base, *([zero] * (n_times - 1))], format="csr"))
+    for time_index in range(1, n_times):
+        blocks = []
+        for block_index in range(n_times):
+            if block_index == 0:
+                blocks.append(-base)
+            elif block_index == time_index:
+                blocks.append(base)
+            else:
+                blocks.append(zero)
+        rows.append(sp.hstack(blocks, format="csr"))
+    unscaled = sp.vstack(rows, format="csr")
+    current_roughness = unscaled @ current_vec
+    if regularization_mode == "update":
+        reference_roughness = current_roughness
+    elif reference_vec is None:
+        reference_roughness = np.zeros_like(current_roughness)
+    else:
+        reference_roughness = unscaled @ reference_vec
+    matrix = float(scale) * unscaled
+    return matrix, float(scale) * (reference_roughness - current_roughness), float(scale) * reference_roughness
 
 
 def invert_timelapse_log_resistivity(
@@ -1443,6 +1760,7 @@ def invert_timelapse_log_resistivity(
         raise ValueError("time-lapse inversion needs at least two timesteps")
 
     weight = _weights(config.data_std, observed_log.shape)
+    data_misfit = build_data_misfit(config.data_misfit)
     initial_logs = _as_log_model_matrix(
         initial_model,
         expected_size=n_cells,
@@ -1473,12 +1791,14 @@ def invert_timelapse_log_resistivity(
     predicted_log = np.empty_like(observed_log)
     jacobians: list[np.ndarray] = []
     linearization_valid = False
-    spatial_regularization = _spatial_regularization_matrix(forward, config, n_cells)
+    optimizer_state: dict[str, Any] = {}
+    spatial_regularization_obj = build_spatial_regularization(config.spatial_regularization)
+    spatial_regularization = spatial_regularization_obj.matrix(forward, n_cells, z_weight=config.z_weight)
     spatial_regularization_all = sp.block_diag(
         [spatial_regularization] * n_times,
         format="csr",
     )
-    temporal_difference = _temporal_difference_matrix(n_cells, n_times, 1.0)
+    temporal_regularization = build_temporal_regularization(config.temporal_regularization_type)
 
     _emit_progress(
         config,
@@ -1535,99 +1855,207 @@ def invert_timelapse_log_resistivity(
                 )
             predicted_log = np.vstack(predicted_rows)
 
-        data_blocks: list[sp.csr_matrix] = []
-        rhs_blocks: list[np.ndarray] = []
-        for time_index, jac_t in enumerate(jacobians):
-            w_t = weight[time_index]
-            data_blocks.append(sp.csr_matrix(jac_t * w_t[:, None]))
-            rhs_blocks.append((observed_log[time_index] - predicted_log[time_index]) * w_t)
-        data_rhs_matrix = np.vstack(rhs_blocks)
+        data_matrix, data_rhs = _timelapse_data_system(
+            data_misfit,
+            predicted_log,
+            observed_log,
+            weight,
+            jacobians,
+        )
 
-        matrix_blocks: list[sp.spmatrix] = [sp.block_diag(data_blocks, format="csr")]
-        rhs_all: list[np.ndarray] = [np.concatenate(rhs_blocks)]
+        matrix_blocks: list[sp.spmatrix] = [data_matrix]
+        rhs_all: list[np.ndarray] = [data_rhs]
         objective_blocks: list[sp.spmatrix] = []
         objective_references: list[np.ndarray] = []
-        gpu_spatial_rhs: np.ndarray | None = None
-        gpu_spatial_scale = 0.0
-        gpu_temporal_rhs: np.ndarray | None = None
-        gpu_temporal_scale = 0.0
 
         current_vec = models.reshape(total_size, order="F")
         reference_vec = None if reference is None else reference.reshape(total_size, order="F")
+        regularization_domain = _normalize_regularization_domain(config.regularization_domain)
+        needs_projection = (
+            config.regularization > 0.0
+            or (config.temporal_regularization_mode == "separate" and config.temporal_regularization > 0.0)
+        )
+        use_physical_regularization = regularization_domain == "physical" and needs_projection
+        if use_physical_regularization:
+            domain_models, domain_derivative = _regularization_domain_value_and_derivative(models, config)
+            domain_vec = np.asarray(domain_models, dtype=float).reshape(total_size, order="F")
+            projection_all = _chain_rule_projection(domain_derivative, order="F")
+            if reference is None:
+                reference_domain = None
+                reference_domain_vec = None
+            else:
+                reference_domain, _ = _regularization_domain_value_and_derivative(reference, config)
+                reference_domain_vec = np.asarray(reference_domain, dtype=float).reshape(total_size, order="F")
+        else:
+            domain_models = np.asarray(models, dtype=float)
+            domain_derivative = np.ones_like(domain_models, dtype=float)
+            domain_vec = current_vec
+            projection_all = None
+            reference_domain = reference
+            reference_domain_vec = reference_vec
+
+        if (
+            config.temporal_regularization_mode == "joint_frame"
+            and config.temporal_regularization > 0.0
+            and temporal_regularization.name not in ("first_order_l2", "second_order_l2")
+        ):
+            raise ValueError(
+                "robust temporal regularization is currently supported for "
+                "temporal_regularization_mode='separate' only"
+            )
+        if (
+            config.temporal_regularization_mode == "joint_frame"
+            and config.regularization > 0.0
+            and spatial_regularization_obj.name not in ("identity", "first_order")
+        ):
+            raise ValueError(
+                "robust spatial regularization is currently supported for "
+                "temporal_regularization_mode='separate' only"
+            )
         if config.temporal_regularization_mode == "joint_frame":
             if config.regularization > 0.0:
                 frame_blocks: list[sp.spmatrix] = [spatial_regularization_all]
                 if config.temporal_regularization > 0.0:
                     frame_blocks.append(
-                        _temporal_difference_matrix(
+                        temporal_regularization.matrix(
                             n_cells,
                             n_times,
-                            float(config.temporal_regularization),
+                            scale=float(config.temporal_regularization),
                         )
                     )
-                frame_constraint = sp.vstack(frame_blocks, format="csr")
-                current_roughness = frame_constraint @ current_vec
+                frame_constraint_domain = sp.vstack(frame_blocks, format="csr")
+                current_roughness = frame_constraint_domain @ domain_vec
                 if config.regularization_mode == "update":
                     reference_roughness = current_roughness
-                elif reference_vec is None:
+                elif reference_domain_vec is None:
                     reference_roughness = np.zeros_like(current_roughness)
                 else:
-                    reference_roughness = frame_constraint @ reference_vec
+                    reference_roughness = frame_constraint_domain @ reference_domain_vec
                 scale = float(np.sqrt(config.regularization))
-                matrix_blocks.append(scale * frame_constraint)
-                rhs_all.append(scale * (reference_roughness - current_roughness))
-                objective_blocks.append(scale * frame_constraint)
-                objective_references.append(scale * reference_roughness)
+                if projection_all is None:
+                    frame_constraint = frame_constraint_domain
+                else:
+                    frame_constraint = (frame_constraint_domain @ projection_all).tocsr()
+                frame_matrix = scale * frame_constraint
+                frame_rhs = scale * (reference_roughness - current_roughness)
+                matrix_blocks.append(frame_matrix)
+                rhs_all.append(frame_rhs)
+                objective_blocks.append(frame_matrix)
+                objective_references.append(frame_matrix @ current_vec + frame_rhs)
         elif config.regularization > 0.0:
             scale = float(np.sqrt(config.regularization))
-            matrix_blocks.append(scale * spatial_regularization_all)
-            current_roughness = spatial_regularization_all @ current_vec
-            if config.regularization_mode == "update":
-                reference_roughness = current_roughness
-            elif reference is None:
-                if config.spatial_regularization == "identity":
-                    reference_roughness = current_roughness
+            if spatial_regularization_obj.name == "model_difference_smoothness":
+                spatial_matrix_domain_all, spatial_rhs_all, _ = (
+                    _model_difference_spatial_system(
+                        spatial_regularization,
+                        domain_vec,
+                        reference_domain_vec,
+                        n_cells=n_cells,
+                        n_times=n_times,
+                        scale=scale,
+                        regularization_mode=config.regularization_mode,
+                    )
+                )
+                if projection_all is None:
+                    spatial_matrix_all = spatial_matrix_domain_all
                 else:
-                    reference_roughness = np.zeros_like(current_roughness)
+                    spatial_matrix_all = (spatial_matrix_domain_all @ projection_all).tocsr()
+                spatial_objective_reference_all = spatial_matrix_all @ current_vec + spatial_rhs_all
+            elif spatial_regularization_obj.name in ("identity", "first_order"):
+                spatial_matrix_domain_all = scale * spatial_regularization_all
+                current_roughness = spatial_regularization_all @ domain_vec
+                if config.regularization_mode == "update":
+                    reference_roughness = current_roughness
+                elif reference_domain is None:
+                    if spatial_regularization_obj.name == "identity":
+                        reference_roughness = current_roughness
+                    else:
+                        reference_roughness = np.zeros_like(current_roughness)
+                else:
+                    reference_roughness = spatial_regularization_all @ reference_domain_vec
+                spatial_rhs_all = scale * (reference_roughness - current_roughness)
+                if projection_all is None:
+                    spatial_matrix_all = spatial_matrix_domain_all
+                else:
+                    spatial_matrix_all = (spatial_matrix_domain_all @ projection_all).tocsr()
+                spatial_objective_reference_all = spatial_matrix_all @ current_vec + spatial_rhs_all
             else:
-                reference_roughness = spatial_regularization_all @ reference_vec
-            rhs_all.append(scale * (reference_roughness - current_roughness))
-            objective_blocks.append(scale * spatial_regularization_all)
-            objective_references.append(scale * reference_roughness)
-            gpu_spatial_scale = scale
-            gpu_spatial_rhs = (scale * (reference_roughness - current_roughness)).reshape(
-                (n_times, spatial_regularization.shape[0])
-            )
+                spatial_matrices: list[sp.spmatrix] = []
+                spatial_rhs_rows: list[np.ndarray] = []
+                spatial_objective_references: list[np.ndarray] = []
+                for time_index in range(n_times):
+                    state_t = models[:, time_index]
+                    domain_t = np.asarray(domain_models[:, time_index], dtype=float)
+                    current_roughness_t = spatial_regularization @ domain_t
+                    if config.regularization_mode == "update":
+                        reference_roughness_t = current_roughness_t
+                    elif reference_domain is None:
+                        reference_roughness_t = np.zeros_like(current_roughness_t)
+                    else:
+                        reference_roughness_t = spatial_regularization @ np.asarray(
+                            reference_domain[:, time_index],
+                            dtype=float,
+                        )
+                    spatial_matrix_domain_t, spatial_rhs_t = spatial_regularization_obj.linearized_system(
+                        forward,
+                        domain_t,
+                        n_cells,
+                        reference_roughness=reference_roughness_t,
+                        scale=scale,
+                        z_weight=config.z_weight,
+                    )
+                    if projection_all is None:
+                        spatial_matrix_t = spatial_matrix_domain_t
+                    else:
+                        chain_t = _chain_rule_projection(domain_derivative[:, time_index], order="C")
+                        spatial_matrix_t = (spatial_matrix_domain_t @ chain_t).tocsr()
+                    spatial_matrices.append(spatial_matrix_t)
+                    spatial_rhs_rows.append(spatial_rhs_t)
+                    spatial_objective_references.append(spatial_matrix_t @ state_t + spatial_rhs_t)
+                spatial_matrix_all = sp.block_diag(spatial_matrices, format="csr")
+                spatial_rhs_all = np.concatenate(spatial_rhs_rows)
+                spatial_objective_reference_all = np.concatenate(spatial_objective_references)
+            matrix_blocks.append(spatial_matrix_all)
+            rhs_all.append(spatial_rhs_all)
+            objective_blocks.append(spatial_matrix_all)
+            objective_references.append(spatial_objective_reference_all)
 
         if config.temporal_regularization_mode == "separate" and config.temporal_regularization > 0.0:
             scale = float(np.sqrt(config.temporal_regularization))
-            matrix_blocks.append(scale * temporal_difference)
-            temporal_roughness = temporal_difference @ current_vec
-            temporal_reference = np.zeros_like(temporal_roughness)
-            rhs_all.append(scale * (temporal_reference - temporal_roughness))
-            objective_blocks.append(scale * temporal_difference)
-            objective_references.append(scale * temporal_reference)
-            gpu_temporal_scale = scale
-            gpu_temporal_rhs = (scale * (temporal_reference - temporal_roughness)).reshape((n_times - 1, n_cells))
+            if temporal_regularization.name == "active_time_constraint":
+                temporal_matrix_domain, temporal_rhs = temporal_regularization.linearized_system(
+                    domain_vec,
+                    n_cells,
+                    n_times,
+                    scale=scale,
+                    threshold=config.active_time_threshold,
+                    minimum_weight=config.active_time_minimum_weight,
+                )
+            else:
+                temporal_matrix_domain, temporal_rhs = temporal_regularization.linearized_system(
+                    domain_vec,
+                    n_cells,
+                    n_times,
+                    scale=scale,
+                )
+            if projection_all is None:
+                temporal_matrix = temporal_matrix_domain
+            else:
+                temporal_matrix = (temporal_matrix_domain @ projection_all).tocsr()
+            matrix_blocks.append(temporal_matrix)
+            rhs_all.append(temporal_rhs)
+            objective_blocks.append(temporal_matrix)
+            objective_references.append(temporal_matrix @ current_vec + temporal_rhs)
 
-        if config.linearized_solver == "gpu_timelapse_cgls" and config.temporal_regularization_mode == "separate":
-            delta_vec = _cupy_timelapse_cgls(
-                jacobians=jacobians,
-                weight=weight,
-                data_rhs=data_rhs_matrix,
-                spatial_regularization=spatial_regularization if config.regularization > 0.0 else None,
-                spatial_scale=gpu_spatial_scale,
-                spatial_rhs=gpu_spatial_rhs,
-                temporal_scale=gpu_temporal_scale,
-                temporal_rhs=gpu_temporal_rhs,
-                max_iterations=config.cgls_max_iterations,
-                tolerance=config.cgls_tolerance,
-            )
-        else:
-            matrix = sp.vstack(matrix_blocks, format="csr")
-            rhs = np.concatenate(rhs_all)
-            delta_vec = _solve_increment(matrix, rhs, config)
-        delta_vec = _limit_delta(delta_vec, config.max_log_step)
+        matrix = sp.vstack(matrix_blocks, format="csr")
+        rhs = np.concatenate(rhs_all)
+        delta_vec = _optimizer_increment(
+            matrix,
+            rhs,
+            current_state=current_vec,
+            optimizer_state=optimizer_state,
+            config=config,
+        )
         delta = delta_vec.reshape((n_cells, n_times), order="F")
         step = config.step_length * delta
         candidate_models = _clip_model_state(models + step, config)
@@ -1687,6 +2115,13 @@ def invert_timelapse_log_resistivity(
                 regularization_matrix=objective_matrix,
                 reference_roughness=objective_reference,
                 regularization=1.0,
+                data_misfit=data_misfit,
+                data_phi=lambda values: _timelapse_data_phi(
+                    data_misfit,
+                    np.asarray(values, dtype=float).reshape(observed_log.shape),
+                    observed_log,
+                    weight,
+                ),
             )
             actual_step_vec = tau * candidate_step_vec
             if tau < 0.95:
@@ -1736,7 +2171,7 @@ def invert_timelapse_log_resistivity(
             jacobians = candidate_jacobians
 
         linearization_valid = True
-        chi2 = _weighted_chi2(predicted_log, observed_log, weight)
+        chi2 = _timelapse_data_chi2(data_misfit, predicted_log, observed_log, weight)
         iteration_chi2.append(chi2)
         step_metric = float(np.linalg.norm(actual_step_vec) / max(float(np.sqrt(total_size)), 1.0))
         _emit_progress(
@@ -1759,6 +2194,8 @@ def invert_timelapse_log_resistivity(
     all_coverage = [_pygimli_style_coverage_from_jacobian(forward, jac_t) for jac_t in jacobians]
     coverage = np.nanmedian(np.column_stack(all_coverage), axis=1)
     final_log_models = _state_to_log_model(models, config)
+    final_parameter_models = _parameter_model_from_state(models, config)
+    final_parameter_name = _parameter_name_from_state(models, config)
     _emit_progress(
         config,
         "timelapse_done",
@@ -1776,6 +2213,8 @@ def invert_timelapse_log_resistivity(
         all_coverage=all_coverage,
         all_chi2=np.asarray(iteration_chi2, dtype=float),
         iteration_chi2=iteration_chi2,
+        final_parameter_models=final_parameter_models,
+        final_parameter_name=final_parameter_name,
     )
 
 
@@ -1943,6 +2382,9 @@ def invert_windowed_timelapse_log_resistivity(
         stack = np.column_stack(timestep_contributions)
         final_log_columns.append(np.mean(stack, axis=1))
     final_log_models = np.column_stack(final_log_columns)
+    final_parameter_state = _log_model_to_state(final_log_models, config)
+    final_parameter_models = _parameter_model_from_state(final_parameter_state, config)
+    final_parameter_name = _parameter_name_from_state(final_parameter_state, config)
 
     _emit_progress(
         config,
@@ -1983,6 +2425,8 @@ def invert_windowed_timelapse_log_resistivity(
         all_chi2=np.asarray(window_final_chi2, dtype=float),
         iteration_chi2=window_final_chi2,
         window_reports=window_reports,
+        final_parameter_models=final_parameter_models,
+        final_parameter_name=final_parameter_name,
     )
 
 
