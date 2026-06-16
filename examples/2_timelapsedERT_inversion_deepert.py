@@ -493,13 +493,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--petrophysical-transform",
         choices=available_petrophysical_transforms(),
         default="log_resistivity",
-        help="Inversion parameterization: log-resistivity, log-conductivity, or saturation.",
+        help="Inversion parameterization: log-resistivity, log-conductivity, saturation, or water content.",
     )
     parser.add_argument(
         "--petrophysical-parameter-dir",
         default=None,
         help=(
-            "Directory containing rho_sat2d/n2d/rho_sat_s2d/phi2d files for saturation inversion. "
+            "Directory containing rho_sat2d/n2d/rho_sat_s2d/phi2d files for saturation/water-content inversion. "
             "Defaults to parflow_models/petrophysical_models_2d."
         ),
     )
@@ -586,6 +586,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--coverage-percentile", type=float, default=20.0)
     parser.add_argument("--inversion-mesh-quality", type=float, default=34.0)
     parser.add_argument("--inversion-mesh-smoothing-iterations", type=int, default=10)
+    parser.add_argument(
+        "--mesh-file",
+        default=None,
+        help=(
+            "Optional mesh npz bootstrap file. If set, bypasses Triangle meshing and "
+            "uses saved nodes/cells arrays (see build_source_position_triangle_inversion_case)."
+        ),
+    )
     parser.add_argument("--forward-refinement", choices=("native", "h2"), default="native")
     parser.add_argument("--linear-solver-backend", default="auto")
     parser.add_argument("--terrain-cache-dir", default=None)
@@ -622,9 +630,13 @@ def main(argv: list[str] | None = None) -> int:
         data_std = float(np.log1p(args.relative_error))
         data_std_source = "relative_error_log1p"
 
+    mesh_file_path = None if args.mesh_file is None else _resolve(root, args.mesh_file)
+    case_data_file = pairs[0][1] if mesh_file_path is None else None
+    elec_z_case = np.asarray(elec_z, dtype=float)
+
     case = build_source_position_triangle_inversion_case(
         elec_x,
-        elec_z,
+        elec_z_case,
         measurements,
         geometry["x_nodes"],
         geometry["z_top"],
@@ -632,7 +644,8 @@ def main(argv: list[str] | None = None) -> int:
         y_index=args.y_index,
         quality=args.inversion_mesh_quality,
         smoothing_iterations=args.inversion_mesh_smoothing_iterations,
-        data_file=pairs[0][1],
+        data_file=case_data_file,
+        mesh_file=mesh_file_path,
     )
     if observed_rhoa.shape[1] != case.survey.measurement_count:
         raise ValueError(
@@ -681,7 +694,15 @@ def main(argv: list[str] | None = None) -> int:
         else true_model_dir.parent / "parflow_models" / "petrophysical_models_2d"
     )
     petrophysical_parameters = None
-    if str(args.petrophysical_transform).replace("-", "_") == "saturation":
+    petrophysical_transform_key = str(args.petrophysical_transform).replace("-", "_")
+    if petrophysical_transform_key in {
+        "saturation",
+        "water_saturation",
+        "water_content",
+        "theta",
+        "archie_water_content",
+        "absolute_archie_water_content",
+    }:
         petrophysical_parameters = _load_petrophysical_parameters(
             petrophysical_parameter_dir,
             y_index=args.y_index,
@@ -855,9 +876,14 @@ def main(argv: list[str] | None = None) -> int:
         "saved_parameter_models": bool(final_parameter_models is not None and result.final_parameter_name != "resistivity"),
         "saved_water_content_models": bool(
             final_parameter_models is not None
-            and result.final_parameter_name == "saturation"
-            and petrophysical_parameters is not None
-            and "phi" in petrophysical_parameters
+            and (
+                result.final_parameter_name == "water_content"
+                or (
+                    result.final_parameter_name == "saturation"
+                    and petrophysical_parameters is not None
+                    and "phi" in petrophysical_parameters
+                )
+            )
         ),
         "structural_prior_file": str(structural_prior_file) if structural_prior_cell_ids is not None else None,
         "structural_cross_weight": float(args.structural_cross_weight),
@@ -891,6 +917,7 @@ def main(argv: list[str] | None = None) -> int:
         "output_dir": str(output_dir),
         "forward_dir": str(forward_dir),
         "mesh_file": str(output_dir / "timelapse_inversion_mesh.npz"),
+        "input_mesh_file": None if args.mesh_file is None else str(_resolve(root, args.mesh_file)),
         "inversion_mesh_quality": float(args.inversion_mesh_quality),
         "inversion_mesh_smoothing_iterations": int(args.inversion_mesh_smoothing_iterations),
         "torch_enable_float64": bool(torch_runtime.config.torch_enable_float64),

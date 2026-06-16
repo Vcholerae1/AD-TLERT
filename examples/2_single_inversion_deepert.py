@@ -304,13 +304,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--petrophysical-transform",
         choices=available_petrophysical_transforms(),
         default="log_resistivity",
-        help="Inversion parameterization: log-resistivity, log-conductivity, or saturation.",
+        help="Inversion parameterization: log-resistivity, log-conductivity, saturation, or water content.",
     )
     parser.add_argument(
         "--petrophysical-parameter-dir",
         default=None,
         help=(
-            "Directory containing rho_sat2d/n2d/rho_sat_s2d/phi2d files for saturation inversion. "
+            "Directory containing rho_sat2d/n2d/rho_sat_s2d/phi2d files for saturation/water-content inversion. "
             "Defaults to parflow_models/petrophysical_models_2d."
         ),
     )
@@ -424,7 +424,15 @@ def main(argv: list[str] | None = None) -> int:
         else true_model_file.parent.parent / "parflow_models" / "petrophysical_models_2d"
     )
     petrophysical_parameters = None
-    if str(args.petrophysical_transform).replace("-", "_") == "saturation":
+    petrophysical_transform_key = str(args.petrophysical_transform).replace("-", "_")
+    if petrophysical_transform_key in {
+        "saturation",
+        "water_saturation",
+        "water_content",
+        "theta",
+        "archie_water_content",
+        "absolute_archie_water_content",
+    }:
         petrophysical_parameters = _load_petrophysical_parameters(
             petrophysical_parameter_dir,
             y_index=y_index,
@@ -529,9 +537,14 @@ def main(argv: list[str] | None = None) -> int:
         "saved_parameter_model": bool(final_parameter_model is not None and result.final_parameter_name != "resistivity"),
         "saved_water_content_model": bool(
             final_parameter_model is not None
-            and result.final_parameter_name == "saturation"
-            and petrophysical_parameters is not None
-            and "phi" in petrophysical_parameters
+            and (
+                result.final_parameter_name == "water_content"
+                or (
+                    result.final_parameter_name == "saturation"
+                    and petrophysical_parameters is not None
+                    and "phi" in petrophysical_parameters
+                )
+            )
         ),
         "method": str(args.optimizer),
         "optimizer": str(args.optimizer),

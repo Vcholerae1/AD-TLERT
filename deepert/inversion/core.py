@@ -80,6 +80,17 @@ class InversionConfig:
     cgls_tolerance: float = 1.0e-8
     include_robin_boundary_derivative: bool = False
     normal_sensitivity: bool = True
+    # If True, keep the first time-step state fixed to its initial value during
+    # time-lapse inversion. This is useful for baseline-anchored inversions.
+    freeze_first_timestep: bool = False
+    # Optional soft constraint from external physical observations (e.g., sensor
+    # water content). The operator maps cell parameters to observation space:
+    #     H @ parameter_model[:, t] ~= targets[:, t]
+    # and contributes lambda_s * ||H m - y||^2.
+    sensor_constraint: float = 0.0
+    sensor_constraint_operator: ArrayLike | None = field(default=None, repr=False, compare=False)
+    sensor_constraint_targets: ArrayLike | None = field(default=None, repr=False, compare=False)
+    sensor_constraint_weights: ArrayLike | None = field(default=None, repr=False, compare=False)
     progress_callback: ProgressCallback | None = field(default=None, repr=False, compare=False)
 
 
@@ -448,6 +459,19 @@ def _check_config(config: InversionConfig) -> None:
         raise ValueError("temporal_regularization must be non-negative")
     if config.temporal_regularization_mode not in ("separate", "joint_frame"):
         raise ValueError("temporal_regularization_mode must be 'separate' or 'joint_frame'")
+    if not isinstance(config.freeze_first_timestep, (bool, np.bool_)):
+        raise ValueError("freeze_first_timestep must be a boolean flag")
+    if config.sensor_constraint < 0.0:
+        raise ValueError("sensor_constraint must be non-negative")
+    if config.sensor_constraint > 0.0:
+        if config.sensor_constraint_operator is None:
+            raise ValueError("sensor_constraint_operator is required when sensor_constraint > 0")
+        if config.sensor_constraint_targets is None:
+            raise ValueError("sensor_constraint_targets is required when sensor_constraint > 0")
+    if config.sensor_constraint_weights is not None and config.sensor_constraint_targets is None:
+        raise ValueError("sensor_constraint_weights requires sensor_constraint_targets")
+    if config.sensor_constraint > 0.0 and regularization_domain != "physical":
+        raise ValueError("sensor_constraint currently requires regularization_domain='physical'")
     build_temporal_regularization(config.temporal_regularization_type)
     build_spatial_regularization(config.spatial_regularization)
     if config.z_weight <= 0.0:
@@ -463,6 +487,9 @@ def _check_config(config: InversionConfig) -> None:
         "conductivity",
         "sigma",
         "water_saturation",
+        "relative_archie",
+        "water_content",
+        "theta",
     }
     if petrophysical_key not in petrophysical_choices:
         choices = ", ".join(available_petrophysical_transforms())
@@ -470,10 +497,19 @@ def _check_config(config: InversionConfig) -> None:
     if (
         regularization_domain == "physical"
         and physical_quantity == "water_content"
-        and petrophysical_key not in {"saturation", "water_saturation"}
+        and petrophysical_key
+        not in {
+            "saturation",
+            "water_saturation",
+            "relative_archie_water_content",
+            "relative_archie",
+            "water_content",
+            "theta",
+        }
     ):
         raise ValueError(
-            "physical_regularization_quantity='theta'/'water_content' requires petrophysical_transform='saturation'"
+            "physical_regularization_quantity='theta'/'water_content' requires "
+            "petrophysical_transform='saturation', 'water_content', or 'relative_archie_water_content'"
         )
     if not (0.0 < config.saturation_floor < 1.0):
         raise ValueError("saturation_floor must be in (0, 1)")
@@ -734,9 +770,12 @@ def _regularization_domain_value_and_derivative(
         return np.asarray(parameter, dtype=float), np.asarray(derivative, dtype=float)
 
     parameter_name = _parameter_name_from_state(state_array, config)
+    if parameter_name == "water_content":
+        return np.asarray(parameter, dtype=float), np.asarray(derivative, dtype=float)
     if parameter_name != "saturation":
         raise ValueError(
-            "physical_regularization_quantity='theta'/'water_content' requires petrophysical_transform='saturation'"
+            "physical_regularization_quantity='theta'/'water_content' requires "
+            "petrophysical_transform='saturation' or a transform whose parameter is water_content"
         )
     parameters = config.petrophysical_parameters or {}
     if "phi" not in parameters or parameters["phi"] is None:
@@ -754,6 +793,106 @@ def _chain_rule_projection(derivative: np.ndarray, *, order: str = "C") -> sp.cs
     if not np.all(np.isfinite(diagonal)):
         raise ValueError("regularization projection derivative contains non-finite values")
     return sp.diags(diagonal, format="csr")
+
+
+def _as_csr_matrix(values: ArrayLike, *, name: str) -> sp.csr_matrix:
+    if sp.issparse(values):
+        matrix = values.tocsr()
+    else:
+        array = np.asarray(values, dtype=float)
+        if array.ndim != 2:
+            raise ValueError(f"{name} must be a 2D matrix")
+        matrix = sp.csr_matrix(array)
+    if matrix.ndim != 2:
+        raise ValueError(f"{name} must be a 2D matrix")
+    if matrix.nnz > 0 and not np.all(np.isfinite(matrix.data)):
+        raise ValueError(f"{name} contains non-finite entries")
+    return matrix
+
+
+def _broadcast_sensor_constraint_weights(
+    weights: ArrayLike | None,
+    shape: tuple[int, int],
+) -> np.ndarray:
+    if weights is None:
+        return np.ones(shape, dtype=float)
+    values = np.asarray(weights, dtype=float)
+    if values.ndim == 0:
+        result = np.full(shape, float(values), dtype=float)
+    elif values.ndim == 1:
+        if values.shape[0] == shape[0]:
+            result = np.broadcast_to(values[:, None], shape).astype(float, copy=True)
+        elif values.shape[0] == shape[1]:
+            result = np.broadcast_to(values[None, :], shape).astype(float, copy=True)
+        elif values.shape[0] == shape[0] * shape[1]:
+            result = values.reshape(shape, order="F").astype(float, copy=True)
+        else:
+            raise ValueError(
+                "sensor_constraint_weights 1D shape must match n_constraints, n_times, "
+                "or n_constraints*n_times"
+            )
+    elif values.ndim == 2:
+        result = np.broadcast_to(values, shape).astype(float, copy=True)
+    else:
+        raise ValueError("sensor_constraint_weights must be scalar, 1D, or 2D")
+    if not np.all(np.isfinite(result)):
+        raise ValueError("sensor_constraint_weights contains non-finite values")
+    if np.any(result < 0.0):
+        raise ValueError("sensor_constraint_weights must be non-negative")
+    return result
+
+
+def _prepare_sensor_constraint(
+    config: InversionConfig,
+    *,
+    n_cells: int,
+    n_times: int,
+) -> tuple[sp.csr_matrix, np.ndarray] | None:
+    if config.sensor_constraint <= 0.0:
+        return None
+    operator = _as_csr_matrix(config.sensor_constraint_operator, name="sensor_constraint_operator")
+    if operator.shape[1] != int(n_cells):
+        raise ValueError(
+            "sensor_constraint_operator second dimension must match n_cells "
+            f"({operator.shape[1]} != {int(n_cells)})"
+        )
+    targets = np.asarray(config.sensor_constraint_targets, dtype=float)
+    if targets.ndim == 1:
+        targets = targets.reshape(-1, 1)
+    if targets.ndim != 2:
+        raise ValueError("sensor_constraint_targets must be a 2D matrix [n_constraints, n_times]")
+    if targets.shape[0] != operator.shape[0]:
+        raise ValueError(
+            "sensor_constraint_targets first dimension must match operator rows "
+            f"({targets.shape[0]} != {operator.shape[0]})"
+        )
+    if targets.shape[1] == 1 and int(n_times) > 1:
+        targets = np.repeat(targets, int(n_times), axis=1)
+    if targets.shape[1] != int(n_times):
+        raise ValueError(
+            "sensor_constraint_targets second dimension must match n_times "
+            f"({targets.shape[1]} != {int(n_times)})"
+        )
+    weights = _broadcast_sensor_constraint_weights(
+        config.sensor_constraint_weights,
+        (int(operator.shape[0]), int(n_times)),
+    )
+    valid = np.isfinite(targets) & np.isfinite(weights) & (weights > 0.0)
+    if not np.any(valid):
+        raise ValueError("sensor_constraint has no valid (finite, positive-weight) entries")
+
+    full_operator = sp.kron(sp.eye(int(n_times), format="csr"), operator, format="csr")
+    target_vec = targets.reshape(-1, order="F")
+    weight_vec = weights.reshape(-1, order="F")
+    valid_rows = np.flatnonzero(valid.reshape(-1, order="F"))
+    matrix = full_operator[valid_rows].tocsr()
+    row_scale = np.sqrt(weight_vec[valid_rows])
+    if row_scale.size and not np.allclose(row_scale, 1.0):
+        matrix = sp.diags(row_scale, format="csr") @ matrix
+    target_scaled = row_scale * target_vec[valid_rows]
+    if not np.all(np.isfinite(target_scaled)):
+        raise ValueError("sensor_constraint targets contain non-finite values after scaling")
+    return matrix.tocsr(), np.asarray(target_scaled, dtype=float)
 
 
 def _limit_delta(delta: np.ndarray, max_log_step: float | None) -> np.ndarray:
@@ -1769,6 +1908,10 @@ def invert_timelapse_log_resistivity(
         name="initial_model",
     )
     models = _log_model_to_state(initial_logs, config)
+    baseline_state: np.ndarray | None = None
+    if bool(config.freeze_first_timestep):
+        baseline_state = np.asarray(models[:, 0], dtype=float).copy()
+        models[:, 0] = baseline_state
     if reference_model is None:
         reference = (
             models.copy()
@@ -1799,6 +1942,11 @@ def invert_timelapse_log_resistivity(
         format="csr",
     )
     temporal_regularization = build_temporal_regularization(config.temporal_regularization_type)
+    sensor_constraint = _prepare_sensor_constraint(
+        config,
+        n_cells=n_cells,
+        n_times=n_times,
+    )
 
     _emit_progress(
         config,
@@ -1833,16 +1981,17 @@ def invert_timelapse_log_resistivity(
                     n_times=int(n_times),
                 )
                 state_t = models[:, time_index]
+                time_config = _config_for_time_index(config, time_index)
                 pred_t, jac_log_t = _forward_and_jacobian_log_cached(
                     forward,
-                    _state_to_log_model(state_t, config),
+                    _state_to_log_model(state_t, time_config),
                     include_robin_boundary_derivative=config.include_robin_boundary_derivative,
                     normal_sensitivity=config.normal_sensitivity,
                     cache=_forward_jacobian_cache,
                     max_entries=_forward_jacobian_cache_max_entries,
                 )
                 predicted_rows.append(pred_t)
-                jacobians.append(jac_log_t * _d_log_model_d_state(state_t, config)[None, :])
+                jacobians.append(jac_log_t * _d_log_model_d_state(state_t, time_config)[None, :])
                 _emit_progress(
                     config,
                     "timelapse_time_done",
@@ -1874,6 +2023,7 @@ def invert_timelapse_log_resistivity(
         needs_projection = (
             config.regularization > 0.0
             or (config.temporal_regularization_mode == "separate" and config.temporal_regularization > 0.0)
+            or config.sensor_constraint > 0.0
         )
         use_physical_regularization = regularization_domain == "physical" and needs_projection
         if use_physical_regularization:
@@ -2047,6 +2197,20 @@ def invert_timelapse_log_resistivity(
             objective_blocks.append(temporal_matrix)
             objective_references.append(temporal_matrix @ current_vec + temporal_rhs)
 
+        if sensor_constraint is not None and config.sensor_constraint > 0.0:
+            sensor_matrix_domain, sensor_target_scaled = sensor_constraint
+            sensor_scale = float(np.sqrt(config.sensor_constraint))
+            sensor_predicted_scaled = sensor_matrix_domain @ domain_vec
+            sensor_rhs = sensor_scale * (sensor_target_scaled - sensor_predicted_scaled)
+            if projection_all is None:
+                sensor_matrix = sensor_scale * sensor_matrix_domain
+            else:
+                sensor_matrix = (sensor_scale * (sensor_matrix_domain @ projection_all)).tocsr()
+            matrix_blocks.append(sensor_matrix)
+            rhs_all.append(sensor_rhs)
+            objective_blocks.append(sensor_matrix)
+            objective_references.append(sensor_matrix @ current_vec + sensor_rhs)
+
         matrix = sp.vstack(matrix_blocks, format="csr")
         rhs = np.concatenate(rhs_all)
         delta_vec = _optimizer_increment(
@@ -2059,6 +2223,8 @@ def invert_timelapse_log_resistivity(
         delta = delta_vec.reshape((n_cells, n_times), order="F")
         step = config.step_length * delta
         candidate_models = _clip_model_state(models + step, config)
+        if baseline_state is not None:
+            candidate_models[:, 0] = baseline_state
         candidate_step_vec = candidate_models.reshape(total_size, order="F") - current_vec
 
         candidate_rows = []
@@ -2075,16 +2241,17 @@ def invert_timelapse_log_resistivity(
                 n_times=int(n_times),
             )
             state_t = candidate_models[:, time_index]
+            time_config = _config_for_time_index(config, time_index)
             pred_t, jac_log_t = _forward_and_jacobian_log_cached(
                 forward,
-                _state_to_log_model(state_t, config),
+                _state_to_log_model(state_t, time_config),
                 include_robin_boundary_derivative=config.include_robin_boundary_derivative,
                 normal_sensitivity=config.normal_sensitivity,
                 cache=_forward_jacobian_cache,
                 max_entries=_forward_jacobian_cache_max_entries,
             )
             candidate_rows.append(pred_t)
-            candidate_jacobians.append(jac_log_t * _d_log_model_d_state(state_t, config)[None, :])
+            candidate_jacobians.append(jac_log_t * _d_log_model_d_state(state_t, time_config)[None, :])
             _emit_progress(
                 config,
                 "timelapse_time_done",
@@ -2126,6 +2293,8 @@ def invert_timelapse_log_resistivity(
             actual_step_vec = tau * candidate_step_vec
             if tau < 0.95:
                 models = _clip_model_state((current_vec + actual_step_vec).reshape((n_cells, n_times), order="F"), config)
+                if baseline_state is not None:
+                    models[:, 0] = baseline_state
                 predicted_rows = []
                 jacobians = []
                 for time_index in range(n_times):
@@ -2140,16 +2309,17 @@ def invert_timelapse_log_resistivity(
                         n_times=int(n_times),
                     )
                     state_t = models[:, time_index]
+                    time_config = _config_for_time_index(config, time_index)
                     pred_t, jac_log_t = _forward_and_jacobian_log_cached(
                         forward,
-                        _state_to_log_model(state_t, config),
+                        _state_to_log_model(state_t, time_config),
                         include_robin_boundary_derivative=config.include_robin_boundary_derivative,
                         normal_sensitivity=config.normal_sensitivity,
                         cache=_forward_jacobian_cache,
                         max_entries=_forward_jacobian_cache_max_entries,
                     )
                     predicted_rows.append(pred_t)
-                    jacobians.append(jac_log_t * _d_log_model_d_state(state_t, config)[None, :])
+                    jacobians.append(jac_log_t * _d_log_model_d_state(state_t, time_config)[None, :])
                     _emit_progress(
                         config,
                         "timelapse_time_done",
@@ -2169,6 +2339,9 @@ def invert_timelapse_log_resistivity(
             models = candidate_models
             predicted_log = candidate_predicted_log
             jacobians = candidate_jacobians
+
+        if baseline_state is not None:
+            models[:, 0] = baseline_state
 
         linearization_valid = True
         chi2 = _timelapse_data_chi2(data_misfit, predicted_log, observed_log, weight)
@@ -2193,6 +2366,8 @@ def invert_timelapse_log_resistivity(
 
     all_coverage = [_pygimli_style_coverage_from_jacobian(forward, jac_t) for jac_t in jacobians]
     coverage = np.nanmedian(np.column_stack(all_coverage), axis=1)
+    if baseline_state is not None:
+        models[:, 0] = baseline_state
     final_log_models = _state_to_log_model(models, config)
     final_parameter_models = _parameter_model_from_state(models, config)
     final_parameter_name = _parameter_name_from_state(models, config)
@@ -2238,11 +2413,68 @@ def _config_for_time_window(
     start: int,
     end: int,
 ) -> InversionConfig:
+    n_times = int(observed_shape[0])
     data_std = np.asarray(config.data_std, dtype=float)
+    updates: dict[str, Any] = {}
     if data_std.ndim == 0:
+        pass
+    else:
+        updates["data_std"] = np.broadcast_to(data_std, observed_shape)[start:end].copy()
+
+    if config.petrophysical_parameters:
+        sliced_parameters: dict[str, ArrayLike] = {}
+        changed = False
+        for key, value in config.petrophysical_parameters.items():
+            array = np.asarray(value) if value is not None else None
+            if array is not None and array.ndim >= 2 and array.shape[1] == n_times:
+                sliced_parameters[key] = np.asarray(array)[:, start:end].copy()
+                changed = True
+            else:
+                sliced_parameters[key] = value
+        if changed:
+            updates["petrophysical_parameters"] = sliced_parameters
+
+    if config.sensor_constraint_targets is not None:
+        targets = np.asarray(config.sensor_constraint_targets)
+        if targets.ndim >= 2 and targets.shape[1] == n_times:
+            updates["sensor_constraint_targets"] = np.asarray(targets, dtype=float)[:, start:end].copy()
+        elif targets.ndim == 1 and targets.shape[0] == n_times:
+            updates["sensor_constraint_targets"] = np.asarray(targets, dtype=float)[start:end].copy()
+
+    if config.sensor_constraint_weights is not None:
+        weights = np.asarray(config.sensor_constraint_weights)
+        if weights.ndim >= 2 and weights.shape[1] == n_times:
+            updates["sensor_constraint_weights"] = np.asarray(weights, dtype=float)[:, start:end].copy()
+        elif weights.ndim == 1 and weights.shape[0] == n_times:
+            updates["sensor_constraint_weights"] = np.asarray(weights, dtype=float)[start:end].copy()
+
+    # Baseline freeze should apply only to the global first timestep.
+    # In sliding windows, only the first window contains that timestep.
+    if bool(config.freeze_first_timestep):
+        updates["freeze_first_timestep"] = bool(start == 0)
+
+    if not updates:
         return config
-    window_std = np.broadcast_to(data_std, observed_shape)[start:end].copy()
-    return replace(config, data_std=window_std)
+    return replace(config, **updates)
+
+
+def _config_for_time_index(config: InversionConfig, time_index: int) -> InversionConfig:
+    if not config.petrophysical_parameters:
+        return config
+    sliced_parameters: dict[str, ArrayLike] = {}
+    changed = False
+    for key, value in config.petrophysical_parameters.items():
+        array = np.asarray(value) if value is not None else None
+        if array is not None and array.ndim >= 2:
+            if not (0 <= int(time_index) < array.shape[1]):
+                raise IndexError(f"time_index={time_index} outside petrophysical parameter {key!r} shape {array.shape}")
+            sliced_parameters[key] = np.asarray(array)[:, int(time_index)].copy()
+            changed = True
+        else:
+            sliced_parameters[key] = value
+    if not changed:
+        return config
+    return replace(config, petrophysical_parameters=sliced_parameters)
 
 
 def invert_windowed_timelapse_log_resistivity(
