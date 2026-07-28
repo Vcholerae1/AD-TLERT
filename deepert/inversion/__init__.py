@@ -22,7 +22,6 @@ from deepert.inversion.petrophysics import (
     PetrophysicalTransform,
     RelativeArchieWaterContentTransform,
     SaturationTransform,
-    WaterContentTransform,
     available_petrophysical_transforms,
     build_petrophysical_transform,
 )
@@ -75,7 +74,6 @@ __all__ = [
     "PetrophysicalTransform",
     "RelativeArchieWaterContentTransform",
     "SaturationTransform",
-    "WaterContentTransform",
     "SpatialRegularization",
     "TemporalRegularization",
     "TimeLapseERTInversion",

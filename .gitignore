@@ -5,13 +5,22 @@ build/
 dist/
 wheels/
 *.egg-info
+.DS_Store
+._*
+*:Zone.Identifier
 
 # Virtual environments
-.venv
-.cache
+.venv/
+.venv-resipy/
+.cache/
+.tmp_wine_bin/
 
 2d_resistivity_model/
 models_1year_1day/
 .codex/
 .agents/
-result
+result/
+ProcessedData/
+
+# Local research workspace; publish curated scripts from example/ instead.
+paper/

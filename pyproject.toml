@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "deepert"
 version = "0.1.0"
-description = "Differentiable time-lapse ERT in pure JAX"
+description = "Differentiable 2.5D ERT forward and time-lapse inversion tooling on Torch"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -40,6 +40,7 @@ packages = ["deepert"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/deepert",
+    "/example",
     "/README.md",
     "/pyproject.toml",
     "/uv.lock",

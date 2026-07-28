@@ -1845,10 +1845,16 @@ class ERTForward2p5D:
         try:
             from nvmath.sparse.advanced import (
                 DirectSolver,
-                DirectSolverAlgType,
                 DirectSolverMatrixType,
                 DirectSolverOptions,
             )
+            try:
+                # nvmath-python < 1.0 exposed one generic algorithm enum.
+                from nvmath.sparse.advanced import DirectSolverAlgType
+            except ImportError:
+                # nvmath-python 1.0 split it into phase-specific enums.
+                DirectSolverAlgType = None
+                from nvmath.sparse.advanced import DirectSolverReorderingAlg
         except ImportError as exc:
             raise ImportError("ERTForward2p5D requires nvmath-python to use the cuDSS backend") from exc
 
@@ -1901,7 +1907,10 @@ class ERTForward2p5D:
                 blocking=True,
             )
             solver = DirectSolver(matrices, rhs_batch_gpu, options=options)
-            solver.plan_config.algorithm = DirectSolverAlgType.ALG_1
+            if DirectSolverAlgType is not None:
+                solver.plan_config.reordering_algorithm = DirectSolverAlgType.ALG_1
+            else:
+                solver.plan_config.reordering_algorithm = DirectSolverReorderingAlg.NESTED_DISSECTION
             solver.plan()
             self._cudss_state[solver_key] = solver
             factorize = True

@@ -2,14 +2,18 @@
 
 Differentiable 2.5D ERT forward and time-lapse inversion tooling on Torch.
 
-This repository is intentionally small. It keeps:
+The repository contains:
 
 - `deepert/`: the core numerical implementation.
-- `1_forward_t04368(1).ipynb`: single T04368 forward example.
-- `2_single_inversion_t04368.ipynb`: single T04368 inversion example.
-- `1_forward_1year.ipynb`: 365-day forward example.
-- `2_timelapsedERT_inversion.ipynb`: 365-day time-lapse inversion example.
-- `2d_resistivity_model/` and `models_1year_1day/`: input data used by the examples.
+- `example/single_time/`: Deepert/pyGIMLi forward examples and
+  Deepert/pyGIMLi/ResIPy single-time inversion examples.
+- `example/window_363/`: Deepert/pyGIMLi/ResIPy inversion examples for 365
+  time steps using 3-step sliding windows (363 windows).
+- `parflow_models/` and `resistivity_models_2d/`: input data used by the
+  examples.
+
+See [`example/README.md`](example/README.md) for commands and backend
+requirements.
 
 ## Install
 
@@ -64,16 +68,16 @@ from deepert.workflows import (
     save_terrain_forward_npz,
 )
 
-grid = parse_pftcl("models_1year_1day/sc2d_6.out.pftcl")
-slope_x = read_slope_x("models_1year_1day/sc2d_6.out.slope_x.pfb", y_index=2)
-rho_2d = np.load("2d_resistivity_model/resistivity2d_y2_t04368.npy")
+grid = parse_pftcl("parflow_models/sc2d_6.out.pftcl")
+slope_x = read_slope_x("parflow_models/sc2d_6.out.slope_x.pfb", y_index=2)
+rho_2d = np.load("resistivity_models_2d/resistivity2d_y2_t04536.npy")
 
 case = build_terrain_forward_case(rho_2d, grid, slope_x, y_index=2)
 rhoa = run_terrain_forward(case)
-save_terrain_forward_dat("synthetic_ert_terrain_vardz_t04368.dat", case, rhoa)
-save_terrain_forward_npz("synthetic_ert_terrain_vardz_t04368.npz", case, rhoa)
+save_terrain_forward_dat("synthetic_ert_terrain_vardz_t04536.dat", case, rhoa)
+save_terrain_forward_npz("synthetic_ert_terrain_vardz_t04536.npz", case, rhoa)
 
-pairs = discover_resistivity_slices("2d_resistivity_model", y_index=2)
+pairs = discover_resistivity_slices("resistivity_models_2d", y_index=2)
 manifest, failures = run_terrain_forward_series(
     pairs,
     grid,

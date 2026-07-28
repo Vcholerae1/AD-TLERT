@@ -509,7 +509,7 @@ def _check_config(config: InversionConfig) -> None:
     ):
         raise ValueError(
             "physical_regularization_quantity='theta'/'water_content' requires "
-            "petrophysical_transform='saturation', 'water_content', or 'relative_archie_water_content'"
+            "petrophysical_transform='saturation' or 'relative_archie_water_content'"
         )
     if not (0.0 < config.saturation_floor < 1.0):
         raise ValueError("saturation_floor must be in (0, 1)")

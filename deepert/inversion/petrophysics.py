@@ -294,118 +294,6 @@ class SaturationTransform:
 
 
 @dataclass(frozen=True)
-class WaterContentTransform:
-    """Volumetric water-content parameterization using the saturation relation.
-
-    The optimizer state is mapped to bounded saturation first, then converted to
-    water content as ``theta = phi * S``.  The ERT model still uses the same
-    unit-specific petrophysical relation as ``SaturationTransform``:
-
-        sigma = sigma_p * S**n + sigma_s * S**(n - 1)
-
-    This keeps the physical chain differentiable while making ``theta`` the
-    reported and regularized inversion parameter.
-    """
-
-    rho_sat: np.ndarray
-    n: np.ndarray
-    phi: np.ndarray
-    rho_sat_s: np.ndarray | None = None
-    saturation_floor: float = 1.0e-4
-    name: str = "water_content"
-    parameter_name: str = "water_content"
-
-    def __post_init__(self) -> None:
-        if not (0.0 < float(self.saturation_floor) < 1.0):
-            raise ValueError("saturation_floor must be in (0, 1)")
-        if np.any(np.asarray(self.rho_sat, dtype=float) <= 0.0):
-            raise ValueError("rho_sat must be positive")
-        if np.any(np.asarray(self.n, dtype=float) <= 0.0):
-            raise ValueError("n must be positive")
-        phi = np.asarray(self.phi, dtype=float)
-        if np.any(phi <= 0.0) or not np.all(np.isfinite(phi)):
-            raise ValueError("phi must be positive and finite")
-
-    def _surface_sigma(self) -> tuple[np.ndarray, np.ndarray]:
-        sigma_sat = 1.0 / np.asarray(self.rho_sat, dtype=float)
-        if self.rho_sat_s is None:
-            return sigma_sat, np.zeros_like(sigma_sat)
-        rho_sat_s = np.asarray(self.rho_sat_s, dtype=float)
-        has_surface = np.isfinite(rho_sat_s) & (rho_sat_s > 0.0)
-        sigma_s = np.zeros_like(sigma_sat)
-        sigma_s[has_surface] = 1.0 / rho_sat_s[has_surface]
-        sigma_p = sigma_sat - sigma_s
-        if np.any(sigma_p <= 0.0):
-            raise ValueError("rho_sat_s must be larger than rho_sat where surface conduction is used")
-        return sigma_p, sigma_s
-
-    def _saturation_from_state(self, state: np.ndarray) -> np.ndarray:
-        normalized = _sigmoid(np.asarray(state, dtype=float))
-        floor = float(self.saturation_floor)
-        return floor + (1.0 - floor) * normalized
-
-    def _sigma_from_saturation(self, saturation: np.ndarray) -> np.ndarray:
-        sat = np.asarray(saturation, dtype=float)
-        rho_sat = _as_parameter_shape(np.asarray(self.rho_sat, dtype=float), sat)
-        n_values = _as_parameter_shape(np.asarray(self.n, dtype=float), sat)
-        sigma_p, sigma_s = self._surface_sigma()
-        sigma_p = _as_parameter_shape(sigma_p, sat)
-        sigma_s = _as_parameter_shape(sigma_s, sat)
-        if rho_sat.shape[0] != sat.shape[0]:
-            raise ValueError("water-content state first dimension does not match petrophysical parameter count")
-        return sigma_p * np.power(sat, n_values) + sigma_s * np.power(sat, n_values - 1.0)
-
-    def state_from_log_resistivity(self, log_resistivity: np.ndarray) -> np.ndarray:
-        target_sigma = np.exp(-np.asarray(log_resistivity, dtype=float))
-        floor = float(self.saturation_floor)
-        lo = np.full_like(target_sigma, floor, dtype=float)
-        hi = np.ones_like(target_sigma, dtype=float)
-        for _ in range(60):
-            mid = 0.5 * (lo + hi)
-            sigma_mid = self._sigma_from_saturation(mid)
-            lo = np.where(sigma_mid < target_sigma, mid, lo)
-            hi = np.where(sigma_mid >= target_sigma, mid, hi)
-        saturation = np.clip(0.5 * (lo + hi), floor, 1.0)
-        normalized = (saturation - floor) / (1.0 - floor)
-        return _logit(normalized)
-
-    def log_resistivity_from_state(self, state: np.ndarray) -> np.ndarray:
-        sigma = self._sigma_from_saturation(self._saturation_from_state(state))
-        return -np.log(np.maximum(sigma, np.finfo(float).tiny))
-
-    def d_log_resistivity_d_state(self, state: np.ndarray) -> np.ndarray:
-        state_array = np.asarray(state, dtype=float)
-        saturation = self._saturation_from_state(state_array)
-        n_values = _as_parameter_shape(np.asarray(self.n, dtype=float), saturation)
-        sigma_p, sigma_s = self._surface_sigma()
-        sigma_p = _as_parameter_shape(sigma_p, saturation)
-        sigma_s = _as_parameter_shape(sigma_s, saturation)
-        sigma = self._sigma_from_saturation(saturation)
-        d_sigma_d_s = sigma_p * n_values * np.power(saturation, n_values - 1.0)
-        has_surface_term = sigma_s != 0.0
-        if np.any(has_surface_term):
-            d_sigma_d_s = d_sigma_d_s + sigma_s * (n_values - 1.0) * np.power(saturation, n_values - 2.0)
-        floor = float(self.saturation_floor)
-        d_s_d_state = (saturation - floor) * (1.0 - saturation) / (1.0 - floor)
-        return -(d_sigma_d_s / np.maximum(sigma, np.finfo(float).tiny)) * d_s_d_state
-
-    def clip_state(self, state: np.ndarray) -> np.ndarray:
-        return np.asarray(state, dtype=float)
-
-    def parameter_from_state(self, state: np.ndarray) -> np.ndarray:
-        saturation = self._saturation_from_state(state)
-        phi = _as_parameter_shape(np.asarray(self.phi, dtype=float), saturation)
-        return phi * saturation
-
-    def d_parameter_d_state(self, state: np.ndarray) -> np.ndarray:
-        saturation = self._saturation_from_state(state)
-        phi = _as_parameter_shape(np.asarray(self.phi, dtype=float), saturation)
-        floor = float(self.saturation_floor)
-        d_s_d_state = (saturation - floor) * (1.0 - saturation) / (1.0 - floor)
-        return phi * d_s_d_state
-
-
-@dataclass(frozen=True)
 class RelativeArchieWaterContentTransform:
     """Relative Archie parameterization with bounded volumetric water content.
 
@@ -522,13 +410,7 @@ class RelativeArchieWaterContentTransform:
 def available_petrophysical_transforms() -> tuple[str, ...]:
     """Return user-facing petrophysical transform names."""
 
-    return (
-        "log_resistivity",
-        "log_conductivity",
-        "saturation",
-        "water_content",
-        "relative_archie_water_content",
-    )
+    return ("log_resistivity", "log_conductivity", "saturation", "relative_archie_water_content")
 
 
 def build_petrophysical_transform(
@@ -570,27 +452,7 @@ def build_petrophysical_transform(
             n=n_values,
             saturation_floor=saturation_floor,
         )
-    if key in ("water_content", "theta", "archie_water_content", "absolute_archie_water_content"):
-        if model_transform != "log":
-            raise ValueError("water_content currently supports model_transform='log' only")
-        params = parameters or {}
-        missing = [param for param in ("rho_sat", "n", "phi") if param not in params]
-        if missing:
-            raise ValueError(f"water_content transform requires petrophysical parameters: {missing}")
-        rho_sat = _parameter_array(params["rho_sat"], n_cells=n_cells, name="rho_sat")
-        n_values = _parameter_array(params["n"], n_cells=n_cells, name="n")
-        phi = _parameter_array(params["phi"], n_cells=n_cells, name="phi")
-        rho_sat_s = None
-        if "rho_sat_s" in params and params["rho_sat_s"] is not None:
-            rho_sat_s = _parameter_array(params["rho_sat_s"], n_cells=n_cells, name="rho_sat_s")
-        return WaterContentTransform(
-            rho_sat=rho_sat,
-            rho_sat_s=rho_sat_s,
-            n=n_values,
-            phi=phi,
-            saturation_floor=saturation_floor,
-        )
-    if key in ("relative_archie_water_content", "relative_archie"):
+    if key in ("relative_archie_water_content", "relative_archie", "water_content", "theta"):
         if model_transform != "log":
             raise ValueError("relative_archie_water_content currently supports model_transform='log' only")
         params = parameters or {}
