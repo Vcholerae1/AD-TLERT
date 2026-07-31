@@ -1908,7 +1908,7 @@ class ERTForward2p5D:
             )
             solver = DirectSolver(matrices, rhs_batch_gpu, options=options)
             if DirectSolverAlgType is not None:
-                solver.plan_config.reordering_algorithm = DirectSolverAlgType.ALG_1
+                solver.plan_config.algorithm = DirectSolverAlgType.ALG_1
             else:
                 solver.plan_config.reordering_algorithm = DirectSolverReorderingAlg.NESTED_DISSECTION
             solver.plan()

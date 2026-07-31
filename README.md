@@ -1,4 +1,4 @@
-# deepert
+# AD-TLERT
 
 Differentiable 2.5D ERT forward and time-lapse inversion tooling on Torch.
 
