@@ -4,20 +4,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-import numpy as np
+os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from adtlert.utils.torch_runtime import torch_runtime
+import numpy as np
+
+torch_runtime.config.update("torch_enable_float64", True)
 
 from adtlert.workflows import (
     build_terrain_forward_case,
     parse_pftcl,
     parse_resistivity_slice_name,
     read_slope_x,
+    run_terrain_forward,
     save_terrain_forward_dat,
     save_terrain_forward_npz,
 )
@@ -195,7 +202,7 @@ def _plot_pseudosection(path: Path, case, rhoa: np.ndarray, step: int) -> None:
         antialiaseds=False,
     )
     ax.add_collection(collection)
-    ax.set_title(f"Synthetic ERT Pseudosection (pygimli, step={step})")
+    ax.set_title(f"Synthetic ERT Pseudosection (terrain+variableDz, step={step})")
     ax.set_xlim(
         float(np.min(x_centers) - 0.5 * electrode_spacing),
         float(np.max(x_centers) + 0.5 * electrode_spacing),
@@ -220,61 +227,14 @@ def _plot_pseudosection(path: Path, case, rhoa: np.ndarray, step: int) -> None:
 def _plot_case(output_dir: Path, case, rhoa: np.ndarray, step: int) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     plot_paths = {
-        "mesh_edges": output_dir / "mesh_edges.png",
-        "resistivity_model": output_dir / "forward_preview.png",
-        "rhoa_pseudosection": output_dir / "rhoa_pseudosection.png",
+        "mesh_edges": output_dir / f"mesh_edges.png",
+        "resistivity_model": output_dir / f"forward_preview.png",
+        "rhoa_pseudosection": output_dir / f"rhoa_pseudosection.png",
     }
     _plot_mesh_edges(plot_paths["mesh_edges"], case, step)
     _plot_resistivity_model(plot_paths["resistivity_model"], case, step)
     _plot_pseudosection(plot_paths["rhoa_pseudosection"], case, rhoa, step)
     return plot_paths
-
-
-def _run_pygimli_forward(case, *, relative_error: float, verbose: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    try:
-        import pygimli as pg
-        from pygimli.physics import ert
-    except ImportError as exc:
-        raise RuntimeError(
-            "pygimli is not installed in the current environment. "
-            "Install it first, e.g. `uv pip install pygimli` or activate an env that contains pygimli."
-        ) from exc
-
-    pg.setVerbose(bool(verbose))
-    pg.setDebug(bool(verbose))
-    pg.core.setDebug(bool(verbose))
-    pg.setLogLevel(2 if verbose else 0)
-
-    top_line = pg.meshtools.createPolygon(np.c_[case.x_nodes, case.z_top], isClosed=False)
-    for boundary in top_line.boundaries():
-        boundary.setMarker(2)
-
-    y_offsets = np.concatenate(([0.0], -np.cumsum(np.asarray(case.layer_thickness, dtype=float))))
-    mesh = pg.meshtools.createMesh2D(top_line, y_offsets, -1, 0, 0, 0, True)
-
-    scheme = ert.createData(elecs=np.c_[case.elec_x, case.elec_z], schemeName="wa")
-    fop = ert.ERTModelling()
-    fop.setData(scheme)
-    fop.setMesh(mesh)
-
-    res_model = np.asarray(case.resistivity, dtype=float)
-    rhoa = np.asarray(fop.response(res_model), dtype=float).ravel()
-    if rhoa.shape != (case.survey.measurement_count,):
-        raise ValueError(f"pygimli returned rhoa shape {rhoa.shape}, expected ({case.survey.measurement_count},)")
-    if not np.all(np.isfinite(rhoa)) or np.any(rhoa <= 0.0):
-        raise ValueError("pygimli forward returned non-finite or non-positive apparent resistivity values")
-
-    scheme["rhoa"] = rhoa
-    err = np.asarray(
-        ert.ERTManager(scheme).estimateError(scheme, absoluteUError=0.0, relativeError=float(relative_error)),
-        dtype=float,
-    ).ravel()
-    if err.shape != rhoa.shape:
-        raise ValueError(f"pygimli returned err shape {err.shape}, expected {rhoa.shape}")
-    scheme["err"] = err
-
-    k_values = np.asarray(scheme["k"], dtype=float).ravel()
-    return rhoa, err, k_values
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -286,12 +246,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="2D ParFlow resistivity slice in bottom-to-top z ordering.",
     )
     parser.add_argument("--model-dir", default="parflow_models", help="Directory containing pftcl and slope_x files.")
-    parser.add_argument("--output-dir", default="result/1_single_forward_pygimli")
+    parser.add_argument("--output-dir", default="result/1_single_forward_adtlert")
     parser.add_argument("--n-electrodes", type=int, default=48)
     parser.add_argument("--relative-error", type=float, default=0.03)
     parser.add_argument("--topo-offset", type=float, default=0.0)
-    parser.add_argument("--verbose", action="store_true", help="Enable pyGIMLi verbose logs.")
-    parser.add_argument("--no-plot", action="store_true", help="Do not save PNG previews.")
+    parser.add_argument("--linear-solver-backend", default="auto")
+    parser.add_argument("--terrain-cache-dir", default=None)
+    parser.add_argument("--no-plot", action="store_true", help="Do not save the PNG preview.")
     return parser
 
 
@@ -316,43 +277,40 @@ def main(argv: list[str] | None = None) -> int:
         n_electrodes=args.n_electrodes,
         topo_offset=args.topo_offset,
     )
-    rhoa, err, k_values = _run_pygimli_forward(case, relative_error=float(args.relative_error), verbose=bool(args.verbose))
+    rhoa = run_terrain_forward(
+        case,
+        linear_solver_backend=args.linear_solver_backend,
+        terrain_cache_dir=None if args.terrain_cache_dir is None else _resolve(root, args.terrain_cache_dir),
+    )
 
-    dat_file = output_dir / "synthetic_ert_terrain_vardz.dat"
-    npz_file = output_dir / "synthetic_ert_terrain_vardz.npz"
+    dat_file = output_dir / f"synthetic_ert_terrain_vardz.dat"
+    npz_file = output_dir / f"synthetic_ert_terrain_vardz.npz"
     save_terrain_forward_dat(dat_file, case, rhoa, relative_error=args.relative_error)
     save_terrain_forward_npz(npz_file, case, rhoa, relative_error=args.relative_error)
-
-    # Keep the .npz error consistent with pyGIMLi's estimateError output.
-    with np.load(npz_file) as data:
-        payload = {name: np.asarray(data[name]) for name in data.files}
-    payload["err"] = err
-    np.savez(npz_file, **payload)
 
     plot_paths: dict[str, Path] = {}
     if not args.no_plot:
         plot_paths = _plot_case(output_dir, case, rhoa, step)
 
     summary = {
-        "engine": "pygimli",
-        "forward_backend": "pygimli.ERTModelling.response",
+        "engine": "adtlert",
+        "forward_backend": "adtlert.run_terrain_forward",
         "input_file": str(input_file),
         "output_dir": str(output_dir),
         "dat_file": str(dat_file),
         "npz_file": str(npz_file),
         "step": int(step),
         "y_index": int(y_index),
+        "scheme_name": "wa",
         "mesh_cells": int(case.mesh.cell_count),
         "measurements": int(case.survey.measurement_count),
         "rhoa_min": float(np.min(rhoa)),
         "rhoa_max": float(np.max(rhoa)),
         "n_electrodes": int(len(case.elec_x)),
         "relative_error": float(args.relative_error),
-        "k_min": float(np.min(k_values)),
-        "k_max": float(np.max(k_values)),
         "plot_files": {name: str(path) for name, path in plot_paths.items()},
     }
-    _write_summary(output_dir / "forward_summary.json", summary)
+    _write_summary(output_dir / f"forward_summary.json", summary)
 
     print(json.dumps(summary, indent=2))
     return 0

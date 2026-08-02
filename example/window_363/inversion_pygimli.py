@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PyGIMLi/PyHydroGeophysX time-lapse ERT inversion for Deepert comparison."""
+"""PyGIMLi/PyHydroGeophysX time-lapse ERT inversion for ADTLERT comparison."""
 
 from __future__ import annotations
 
@@ -572,7 +572,7 @@ def _predict_rhoa(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", default=None, help="Repository root. Auto-detected by default.")
-    parser.add_argument("--forward-dir", default="result/1_timelapsedERT_forward_deepert")
+    parser.add_argument("--forward-dir", default="result/1_timelapsedERT_forward_adtlert")
     parser.add_argument("--true-model-dir", default="resistivity_models_2d")
     parser.add_argument("--output-dir", default="result/2_timelapsedERT_inversion_pygimli")
     parser.add_argument("--y-index", type=int, default=2)

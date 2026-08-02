@@ -1,4 +1,4 @@
-"""Shared helpers for the Deepert/ResIPy benchmark."""
+"""Shared helpers for the ADTLERT/ResIPy benchmark."""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def load_forward_npz(path: Path) -> dict[str, np.ndarray]:
 
 
 def resipy_parser(path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Parse a Deepert forward NPZ through ResIPy's custom-parser interface."""
+    """Parse a ADTLERT forward NPZ through ResIPy's custom-parser interface."""
 
     data = load_forward_npz(Path(path))
     count = data["elec_x"].size
@@ -97,7 +97,7 @@ def resipy_parser(path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     )
     measurements = pd.DataFrame(
         {
-            # Deepert NPZ files store zero-based electrode indices; ResIPy
+            # ADTLERT NPZ files store zero-based electrode indices; ResIPy
             # labels are one-based strings.
             "a": (data["a"] + 1).astype(str),
             "b": (data["b"] + 1).astype(str),

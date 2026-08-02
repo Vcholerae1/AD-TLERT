@@ -19,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", default=None)
     parser.add_argument(
-        "--forward-dir", default="result/1_timelapsedERT_forward_deepert"
+        "--forward-dir", default="result/1_timelapsedERT_forward_adtlert"
     )
     parser.add_argument(
         "--output-dir",

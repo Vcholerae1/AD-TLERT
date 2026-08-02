@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--step", type=int, default=4536)
     parser.add_argument(
         "--data-file",
-        default="result/1_single_forward_deepert/synthetic_ert_terrain_vardz.dat",
+        default="result/1_single_forward_adtlert/synthetic_ert_terrain_vardz.dat",
         help="Single-time forward data in pyGIMLi .dat format.",
     )
     parser.add_argument(

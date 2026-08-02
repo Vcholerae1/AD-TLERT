@@ -108,7 +108,7 @@ def _parse_r2_log(path: Path) -> dict[str, object]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", default=None)
-    parser.add_argument("--forward-dir", default="result/1_timelapsedERT_forward_deepert")
+    parser.add_argument("--forward-dir", default="result/1_timelapsedERT_forward_adtlert")
     parser.add_argument("--output-dir", default="result/9_resipy_benchmark/resipy")
     parser.add_argument("--mode", choices=("single", "timelapse"), default="single")
     parser.add_argument("--steps", default="0,4536,7032,8736")

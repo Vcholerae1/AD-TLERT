@@ -1,13 +1,13 @@
 # AD-TLERT
 
-Differentiable 2.5D ERT forward and time-lapse inversion tooling on Torch.
+Differentiable 2.5D ERT and tetrahedral 3D DC forward tooling on Torch.
 
 The repository contains:
 
-- `deepert/`: the core numerical implementation.
-- `example/single_time/`: Deepert/pyGIMLi forward examples and
-  Deepert/pyGIMLi/ResIPy single-time inversion examples.
-- `example/window_363/`: Deepert/pyGIMLi/ResIPy inversion examples for 365
+- `adtlert/`: the core numerical implementation.
+- `example/single_time/`: ADTLERT/pyGIMLi forward examples and
+  ADTLERT/pyGIMLi/ResIPy single-time inversion examples.
+- `example/window_363/`: ADTLERT/pyGIMLi/ResIPy inversion examples for 365
   time steps using 3-step sliding windows (363 windows).
 - `parflow_models/` and `resistivity_models_2d/`: input data used by the
   examples.
@@ -17,15 +17,27 @@ requirements.
 
 ## Install
 
+Install the CPU/SciPy build from PyPI:
+
 ```bash
-uv sync
+python -m pip install adtlert
 ```
 
-The terrain examples read ParFlow PFB files and build Triangle inversion
-meshes, so install the example extra when running those paths:
+CUDA 12 acceleration through NVIDIA cuDSS is an optional Linux extra:
 
 ```bash
-uv sync --extra examples
+python -m pip install "adtlert[cuda12]"
+```
+
+The CUDA driver must support CUDA 12, and only one CuPy CUDA variant may be
+installed in an environment. CPU-only installations do not install CuPy,
+cuDSS, or nvmath-python.
+
+For development from a checkout, use `uv`. The terrain examples read ParFlow
+PFB files and build Triangle inversion meshes:
+
+```bash
+uv sync --extra cuda12 --extra examples
 ```
 
 ## Core Forward API
@@ -33,7 +45,7 @@ uv sync --extra examples
 ```python
 import torch
 
-from deepert.forward import ERTForward2p5D
+from adtlert.forward import ERTForward2p5D
 
 forward = ERTForward2p5D.from_mesh_survey(mesh, survey)
 conductivity = torch.as_tensor(1.0 / resistivity, dtype=torch.float32)
@@ -43,10 +55,66 @@ rhoa = response.apparent_resistivity
 jacobian = forward.jacobian(conductivity)
 ```
 
+For matrix-free differentiation, use the PyTorch autograd bridge. Its reverse
+pass calls `forward.vjp(...)`, while PyTorch forward AD calls
+`forward.jvp(...)`; no explicit Jacobian is materialized:
+
+```python
+from adtlert.forward import apparent_resistivity_autograd
+
+conductivity = conductivity.requires_grad_()
+rhoa = apparent_resistivity_autograd(conductivity, forward, currents=1.0)
+loss = data_misfit(rhoa, observed_rhoa)
+loss.backward()
+conductivity_gradient = conductivity.grad
+```
+
+True 3D DC forward modelling uses a tetrahedral mesh and three-coordinate
+electrodes. It follows pyGIMLi's 3D singularity-removal formulation, with an
+analytic half-space primary field and a mixed far-field boundary:
+
+```python
+from adtlert.forward import ERTForward3D
+from adtlert.mesh import Mesh3D
+from adtlert.survey import Survey
+
+mesh3d = Mesh3D.from_file("mesh3d.vtu")
+survey3d = Survey.from_arrays(electrode_xyz, abmn)
+forward3d = ERTForward3D.from_mesh_survey(mesh3d, survey3d)
+response3d, jacobian3d = forward3d.solve_with_jacobian(conductivity3d)
+```
+
+For topography, use quadratic tetrahedra and numerical geometric factors. The
+surface is inferred from upward-facing exterior triangles; pass
+`surface_face_mask=` to `Mesh3D.from_arrays` when boundary classification must
+be explicit:
+
+```python
+forward3d = ERTForward3D.from_mesh_survey(
+    mesh3d,
+    survey3d,
+    element_order=2,
+    geometric_factor_mode="auto",  # numerical for terrain, analytic when flat
+    linear_solver_backend="cudss",  # or "scipy"; "auto" selects an available GPU
+)
+```
+
+For large explicit sensitivities, `jacobian(..., batch_size=32,
+cell_batch_size=20000)` bounds temporary field memory. Assembly routing,
+active AB/MN electrode sets, numerical geometric factors, sparse plans, and
+fixed GPU right-hand sides are cached across inversion iterations.
+
+The initial 3D implementation supports flat-surface half-space models,
+four-node tetrahedral geometry, P1 or ten-node P2 basis functions, SciPy or
+NVIDIA cuDSS sparse factorization, analytic or terrain-aware numerical
+geometric factors, exact adjoint cell sensitivities, first-order face-neighbor
+regularization, and the existing single-time inversion API. Large-scale
+matrix-free time-lapse inversion remains on the 3D roadmap.
+
 `ERTForwardModeling` provides a small wrapper for mesh/data-like objects:
 
 ```python
-from deepert.forward import ERTForwardModeling
+from adtlert.forward import ERTForwardModeling
 
 modeling = ERTForwardModeling(mesh=mesh, data=scheme)
 log_rhoa, jac = modeling.forward_and_jacobian(log_resistivity, log_transform=True)
@@ -57,7 +125,7 @@ log_rhoa, jac = modeling.forward_and_jacobian(log_resistivity, log_transform=Tru
 ```python
 import numpy as np
 
-from deepert.workflows import (
+from adtlert.workflows import (
     build_terrain_forward_case,
     discover_resistivity_slices,
     parse_pftcl,
@@ -92,7 +160,7 @@ manifest, failures = run_terrain_forward_series(
 ```python
 import numpy as np
 
-from deepert.inversion import ERTInversion, InversionConfig
+from adtlert.inversion import ERTInversion, InversionConfig
 
 config = InversionConfig(
     max_iterations=8,
@@ -118,7 +186,7 @@ chi2_history = result.iteration_chi2
 Windowed time-lapse inversion:
 
 ```python
-from deepert.inversion import WindowedTimeLapseERTInversion
+from adtlert.inversion import WindowedTimeLapseERTInversion
 
 config = InversionConfig(
     max_iterations=6,
@@ -147,6 +215,6 @@ final_models = result.final_models
 
 ```bash
 uv run pytest
-uv run python -m compileall deepert
+uv run python -m compileall adtlert
 uv build
 ```
