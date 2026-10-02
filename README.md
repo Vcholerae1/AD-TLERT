@@ -168,11 +168,15 @@ config = InversionConfig(
 )
 
 initial_model = np.full(forward.mesh.cell_count, np.median(observed_rhoa))
-result = ERTInversion(
-    forward=forward,
-    observed_data=observed_rhoa,
-    config=config,
-).setup().run(initial_model)
+result = (
+    ERTInversion(
+        forward=forward,
+        observed_data=observed_rhoa,
+        config=config,
+    )
+    .setup()
+    .run(initial_model)
+)
 
 final_model = result.final_model
 predicted_rhoa = result.predicted_data
@@ -197,13 +201,17 @@ config = InversionConfig(
     line_search=True,
 )
 
-result = WindowedTimeLapseERTInversion(
-    forward=forward,
-    observed_data=observed_rhoa_by_time,
-    config=config,
-    window_size=3,
-    window_step=1,
-).setup().run(initial_model)
+result = (
+    WindowedTimeLapseERTInversion(
+        forward=forward,
+        observed_data=observed_rhoa_by_time,
+        config=config,
+        window_size=3,
+        window_step=1,
+    )
+    .setup()
+    .run(initial_model)
+)
 
 final_models = result.final_models
 ```

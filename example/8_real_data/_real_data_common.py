@@ -29,7 +29,9 @@ class RealERTData:
     def with_measurement_mask(self, mask: np.ndarray) -> "RealERTData":
         mask_array = np.asarray(mask, dtype=bool).ravel()
         if mask_array.shape != self.rhoa.shape:
-            raise ValueError(f"mask shape {mask_array.shape} does not match rhoa shape {self.rhoa.shape}")
+            raise ValueError(
+                f"mask shape {mask_array.shape} does not match rhoa shape {self.rhoa.shape}"
+            )
         return replace(
             self,
             rhoa=self.rhoa[mask_array],
@@ -48,7 +50,9 @@ def find_project_root(start: Path) -> Path:
     for candidate in candidates:
         if (candidate / "adtlert").exists() and (candidate / "ProcessedData").exists():
             return candidate
-    raise FileNotFoundError("Cannot locate project root containing adtlert/ and ProcessedData/.")
+    raise FileNotFoundError(
+        "Cannot locate project root containing adtlert/ and ProcessedData/."
+    )
 
 
 def resolve_path(root: Path, value: str | Path) -> Path:
@@ -117,7 +121,9 @@ def discover_processed_files(
     return paths
 
 
-def read_processed_ert(path: Path, *, elevation_reference: float | None = None) -> RealERTData:
+def read_processed_ert(
+    path: Path, *, elevation_reference: float | None = None
+) -> RealERTData:
     """Read the ProcessedData text format used by the real hillslope dataset.
 
     The file stores electrodes as x, y, elevation. ADTLERT uses a 2D x-z
@@ -125,7 +131,11 @@ def read_processed_ert(path: Path, *, elevation_reference: float | None = None) 
     the profile maximum elevation unless an explicit reference is supplied.
     """
 
-    lines = [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip()
+    ]
     if len(lines) < 5:
         raise ValueError(f"{path}: file is too short")
 
@@ -134,7 +144,9 @@ def read_processed_ert(path: Path, *, elevation_reference: float | None = None) 
     electrode_stop = electrode_start + electrode_count
     electrodes = np.loadtxt(lines[electrode_start:electrode_stop], dtype=float)
     if electrodes.shape != (electrode_count, 3):
-        raise ValueError(f"{path}: expected {electrode_count} electrode rows with x y z columns")
+        raise ValueError(
+            f"{path}: expected {electrode_count} electrode rows with x y z columns"
+        )
 
     data_count_index = electrode_stop
     measurement_count = int(lines[data_count_index].split()[0])
@@ -148,27 +160,48 @@ def read_processed_ert(path: Path, *, elevation_reference: float | None = None) 
     if table.ndim == 1:
         table = table[None, :]
     if table.shape[0] != measurement_count:
-        raise ValueError(f"{path}: parsed measurement count {table.shape[0]} != {measurement_count}")
+        raise ValueError(
+            f"{path}: parsed measurement count {table.shape[0]} != {measurement_count}"
+        )
 
     column_index = {name: index for index, name in enumerate(columns)}
     required = {"a", "b", "m", "n", "rhoa"}
     missing = required.difference(column_index)
     if missing:
-        raise KeyError(f"{path}: missing required measurement columns: {sorted(missing)}")
+        raise KeyError(
+            f"{path}: missing required measurement columns: {sorted(missing)}"
+        )
 
-    measurements = table[:, [column_index[name] for name in ("a", "b", "m", "n")]].astype(np.int32) - 1
+    measurements = (
+        table[:, [column_index[name] for name in ("a", "b", "m", "n")]].astype(np.int32)
+        - 1
+    )
     if np.any(measurements < 0) or np.any(measurements >= electrode_count):
-        raise ValueError(f"{path}: ABMN indices must be one-based electrode ids in [1, {electrode_count}]")
+        raise ValueError(
+            f"{path}: ABMN indices must be one-based electrode ids in [1, {electrode_count}]"
+        )
 
     rhoa = np.asarray(table[:, column_index["rhoa"]], dtype=float)
-    err = np.asarray(table[:, column_index["err"]], dtype=float) if "err" in column_index else None
-    valid = np.asarray(table[:, column_index["valid"]] > 0.0, dtype=bool) if "valid" in column_index else np.ones_like(rhoa, dtype=bool)
+    err = (
+        np.asarray(table[:, column_index["err"]], dtype=float)
+        if "err" in column_index
+        else None
+    )
+    valid = (
+        np.asarray(table[:, column_index["valid"]] > 0.0, dtype=bool)
+        if "valid" in column_index
+        else np.ones_like(rhoa, dtype=bool)
+    )
 
     elec_x = np.asarray(electrodes[:, 0], dtype=float)
     elec_elevation = np.asarray(electrodes[:, 2], dtype=float)
     if np.any(np.diff(elec_x) <= 0.0):
         raise ValueError(f"{path}: electrode x positions must be strictly increasing")
-    z_reference = float(np.nanmax(elec_elevation) if elevation_reference is None else elevation_reference)
+    z_reference = float(
+        np.nanmax(elec_elevation)
+        if elevation_reference is None
+        else elevation_reference
+    )
     elec_z = elec_elevation - z_reference
 
     return RealERTData(
@@ -220,7 +253,9 @@ def data_std_from_err(
     return np.maximum(std, float(minimum_log_std))
 
 
-def stretched_layer_thickness(depth: float, n_layers: int, stretch: float) -> np.ndarray:
+def stretched_layer_thickness(
+    depth: float, n_layers: int, stretch: float
+) -> np.ndarray:
     if depth <= 0.0:
         raise ValueError("depth must be positive")
     if n_layers < 2:
@@ -233,7 +268,9 @@ def stretched_layer_thickness(depth: float, n_layers: int, stretch: float) -> np
     return raw * (float(depth) / float(raw.sum()))
 
 
-def build_real_geometry(data: RealERTData, *, depth: float, n_layers: int, layer_stretch: float) -> dict[str, np.ndarray]:
+def build_real_geometry(
+    data: RealERTData, *, depth: float, n_layers: int, layer_stretch: float
+) -> dict[str, np.ndarray]:
     return {
         "x_nodes": np.asarray(data.elec_x, dtype=float).copy(),
         "z_top": np.asarray(data.elec_z, dtype=float).copy(),
@@ -251,7 +288,9 @@ def build_real_inversion_case(
     inversion_mesh_smoothing_iterations: int,
     mesh_file: Path | None = None,
 ):
-    geometry = build_real_geometry(data, depth=depth, n_layers=n_layers, layer_stretch=layer_stretch)
+    geometry = build_real_geometry(
+        data, depth=depth, n_layers=n_layers, layer_stretch=layer_stretch
+    )
     return build_source_position_triangle_inversion_case(
         data.elec_x,
         data.elec_z,
@@ -294,7 +333,9 @@ def save_mesh_npz(path: Path, case) -> None:
     )
 
 
-def _positive_limits(values: np.ndarray, *, vmin: float | None = None, vmax: float | None = None) -> tuple[float, float]:
+def _positive_limits(
+    values: np.ndarray, *, vmin: float | None = None, vmax: float | None = None
+) -> tuple[float, float]:
     finite = np.asarray(values, dtype=float)
     finite = finite[np.isfinite(finite) & (finite > 0.0)]
     if finite.size == 0:
@@ -409,7 +450,9 @@ def plot_timelapse_models(
 
     nodes = np.asarray(case.mesh.nodes, dtype=float)
     cells = np.asarray(case.mesh.cells, dtype=np.int32)
-    fig, axes = plt.subplots(1, n_panels, figsize=(4.4 * n_panels, 4.0), sharex=True, sharey=True)
+    fig, axes = plt.subplots(
+        1, n_panels, figsize=(4.4 * n_panels, 4.0), sharex=True, sharey=True
+    )
     axes = np.atleast_1d(axes)
     last = None
     for ax, column, label in zip(axes, range(n_panels), labels, strict=False):
@@ -442,11 +485,17 @@ def plot_timelapse_models(
 
 def check_same_layout(first, current) -> None:
     if not np.array_equal(current.measurements, first.measurements):
-        raise ValueError(f"{current.path}: ABMN layout differs from first timestep {first.path}")
+        raise ValueError(
+            f"{current.path}: ABMN layout differs from first timestep {first.path}"
+        )
     if not np.allclose(current.elec_x, first.elec_x, rtol=0.0, atol=1.0e-10):
-        raise ValueError(f"{current.path}: electrode x positions differ from first timestep")
+        raise ValueError(
+            f"{current.path}: electrode x positions differ from first timestep"
+        )
     if not np.allclose(current.elec_z, first.elec_z, rtol=0.0, atol=1.0e-10):
-        raise ValueError(f"{current.path}: electrode z positions differ from first timestep")
+        raise ValueError(
+            f"{current.path}: electrode z positions differ from first timestep"
+        )
 
 
 def selected_plot_indices(n_times: int, max_panels: int) -> np.ndarray:

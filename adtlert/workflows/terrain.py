@@ -56,7 +56,9 @@ class TerrainForwardCase:
     def with_resistivity(self, resistivity: np.ndarray) -> TerrainForwardCase:
         """Return the same terrain geometry with a different cell resistivity vector."""
 
-        return replace(self, resistivity=_checked_resistivity(resistivity, self.resistivity.shape))
+        return replace(
+            self, resistivity=_checked_resistivity(resistivity, self.resistivity.shape)
+        )
 
 
 @dataclass(frozen=True)
@@ -125,7 +127,11 @@ class TerrainForwardRunner:
         forward = ERTForward2p5D.from_mesh_survey(
             case.mesh, case.survey, terrain_cache_dir=terrain_cache_dir
         )
-        runner = cls(case_template=case, forward=forward, reuse_solver_state=bool(reuse_solver_state))
+        runner = cls(
+            case_template=case,
+            forward=forward,
+            reuse_solver_state=bool(reuse_solver_state),
+        )
         if prepare_forward:
             runner.prepare_resistivity(case.resistivity)
         return runner
@@ -136,21 +142,31 @@ class TerrainForwardRunner:
     def solve_resistivity(self, resistivity: np.ndarray) -> np.ndarray:
         """Apparent resistivity for a cell resistivity vector."""
 
-        conductivity = torch.as_tensor(1.0 / np.asarray(resistivity, dtype=float), dtype=FLOAT_DTYPE)
+        conductivity = torch.as_tensor(
+            1.0 / np.asarray(resistivity, dtype=float), dtype=FLOAT_DTYPE
+        )
         if self.reuse_solver_state:
-            rhoa = np.asarray(self.forward.apparent_resistivity_values(conductivity), dtype=float)
+            rhoa = np.asarray(
+                self.forward.apparent_resistivity_values(conductivity), dtype=float
+            )
             if np.all(np.isfinite(rhoa)) and np.all(rhoa > 0.0):
                 return rhoa
         self.forward.close()
-        rhoa = np.asarray(self.forward.apparent_resistivity_values(conductivity), dtype=float)
+        rhoa = np.asarray(
+            self.forward.apparent_resistivity_values(conductivity), dtype=float
+        )
         if not np.all(np.isfinite(rhoa)) or np.any(rhoa <= 0.0):
-            raise ValueError("forward returned non-finite or non-positive apparent resistivity values")
+            raise ValueError(
+                "forward returned non-finite or non-positive apparent resistivity values"
+            )
         return rhoa
 
     def prepare_resistivity(self, resistivity: np.ndarray) -> None:
         """Pre-populate caches for a representative terrain resistivity vector."""
 
-        conductivity = torch.as_tensor(1.0 / np.asarray(resistivity, dtype=float), dtype=FLOAT_DTYPE)
+        conductivity = torch.as_tensor(
+            1.0 / np.asarray(resistivity, dtype=float), dtype=FLOAT_DTYPE
+        )
         self.forward.prepare(conductivity, include_solver_state=self.reuse_solver_state)
 
     def solve_case(self, case: TerrainForwardCase) -> np.ndarray:
@@ -177,7 +193,11 @@ def parse_resistivity_slice_name(path: str | Path) -> tuple[int, int]:
 
 
 def discover_resistivity_slices(
-    input_dir: str | Path, *, y_index: int | None = None, file_stride: int = 1, max_steps: int | None = None
+    input_dir: str | Path,
+    *,
+    y_index: int | None = None,
+    file_stride: int = 1,
+    max_steps: int | None = None,
 ) -> list[tuple[int, Path]]:
     """Return sorted ``(step, path)`` pairs for terrain resistivity slices."""
 
@@ -197,14 +217,18 @@ def discover_resistivity_slices(
     return sorted(pairs, key=lambda item: item[0])[::file_stride][:max_steps]
 
 
-def load_terrain_resistivity_slice(path: str | Path, grid: ParflowGrid, *, y_index: int) -> np.ndarray:
+def load_terrain_resistivity_slice(
+    path: str | Path, grid: ParflowGrid, *, y_index: int
+) -> np.ndarray:
     """Load a 2D slice from a 2D or 3D (any of the ParFlow axis orders) resistivity file."""
 
     values = np.asarray(np.load(path), dtype=float)
     if values.ndim == 2:
         return values
     if values.ndim != 3:
-        raise ValueError(f"{path}: resistivity array must be 2D or 3D, got shape={values.shape}")
+        raise ValueError(
+            f"{path}: resistivity array must be 2D or 3D, got shape={values.shape}"
+        )
     if not 0 <= y_index < grid.ny:
         raise ValueError(f"y_index={y_index} out of range for NY={grid.ny}")
     nz, ny, nx = grid.nz, grid.ny, grid.nx
@@ -226,14 +250,23 @@ def parse_pftcl(path: str | Path) -> ParflowGrid:
     values: dict[str, float] = {}
     dz_scales: dict[int, float] = {}
     for line in Path(path).read_text(encoding="utf-8", errors="ignore").splitlines():
-        for key, pattern in (("DX", r"[0-9eE+\-.]+"), ("DY", r"[0-9eE+\-.]+"), ("DZ", r"[0-9eE+\-.]+"), ("NX", r"\d+"), ("NY", r"\d+"), ("NZ", r"\d+")):
+        for key, pattern in (
+            ("DX", r"[0-9eE+\-.]+"),
+            ("DY", r"[0-9eE+\-.]+"),
+            ("DZ", r"[0-9eE+\-.]+"),
+            ("NX", r"\d+"),
+            ("NY", r"\d+"),
+            ("NZ", r"\d+"),
+        ):
             if match := re.search(rf'ComputationalGrid\.{key}\s+"({pattern})"', line):
                 values[key.lower()] = float(match.group(1))
         if match := re.search(r'Cell\.(\d+)\.dzScale\.Value\s+"([0-9eE+\-.]+)"', line):
             dz_scales[int(match.group(1))] = float(match.group(2))
     missing = [key for key in ("dx", "dy", "dz", "nx", "ny", "nz") if key not in values]
     if missing:
-        raise ValueError(f"failed to parse ComputationalGrid settings from {path}: missing {missing}")
+        raise ValueError(
+            f"failed to parse ComputationalGrid settings from {path}: missing {missing}"
+        )
     nz = int(values["nz"])
     if len(dz_scales) != nz:
         raise ValueError(f"dzScale count {len(dz_scales)} does not match NZ={nz}")
@@ -254,12 +287,18 @@ def read_slope_x(path: str | Path, y_index: int) -> np.ndarray:
     try:
         from parflow.tools.io import read_pfb
     except ImportError as exc:
-        raise ImportError("Reading ParFlow PFB files requires the examples extra: `uv sync --extra examples`.") from exc
+        raise ImportError(
+            "Reading ParFlow PFB files requires the examples extra: `uv sync --extra examples`."
+        ) from exc
     slope_x = np.asarray(read_pfb(str(path)), dtype=float)
     if slope_x.ndim != 3:
-        raise ValueError(f"expected slope_x PFB to load as a 3D array, got shape={slope_x.shape}")
+        raise ValueError(
+            f"expected slope_x PFB to load as a 3D array, got shape={slope_x.shape}"
+        )
     if not 0 <= y_index < slope_x.shape[1]:
-        raise ValueError(f"y_index={y_index} out of range for slope_x shape={slope_x.shape}")
+        raise ValueError(
+            f"y_index={y_index} out of range for slope_x shape={slope_x.shape}"
+        )
     return slope_x[0, y_index, :]
 
 
@@ -287,7 +326,11 @@ def load_terrain_forward_dat(path: str | Path) -> TerrainForwardData:
     """Read the unified ERT ``.dat`` format (sensors, then ``a b m n ... rhoa`` rows, 1-based)."""
 
     path = Path(path)
-    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     if len(lines) < 4:
         raise ValueError(f"{path} is too short to be an ERT .dat file")
 
@@ -303,7 +346,12 @@ def load_terrain_forward_dat(path: str | Path) -> TerrainForwardData:
     cursor = skip_comments(1)
     if cursor + sensor_count > len(lines):
         raise ValueError(f"{path}: sensor table is truncated")
-    sensors = np.asarray([[float(part) for part in line.split()[:3]] for line in lines[cursor : cursor + sensor_count]])
+    sensors = np.asarray(
+        [
+            [float(part) for part in line.split()[:3]]
+            for line in lines[cursor : cursor + sensor_count]
+        ]
+    )
     sensors = np.rint(sensors / 1.0e-12) * 1.0e-12  # GIMLi's tolerance rounding
     cursor = skip_comments(cursor + sensor_count)
     if cursor >= len(lines):
@@ -325,7 +373,12 @@ def load_terrain_forward_dat(path: str | Path) -> TerrainForwardData:
     missing = [name for name in ("a", "b", "m", "n", "rhoa") if name not in columns]
     if missing:
         raise ValueError(f"{path}: missing required measurement columns {missing}")
-    values = np.asarray([[float(part) for part in line.split()] for line in lines[cursor : cursor + data_count]])
+    values = np.asarray(
+        [
+            [float(part) for part in line.split()]
+            for line in lines[cursor : cursor + data_count]
+        ]
+    )
     if values.shape[1] < len(header):
         raise ValueError(f"{path}: measurement rows have fewer columns than the header")
     return TerrainForwardData(
@@ -340,7 +393,16 @@ def load_terrain_forward_dat(path: str | Path) -> TerrainForwardData:
 def _geometric_factors(electrodes: np.ndarray, measurements: np.ndarray) -> np.ndarray:
     a, b, m, n = (electrodes[measurements[:, index]] for index in range(4))
     distance = lambda p, q: np.linalg.norm(p - q, axis=-1)  # noqa: E731
-    return 2.0 * np.pi / (1.0 / distance(a, m) - 1.0 / distance(a, n) - 1.0 / distance(b, m) + 1.0 / distance(b, n))
+    return (
+        2.0
+        * np.pi
+        / (
+            1.0 / distance(a, m)
+            - 1.0 / distance(a, n)
+            - 1.0 / distance(b, m)
+            + 1.0 / distance(b, n)
+        )
+    )
 
 
 def _checked_rhoa(case: TerrainForwardCase, rhoa) -> np.ndarray:
@@ -350,26 +412,48 @@ def _checked_rhoa(case: TerrainForwardCase, rhoa) -> np.ndarray:
     return rhoa
 
 
-def save_terrain_forward_dat(path: str | Path, case: TerrainForwardCase, rhoa: np.ndarray, *, relative_error: float = 0.03) -> None:
+def save_terrain_forward_dat(
+    path: str | Path,
+    case: TerrainForwardCase,
+    rhoa: np.ndarray,
+    *,
+    relative_error: float = 0.03,
+) -> None:
     """Save a pyGIMLi-style ERT ``.dat`` file."""
 
     rhoa = _checked_rhoa(case, rhoa)
-    electrodes = np.column_stack((np.asarray(case.elec_x, dtype=float), np.asarray(case.elec_z, dtype=float)))
+    electrodes = np.column_stack(
+        (np.asarray(case.elec_x, dtype=float), np.asarray(case.elec_z, dtype=float))
+    )
     measurements = np.asarray(case.survey.measurements, dtype=np.int32)
     zero = "0.00000000000000e+00"
     lines = [f"{electrodes.shape[0]}\n", "# x y z\n"]
     lines += [f"{x:.14g}\t{z:.14g}\t0\n" for x, z in electrodes]
-    lines += [f"{measurements.shape[0]}\n", "# a b m n err i ip iperr k r rhoa u valid \n"]
+    lines += [
+        f"{measurements.shape[0]}\n",
+        "# a b m n err i ip iperr k r rhoa u valid \n",
+    ]
     lines += [
         f"{a + 1}\t{b + 1}\t{m + 1}\t{n + 1}\t{float(relative_error):.14e}\t{zero}\t{zero}\t{zero}\t{k:.14e}\t{zero}\t{value:.14e}\t{zero}\t1\n"
-        for (a, b, m, n), k, value in zip(measurements.tolist(), _geometric_factors(electrodes, measurements), rhoa, strict=True)
+        for (a, b, m, n), k, value in zip(
+            measurements.tolist(),
+            _geometric_factors(electrodes, measurements),
+            rhoa,
+            strict=True,
+        )
     ]
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(lines), encoding="utf-8")
 
 
-def save_terrain_forward_npz(path: str | Path, case: TerrainForwardCase, rhoa: np.ndarray, *, relative_error: float = 0.03) -> None:
+def save_terrain_forward_npz(
+    path: str | Path,
+    case: TerrainForwardCase,
+    rhoa: np.ndarray,
+    *,
+    relative_error: float = 0.03,
+) -> None:
     """Save compact forward data and terrain metadata for plotting."""
 
     rhoa = _checked_rhoa(case, rhoa)
@@ -395,7 +479,14 @@ def save_terrain_forward_npz(path: str | Path, case: TerrainForwardCase, rhoa: n
 # ---------------------------------------------------------------------------
 
 
-def _smooth_triangle_nodes(nodes: np.ndarray, cells: np.ndarray, markers: np.ndarray, *, plc_node_count: int, iterations: int) -> np.ndarray:
+def _smooth_triangle_nodes(
+    nodes: np.ndarray,
+    cells: np.ndarray,
+    markers: np.ndarray,
+    *,
+    plc_node_count: int,
+    iterations: int,
+) -> np.ndarray:
     """pyGIMLi's Laplacian smoothing of Triangle meshes, keeping PLC, boundary, and region-interface nodes fixed."""
 
     if iterations < 0:
@@ -427,12 +518,19 @@ def _smooth_triangle_nodes(nodes: np.ndarray, cells: np.ndarray, markers: np.nda
     for _ in range(iterations):
         for node, adjacent in enumerate(adjacency):
             if not fixed[node] and adjacent.size:
-                smoothed[node] = (smoothed[node] + smoothed[adjacent].sum(axis=0)) / (adjacent.size + 1)
+                smoothed[node] = (smoothed[node] + smoothed[adjacent].sum(axis=0)) / (
+                    adjacent.size + 1
+                )
     return smoothed
 
 
 def _source_position_triangle_arrays(
-    elec_x: np.ndarray, elec_z: np.ndarray, *, quality: float, parameter_max_cell_area: float | None = None, smoothing_iterations: int = 10
+    elec_x: np.ndarray,
+    elec_z: np.ndarray,
+    *,
+    quality: float,
+    parameter_max_cell_area: float | None = None,
+    smoothing_iterations: int = 10,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """pyGIMLi-style PLC (parameter box plus outer boundary) meshed with Triangle.
 
@@ -481,31 +579,63 @@ def _source_position_triangle_arrays(
         chain(n1, n11, n12, n13, n14, n4)
         regions.append([vertices[n12][0] + 1.0e-3, vertices[n12][1] + 1.0e-3, 1.0, 0.0])
     chain(n1, n2, n3, n4)
-    regions.append([vertices[n2][0] + 1.0e-3, vertices[n2][1] + 1.0e-3, 2.0, 0.0 if parameter_max_cell_area is None else float(parameter_max_cell_area)])
+    regions.append(
+        [
+            vertices[n2][0] + 1.0e-3,
+            vertices[n2][1] + 1.0e-3,
+            2.0,
+            0.0 if parameter_max_cell_area is None else float(parameter_max_cell_area),
+        ]
+    )
 
     surface = [n1]
     for index, (x, z) in enumerate(sensors):
         surface.append(node(x, z))
         if index < len(sensors) - 1:
-            surface.append(node(0.5 * (x + sensors[index + 1][0]), 0.5 * (z + sensors[index + 1][1])))
+            surface.append(
+                node(
+                    0.5 * (x + sensors[index + 1][0]), 0.5 * (z + sensors[index + 1][1])
+                )
+            )
     surface.append(n4)
     surface = sorted(dict.fromkeys(surface), key=lambda node_id: vertices[node_id][0])
     chain(*surface[::-1])
 
     mesh = triangle.triangulate(
-        {"vertices": np.asarray(vertices), "segments": np.asarray(segments, dtype=np.int32), "regions": np.asarray(regions)},
+        {
+            "vertices": np.asarray(vertices),
+            "segments": np.asarray(segments, dtype=np.int32),
+            "regions": np.asarray(regions),
+        },
         f"pzeAq{quality:g}aQ",
     )
     cells = np.asarray(mesh["triangles"], dtype=np.int32)
-    markers = np.rint(np.asarray(mesh["triangle_attributes"], dtype=float).reshape(-1)).astype(np.int32)
-    nodes = _smooth_triangle_nodes(mesh["vertices"], cells, markers, plc_node_count=len(vertices), iterations=int(smoothing_iterations))
+    markers = np.rint(
+        np.asarray(mesh["triangle_attributes"], dtype=float).reshape(-1)
+    ).astype(np.int32)
+    nodes = _smooth_triangle_nodes(
+        mesh["vertices"],
+        cells,
+        markers,
+        plc_node_count=len(vertices),
+        iterations=int(smoothing_iterations),
+    )
     parameter_ids = np.flatnonzero(markers == 2).astype(np.int32)
     if parameter_ids.size == 0:
         raise ValueError("triangle did not produce any parameter-domain cells")
-    used = np.asarray(list(dict.fromkeys(cells[parameter_ids].reshape(-1).tolist())), dtype=np.int32)
+    used = np.asarray(
+        list(dict.fromkeys(cells[parameter_ids].reshape(-1).tolist())), dtype=np.int32
+    )
     remap = np.full(nodes.shape[0], -1, dtype=np.int32)
     remap[used] = np.arange(used.size, dtype=np.int32)
-    return nodes[used], remap[cells[parameter_ids]], nodes, cells, markers, parameter_ids
+    return (
+        nodes[used],
+        remap[cells[parameter_ids]],
+        nodes,
+        cells,
+        markers,
+        parameter_ids,
+    )
 
 
 def _load_mesh_npz(path: str | Path):
@@ -515,16 +645,28 @@ def _load_mesh_npz(path: str | Path):
             raise KeyError(f"{path} missing required mesh arrays: {sorted(missing)}")
         nodes = np.asarray(data["nodes"], dtype=float)
         cells = np.asarray(data["cells"], dtype=np.int32)
-        get = lambda key, default, dtype: np.asarray(data[key], dtype=dtype) if key in data.files else default  # noqa: E731
+        get = lambda key, default, dtype: (
+            np.asarray(data[key], dtype=dtype) if key in data.files else default
+        )  # noqa: E731
         full_cells = get("forward_cells", cells, np.int32)
         return (
             nodes,
             cells,
-            None if "surface_node_ids" not in data.files else get("surface_node_ids", None, np.int32).ravel(),
+            None
+            if "surface_node_ids" not in data.files
+            else get("surface_node_ids", None, np.int32).ravel(),
             get("forward_nodes", nodes, float),
             full_cells,
-            get("cell_markers", np.full(full_cells.shape[0], 2, dtype=np.int32), np.int32).ravel(),
-            get("parameter_cell_ids", np.arange(cells.shape[0], dtype=np.int32), np.int32).ravel(),
+            get(
+                "cell_markers",
+                np.full(full_cells.shape[0], 2, dtype=np.int32),
+                np.int32,
+            ).ravel(),
+            get(
+                "parameter_cell_ids",
+                np.arange(cells.shape[0], dtype=np.int32),
+                np.int32,
+            ).ravel(),
         )
 
 
@@ -550,7 +692,10 @@ def build_source_position_triangle_inversion_case(
     ``mesh_file`` loads saved mesh arrays instead of running Triangle.
     """
 
-    elec_x, elec_z = np.asarray(elec_x, dtype=float).ravel(), np.asarray(elec_z, dtype=float).ravel()
+    elec_x, elec_z = (
+        np.asarray(elec_x, dtype=float).ravel(),
+        np.asarray(elec_z, dtype=float).ravel(),
+    )
     if elec_x.shape != elec_z.shape:
         raise ValueError("elec_x and elec_z must have the same shape")
     if elec_x.size < 4:
@@ -563,8 +708,13 @@ def build_source_position_triangle_inversion_case(
     if measurements.ndim != 2 or measurements.shape[1] != 4:
         raise ValueError("measurements must have shape (n_measurements, 4)")
     if np.any(measurements < 0) or np.any(measurements >= elec_x.size):
-        raise ValueError("measurements reference electrodes outside the source positions")
-    x_nodes, z_top = np.asarray(x_nodes, dtype=float).ravel(), np.asarray(z_top, dtype=float).ravel()
+        raise ValueError(
+            "measurements reference electrodes outside the source positions"
+        )
+    x_nodes, z_top = (
+        np.asarray(x_nodes, dtype=float).ravel(),
+        np.asarray(z_top, dtype=float).ravel(),
+    )
     layer_thickness = np.asarray(layer_thickness, dtype=float).ravel()
     if x_nodes.shape != z_top.shape:
         raise ValueError("x_nodes and z_top must have the same shape")
@@ -579,12 +729,20 @@ def build_source_position_triangle_inversion_case(
         data = load_terrain_forward_dat(data_file)
         elec_x, elec_z, measurements = data.elec_x, data.elec_z, data.measurements
     if mesh_file is not None:
-        nodes, cells, surface_ids, full_nodes, full_cells, markers, parameter_ids = _load_mesh_npz(mesh_file)
+        nodes, cells, surface_ids, full_nodes, full_cells, markers, parameter_ids = (
+            _load_mesh_npz(mesh_file)
+        )
     else:
         if depth_levels < 2:
             raise ValueError("depth_levels must be >= 2")
-        nodes, cells, full_nodes, full_cells, markers, parameter_ids = _source_position_triangle_arrays(
-            elec_x, elec_z, quality=float(quality), parameter_max_cell_area=parameter_max_cell_area, smoothing_iterations=int(smoothing_iterations)
+        nodes, cells, full_nodes, full_cells, markers, parameter_ids = (
+            _source_position_triangle_arrays(
+                elec_x,
+                elec_z,
+                quality=float(quality),
+                parameter_max_cell_area=parameter_max_cell_area,
+                smoothing_iterations=int(smoothing_iterations),
+            )
         )
         surface_ids = None
     return SourcePositionInversionCase(
@@ -612,12 +770,20 @@ def _terrain_resistivity_vector(rho_2d: np.ndarray, grid: ParflowGrid) -> np.nda
 
     rho = np.asarray(rho_2d, dtype=float)
     if rho.shape != (grid.nz, grid.nx):
-        raise ValueError(f"resistivity shape {rho.shape} does not match parsed grid {(grid.nz, grid.nx)}")
+        raise ValueError(
+            f"resistivity shape {rho.shape} does not match parsed grid {(grid.nz, grid.nx)}"
+        )
     return _checked_resistivity(rho, rho.shape)[::-1, :].reshape(-1)
 
 
 def build_terrain_forward_case(
-    rho_2d: np.ndarray, grid: ParflowGrid, slope_x: np.ndarray, *, y_index: int, n_electrodes: int = 48, topo_offset: float = 0.0
+    rho_2d: np.ndarray,
+    grid: ParflowGrid,
+    slope_x: np.ndarray,
+    *,
+    y_index: int,
+    n_electrodes: int = 48,
+    topo_offset: float = 0.0,
 ) -> TerrainForwardCase:
     """Terrain-following quad mesh, Wenner-alpha survey, and cell resistivities for one ParFlow slice.
 
@@ -635,10 +801,21 @@ def build_terrain_forward_case(
     depth_offsets = np.concatenate(([0.0], -np.cumsum(layer_thickness)))
     x_nodes = np.arange(grid.nx + 1, dtype=float) * grid.dx
     z_top = np.concatenate(([0.0], np.cumsum(slope * grid.dx))) + topo_offset
-    nodes = np.asarray([[x, z + offset] for offset in depth_offsets for x, z in zip(x_nodes, z_top, strict=True)])
+    nodes = np.asarray(
+        [
+            [x, z + offset]
+            for offset in depth_offsets
+            for x, z in zip(x_nodes, z_top, strict=True)
+        ]
+    )
     width = grid.nx + 1
     cells = [
-        [layer * width + column, layer * width + column + 1, (layer + 1) * width + column + 1, (layer + 1) * width + column]
+        [
+            layer * width + column,
+            layer * width + column + 1,
+            (layer + 1) * width + column + 1,
+            (layer + 1) * width + column,
+        ]
         for layer in range(grid.nz)
         for column in range(grid.nx)
     ]
@@ -647,7 +824,10 @@ def build_terrain_forward_case(
     elec_z = np.interp(elec_x, x_nodes, z_top)
     return TerrainForwardCase(
         mesh=Mesh.from_arrays(nodes, cells, surface_node_ids=np.arange(width)),
-        survey=Survey.from_arrays(np.column_stack((elec_x, elec_z)), build_wenner_alpha_measurements(electrode_count)),
+        survey=Survey.from_arrays(
+            np.column_stack((elec_x, elec_z)),
+            build_wenner_alpha_measurements(electrode_count),
+        ),
         resistivity=resistivity,
         elec_x=elec_x,
         elec_z=elec_z,
@@ -683,10 +863,14 @@ def _resolve_slice(path: Path, y_index: int | None) -> tuple[int, int]:
     parsed_y, step = parse_resistivity_slice_name(path)
     if y_index is None:
         if parsed_y < 0:
-            raise ValueError(f"{path}: y_index is required for notebook-style resistivity_t*.npy files")
+            raise ValueError(
+                f"{path}: y_index is required for notebook-style resistivity_t*.npy files"
+            )
         return parsed_y, step
     if parsed_y >= 0 and parsed_y != y_index:
-        raise ValueError(f"input file y-index {parsed_y} does not match requested y_index={y_index}")
+        raise ValueError(
+            f"input file y-index {parsed_y} does not match requested y_index={y_index}"
+        )
     return int(y_index), step
 
 
@@ -719,14 +903,31 @@ def run_terrain_forward_series(
         for path in paths:
             try:
                 slice_y, step = _resolve_slice(path, y_index)
-                files = {kind: output_root / f"synthetic_ert_terrain_vardz_t{step:05d}.{kind}" for kind in ("dat", "npz")}
-                record = TerrainForwardRecord(step, str(path), str(files["dat"]), str(files["npz"]), "skipped_existing")
+                files = {
+                    kind: output_root
+                    / f"synthetic_ert_terrain_vardz_t{step:05d}.{kind}"
+                    for kind in ("dat", "npz")
+                }
+                record = TerrainForwardRecord(
+                    step,
+                    str(path),
+                    str(files["dat"]),
+                    str(files["npz"]),
+                    "skipped_existing",
+                )
                 if not overwrite and all(file.exists() for file in files.values()):
                     manifest.append(record)
                     continue
                 rho_2d = load_terrain_resistivity_slice(path, grid, y_index=slice_y)
                 if slice_y not in runners:
-                    case = build_terrain_forward_case(rho_2d, grid, slope_x, y_index=slice_y, n_electrodes=n_electrodes, topo_offset=topo_offset)
+                    case = build_terrain_forward_case(
+                        rho_2d,
+                        grid,
+                        slope_x,
+                        y_index=slice_y,
+                        n_electrodes=n_electrodes,
+                        topo_offset=topo_offset,
+                    )
                     runners[slice_y] = TerrainForwardRunner.from_case(
                         case,
                         reuse_solver_state=reuse_solver_state,
@@ -735,10 +936,23 @@ def run_terrain_forward_series(
                     )
                 runner = runners[slice_y]
                 case = runner.case_template
-                rhoa = runner.solve_resistivity(_terrain_resistivity_vector(rho_2d, grid))
-                save_terrain_forward_dat(files["dat"], case, rhoa, relative_error=relative_error)
-                save_terrain_forward_npz(files["npz"], case, rhoa, relative_error=relative_error)
-                manifest.append(replace(record, status="ok", rhoa_min=float(np.min(rhoa)), rhoa_max=float(np.max(rhoa))))
+                rhoa = runner.solve_resistivity(
+                    _terrain_resistivity_vector(rho_2d, grid)
+                )
+                save_terrain_forward_dat(
+                    files["dat"], case, rhoa, relative_error=relative_error
+                )
+                save_terrain_forward_npz(
+                    files["npz"], case, rhoa, relative_error=relative_error
+                )
+                manifest.append(
+                    replace(
+                        record,
+                        status="ok",
+                        rhoa_min=float(np.min(rhoa)),
+                        rhoa_max=float(np.max(rhoa)),
+                    )
+                )
             except Exception as exc:
                 if _raise_errors:
                     raise
@@ -746,11 +960,17 @@ def run_terrain_forward_series(
                     step = parse_resistivity_slice_name(path)[1]
                 except ValueError:
                     step = -1
-                failures.append(TerrainForwardRecord(step, str(path), "", "", "failed", error=str(exc)))
+                failures.append(
+                    TerrainForwardRecord(
+                        step, str(path), "", "", "failed", error=str(exc)
+                    )
+                )
     finally:
         for runner in runners.values():
             runner.close()
-    return sorted(manifest, key=lambda record: record.step), sorted(failures, key=lambda record: record.step)
+    return sorted(manifest, key=lambda record: record.step), sorted(
+        failures, key=lambda record: record.step
+    )
 
 
 def run_terrain_forward_file(
@@ -764,5 +984,13 @@ def run_terrain_forward_file(
 ) -> TerrainForwardRecord:
     """Run and save one terrain-forward timestep (errors are raised)."""
 
-    manifest, _ = run_terrain_forward_series([input_file], grid, slope_x, output_dir, y_index=y_index, _raise_errors=True, **options)
+    manifest, _ = run_terrain_forward_series(
+        [input_file],
+        grid,
+        slope_x,
+        output_dir,
+        y_index=y_index,
+        _raise_errors=True,
+        **options,
+    )
     return manifest[0]

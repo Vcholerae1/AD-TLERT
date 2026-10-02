@@ -64,7 +64,9 @@ def _start_sampler():
 
     stop = [False]
     values: list[int] = []
-    thread = threading.Thread(target=_peak_rss_sampler, args=(stop, values), daemon=True)
+    thread = threading.Thread(
+        target=_peak_rss_sampler, args=(stop, values), daemon=True
+    )
     thread.start()
     return stop, values, thread
 
@@ -82,7 +84,9 @@ def _result_payload(project, steps: list[int]) -> dict[str, np.ndarray]:
         centers.append(np.column_stack((center[:, 0], center[:, 2])))
         models.append(np.asarray(mesh.df[column], dtype=float).ravel())
     base = centers[0]
-    if any(item.shape != base.shape or not np.allclose(item, base) for item in centers[1:]):
+    if any(
+        item.shape != base.shape or not np.allclose(item, base) for item in centers[1:]
+    ):
         raise RuntimeError("ResIPy result meshes differ across selected steps")
     return {
         "steps": np.asarray(steps, dtype=np.int32),
@@ -132,14 +136,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mesh-cl-factor", type=float, default=2.0)
     parser.add_argument("--rho-min", type=float, default=10.0)
     parser.add_argument("--rho-max", type=float, default=20000.0)
-    parser.add_argument("--parallel", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--parallel", action=argparse.BooleanOptionalAction, default=False
+    )
     parser.add_argument("--ncores", type=int, default=1)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    root = Path(args.project_root).resolve() if args.project_root else Path(__file__).resolve().parents[2]
+    root = (
+        Path(args.project_root).resolve()
+        if args.project_root
+        else Path(__file__).resolve().parents[2]
+    )
     forward_dir = (root / args.forward_dir).resolve()
     output_dir = (root / args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -167,8 +177,8 @@ def main(argv: list[str] | None = None) -> int:
     load_sec = time.perf_counter() - load_start
 
     for survey in project.surveys:
-        survey.df["resError"] = (
-            float(args.relative_error) * np.maximum(np.abs(survey.df["resist"]), 1.0e-12)
+        survey.df["resError"] = float(args.relative_error) * np.maximum(
+            np.abs(survey.df["resist"]), 1.0e-12
         )
     project.err = True
 

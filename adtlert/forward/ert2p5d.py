@@ -35,7 +35,10 @@ from adtlert.fem import (
     build_p2_element_data,
     robin_boundary_coefficients,
 )
-from adtlert.forward.integration import build_inverse_cosine_weights, survey_wavenumber_bounds
+from adtlert.forward.integration import (
+    build_inverse_cosine_weights,
+    survey_wavenumber_bounds,
+)
 from adtlert.mesh import Mesh
 from adtlert.mesh.core import edge_midpoint_builder
 from adtlert.survey import Survey
@@ -92,16 +95,23 @@ class _SparsePattern:
             )
         indptr, indices = self._device_indices[key]
         with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="Sparse (CSR tensor support|invariant checks)")
+            warnings.filterwarnings(
+                "ignore", message="Sparse (CSR tensor support|invariant checks)"
+            )
             return torch.stack(
                 [
-                    (torch.sparse_csr_tensor(indptr, indices, value, size=self.shape) @ vector.T).T
+                    (
+                        torch.sparse_csr_tensor(indptr, indices, value, size=self.shape)
+                        @ vector.T
+                    ).T
                     for value, vector in zip(values, vectors, strict=True)
                 ]
             )
 
 
-def _sparse_pattern(cell_dofs: np.ndarray, boundary_dofs: np.ndarray, dof_count: int) -> _SparsePattern:
+def _sparse_pattern(
+    cell_dofs: np.ndarray, boundary_dofs: np.ndarray, dof_count: int
+) -> _SparsePattern:
     def local_pairs(connectivity: np.ndarray) -> np.ndarray:
         width = connectivity.shape[1]
         rows = np.repeat(connectivity, width, axis=1).reshape(-1)
@@ -109,9 +119,15 @@ def _sparse_pattern(cell_dofs: np.ndarray, boundary_dofs: np.ndarray, dof_count:
         return np.stack((rows, cols), axis=1)
 
     volume = local_pairs(cell_dofs)
-    unique, inverse = np.unique(np.concatenate((volume, local_pairs(boundary_dofs))), axis=0, return_inverse=True)
+    unique, inverse = np.unique(
+        np.concatenate((volume, local_pairs(boundary_dofs))),
+        axis=0,
+        return_inverse=True,
+    )
     inverse = torch.as_tensor(inverse.reshape(-1), dtype=torch.long)
-    indptr = np.concatenate(([0], np.cumsum(np.bincount(unique[:, 0], minlength=dof_count)))).astype(np.int32)
+    indptr = np.concatenate(
+        ([0], np.cumsum(np.bincount(unique[:, 0], minlength=dof_count)))
+    ).astype(np.int32)
     return _SparsePattern(
         shape=(dof_count, dof_count),
         volume_inverse=inverse[: volume.shape[0]],
@@ -156,7 +172,15 @@ def _bilinear(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Q1 shape values and reference gradients on ``[-1, 1]^2``."""
 
     xi, eta = points[:, 0], points[:, 1]
-    values = 0.25 * np.stack(((1 - xi) * (1 - eta), (1 + xi) * (1 - eta), (1 + xi) * (1 + eta), (1 - xi) * (1 + eta)), -1)
+    values = 0.25 * np.stack(
+        (
+            (1 - xi) * (1 - eta),
+            (1 + xi) * (1 - eta),
+            (1 + xi) * (1 + eta),
+            (1 - xi) * (1 + eta),
+        ),
+        -1,
+    )
     dxi = 0.25 * np.stack((-(1 - eta), 1 - eta, 1 + eta, -(1 + eta)), axis=-1)
     deta = 0.25 * np.stack((-(1 - xi), -(1 + xi), 1 + xi, 1 - xi), axis=-1)
     return values, np.stack((dxi, deta), axis=-1)
@@ -216,7 +240,9 @@ def _quad_templates(mesh: Mesh, quadratic: bool) -> tuple[Tensor, Tensor, Tensor
     if quadratic:
         gauss, gauss_weights = np.polynomial.legendre.leggauss(3)
         points = np.asarray([[x, y] for y in gauss for x in gauss], dtype=dtype)
-        weights = np.asarray([wx * wy for wy in gauss_weights for wx in gauss_weights], dtype=dtype)
+        weights = np.asarray(
+            [wx * wy for wy in gauss_weights for wx in gauss_weights], dtype=dtype
+        )
     else:  # 2x2 Gauss points in counter-clockwise corner order
         g = 1.0 / np.sqrt(3.0)
         points = np.asarray([[-g, -g], [g, -g], [g, g], [-g, g]], dtype=dtype)
@@ -226,21 +252,34 @@ def _quad_templates(mesh: Mesh, quadratic: bool) -> tuple[Tensor, Tensor, Tensor
 
     cell_nodes = np.asarray(mesh.nodes, dtype=dtype)[np.asarray(mesh.cells)]
     jacobians = np.einsum("cid,qia->cqda", cell_nodes, geometry_gradients.astype(dtype))
-    physical = np.einsum("qia,cqab->cqib", gradients.astype(dtype), np.linalg.inv(jacobians))
+    physical = np.einsum(
+        "qia,cqab->cqib", gradients.astype(dtype), np.linalg.inv(jacobians)
+    )
     weighted_det = np.abs(np.linalg.det(jacobians)) * weights
     stiffness = np.einsum("cqid,cqjd,cq->cij", physical, physical, weighted_det)
     values = values.astype(dtype)
     mass = np.einsum("qi,qj,cq->cij", values, values, weighted_det)
     if quadratic:
-        reference = np.asarray([[4.0, 2.0, -1.0], [2.0, 16.0, 2.0], [-1.0, 2.0, 4.0]], dtype=dtype) / 30.0
+        reference = (
+            np.asarray(
+                [[4.0, 2.0, -1.0], [2.0, 16.0, 2.0], [-1.0, 2.0, 4.0]], dtype=dtype
+            )
+            / 30.0
+        )
     else:
         reference = np.asarray([[2.0, 1.0], [1.0, 2.0]], dtype=dtype) / 6.0
-    boundary_mass = np.asarray(mesh.boundary_edge_lengths, dtype=dtype)[:, None, None] * reference
+    boundary_mass = (
+        np.asarray(mesh.boundary_edge_lengths, dtype=dtype)[:, None, None] * reference
+    )
     out = torch.float64 if high else FLOAT_DTYPE
-    return tuple(torch.as_tensor(array, dtype=out) for array in (stiffness, mass, boundary_mass))
+    return tuple(
+        torch.as_tensor(array, dtype=out) for array in (stiffness, mass, boundary_mass)
+    )
 
 
-def _triangle_templates(mesh: Mesh, quadratic: bool, quadrature_order: int) -> tuple[Tensor, Tensor, Tensor]:
+def _triangle_templates(
+    mesh: Mesh, quadratic: bool, quadrature_order: int
+) -> tuple[Tensor, Tensor, Tensor]:
     if quadratic:
         data = build_p2_element_data(mesh)
         return (
@@ -249,7 +288,11 @@ def _triangle_templates(mesh: Mesh, quadratic: bool, quadrature_order: int) -> t
             assemble_local_boundary_mass_p2(mesh.boundary_edge_lengths, 1.0),
         )
     data = build_p1_element_data(mesh, quadrature_order=quadrature_order)
-    return assemble_local_stiffness(data, 1.0), assemble_local_mass(data, 1.0), assemble_local_boundary_mass(mesh, 1.0)
+    return (
+        assemble_local_stiffness(data, 1.0),
+        assemble_local_mass(data, 1.0),
+        assemble_local_boundary_mass(mesh, 1.0),
+    )
 
 
 def _structured_quads(mesh: Mesh) -> Mesh | None:
@@ -263,13 +306,19 @@ def _structured_quads(mesh: Mesh) -> Mesh | None:
     triangles, parents = expanded
     nodes = np.asarray(triangles.nodes, dtype=float)
     pairs: dict[int, list[np.ndarray]] = {}
-    for cell, parent in zip(np.asarray(triangles.cells), np.asarray(parents), strict=True):
+    for cell, parent in zip(
+        np.asarray(triangles.cells), np.asarray(parents), strict=True
+    ):
         pairs.setdefault(int(parent), []).append(cell)
 
     quads = []
     for parent in range(mesh.cell_count):
         pair = pairs.get(parent, [])
-        node_ids = np.unique(np.concatenate(pair)) if len(pair) == 2 else np.empty(0, dtype=int)
+        node_ids = (
+            np.unique(np.concatenate(pair))
+            if len(pair) == 2
+            else np.empty(0, dtype=int)
+        )
         if node_ids.size != 4:
             return None
         order = np.argsort(nodes[node_ids, 0])
@@ -285,7 +334,9 @@ def _structured_quads(mesh: Mesh) -> Mesh | None:
                 left[top(nodes[left, 1])],
             ]
         )
-    return Mesh.from_arrays(triangles.nodes, np.asarray(quads), surface_node_ids=triangles.surface_node_ids)
+    return Mesh.from_arrays(
+        triangles.nodes, np.asarray(quads), surface_node_ids=triangles.surface_node_ids
+    )
 
 
 def _refine_quads(mesh: Mesh) -> tuple[Mesh, np.ndarray]:
@@ -294,40 +345,82 @@ def _refine_quads(mesh: Mesh) -> tuple[Mesh, np.ndarray]:
     nodes, midpoint, _ = edge_midpoint_builder(mesh.nodes)
     cells, parents = [], []
     for parent, (bl, br, tr, tl) in enumerate(np.asarray(mesh.cells).tolist()):
-        b, r, t, l = midpoint(bl, br), midpoint(br, tr), midpoint(tr, tl), midpoint(tl, bl)
+        b, r, t, l = (
+            midpoint(bl, br),
+            midpoint(br, tr),
+            midpoint(tr, tl),
+            midpoint(tl, bl),
+        )
         center = len(nodes)
         nodes.append(0.25 * (nodes[bl] + nodes[br] + nodes[tr] + nodes[tl]))
-        cells += [[bl, b, center, l], [b, br, r, center], [center, r, tr, t], [l, center, t, tl]]
+        cells += [
+            [bl, b, center, l],
+            [b, br, r, center],
+            [center, r, tr, t],
+            [l, center, t, tl],
+        ]
         parents += [parent] * 4
     surface = np.asarray(mesh.surface_node_ids).tolist()
     refined_surface = [surface[0]]
     for start, stop in zip(surface[:-1], surface[1:], strict=True):
         refined_surface += [midpoint(start, stop), stop]
-    refined = Mesh.from_arrays(np.asarray(nodes), np.asarray(cells), surface_node_ids=np.asarray(refined_surface))
+    refined = Mesh.from_arrays(
+        np.asarray(nodes),
+        np.asarray(cells),
+        surface_node_ids=np.asarray(refined_surface),
+    )
     return refined, np.asarray(parents)
 
 
 def _serendipity_topology(mesh: Mesh) -> tuple[Tensor, Tensor, Tensor]:
     nodes, midpoint, _ = edge_midpoint_builder(mesh.nodes)
     cells = [
-        [bl, br, tr, tl, midpoint(bl, br), midpoint(br, tr), midpoint(tr, tl), midpoint(tl, bl)]
+        [
+            bl,
+            br,
+            tr,
+            tl,
+            midpoint(bl, br),
+            midpoint(br, tr),
+            midpoint(tr, tl),
+            midpoint(tl, bl),
+        ]
         for bl, br, tr, tl in np.asarray(mesh.cells).tolist()
     ]
-    boundary = [[a, midpoint(a, b), b] for a, b in np.asarray(mesh.boundary_edges).tolist()]
-    return torch.as_tensor(np.asarray(nodes), dtype=FLOAT_DTYPE), torch.as_tensor(cells), torch.as_tensor(boundary)
+    boundary = [
+        [a, midpoint(a, b), b] for a, b in np.asarray(mesh.boundary_edges).tolist()
+    ]
+    return (
+        torch.as_tensor(np.asarray(nodes), dtype=FLOAT_DTYPE),
+        torch.as_tensor(cells),
+        torch.as_tensor(boundary),
+    )
 
 
-def _points_on_segments(points: np.ndarray, segments: np.ndarray, tol: float) -> np.ndarray:
+def _points_on_segments(
+    points: np.ndarray, segments: np.ndarray, tol: float
+) -> np.ndarray:
     """Point-to-segment incidence mask of shape ``(points, segments)``."""
 
     start, edge = segments[:, 0], segments[:, 1] - segments[:, 0]
     length_sq = np.sum(edge * edge, axis=1)
-    projection = np.sum((points[:, None, :] - start) * edge, axis=2) / np.maximum(length_sq, tol)
-    distance = np.linalg.norm(points[:, None, :] - (start + projection[:, :, None] * edge), axis=2)
-    return (projection >= -tol) & (projection <= 1.0 + tol) & (distance <= tol) & (length_sq > tol)
+    projection = np.sum((points[:, None, :] - start) * edge, axis=2) / np.maximum(
+        length_sq, tol
+    )
+    distance = np.linalg.norm(
+        points[:, None, :] - (start + projection[:, :, None] * edge), axis=2
+    )
+    return (
+        (projection >= -tol)
+        & (projection <= 1.0 + tol)
+        & (distance <= tol)
+        & (length_sq > tol)
+    )
 
 
-def _surface_interpolation(mesh: Mesh, boundary_dofs: Tensor | None, dof_count: int, points, tol: float = 1e-5) -> Tensor:
+def _surface_interpolation(
+    mesh: Mesh, boundary_dofs: Tensor | None, dof_count: int, points, tol: float = 1e-5
+) -> Tensor:
     """Interpolate points on the top surface polyline into linear or quadratic edge DOFs."""
 
     surface_ids = np.asarray(mesh.surface_node_ids)
@@ -338,7 +431,9 @@ def _surface_interpolation(mesh: Mesh, boundary_dofs: Tensor | None, dof_count: 
     midpoints = (
         None
         if boundary_dofs is None
-        else {tuple(sorted((a, b))): m for a, m, b in np.asarray(boundary_dofs).tolist()}
+        else {
+            tuple(sorted((a, b))): m for a, m, b in np.asarray(boundary_dofs).tolist()
+        }
     )
     matrix = np.zeros((points.shape[0], dof_count), dtype=NP_FLOAT_DTYPE)
     for row, point in enumerate(points):
@@ -349,7 +444,9 @@ def _surface_interpolation(mesh: Mesh, boundary_dofs: Tensor | None, dof_count: 
             continue
         segment_ids = np.flatnonzero(hits[row])
         if segment_ids.size == 0:
-            raise ValueError("surface point could not be matched to an auxiliary surface edge")
+            raise ValueError(
+                "surface point could not be matched to an auxiliary surface edge"
+            )
         segment = int(segment_ids[0])
         start, stop = segments[segment]
         edge = stop - start
@@ -374,10 +471,24 @@ def _interpolation(mesh: Mesh, cell_dofs: Tensor, dof_count: int, points) -> Ten
     weights = np.asarray(weights, dtype=NP_FLOAT_DTYPE)
     if cell_dofs.shape[1] == 6:
         l1, l2, l3 = weights.T
-        weights = np.stack((l1 * (2 * l1 - 1), l2 * (2 * l2 - 1), l3 * (2 * l3 - 1), 4 * l1 * l2, 4 * l2 * l3, 4 * l3 * l1), -1)
+        weights = np.stack(
+            (
+                l1 * (2 * l1 - 1),
+                l2 * (2 * l2 - 1),
+                l3 * (2 * l3 - 1),
+                4 * l1 * l2,
+                4 * l2 * l3,
+                4 * l3 * l1,
+            ),
+            -1,
+        )
     dofs = np.asarray(cell_dofs)[np.asarray(cell_ids)]
     matrix = np.zeros((dofs.shape[0], dof_count), dtype=NP_FLOAT_DTYPE)
-    np.add.at(matrix, (np.repeat(np.arange(dofs.shape[0]), dofs.shape[1]), dofs.reshape(-1)), weights.reshape(-1))
+    np.add.at(
+        matrix,
+        (np.repeat(np.arange(dofs.shape[0]), dofs.shape[1]), dofs.reshape(-1)),
+        weights.reshape(-1),
+    )
     return torch.as_tensor(matrix)
 
 
@@ -404,15 +515,28 @@ def _build_discretization(
         if quadratic:
             dof_nodes, cell_dofs, boundary_dofs = _serendipity_topology(geometry)
         else:
-            dof_nodes, cell_dofs, boundary_dofs = geometry.nodes, geometry.cells.long(), geometry.boundary_edges.long()
+            dof_nodes, cell_dofs, boundary_dofs = (
+                geometry.nodes,
+                geometry.cells.long(),
+                geometry.boundary_edges.long(),
+            )
         stiffness, mass, boundary_mass = _quad_templates(geometry, quadratic)
         electrode_matrix = _surface_interpolation(
-            geometry, boundary_dofs if quadratic else None, int(dof_nodes.shape[0]), survey.electrode_positions
+            geometry,
+            boundary_dofs if quadratic else None,
+            int(dof_nodes.shape[0]),
+            survey.electrode_positions,
         )
-        boundary_geometries = torch.zeros((wavenumbers.shape[0], geometry.boundary_edges.shape[0]), dtype=FLOAT_DTYPE)
+        boundary_geometries = torch.zeros(
+            (wavenumbers.shape[0], geometry.boundary_edges.shape[0]), dtype=FLOAT_DTYPE
+        )
     else:
         geometry = mesh
-        if auxiliary and not quadratic and (expanded := geometry.expand_columnar_cells()) is not None:
+        if (
+            auxiliary
+            and not quadratic
+            and (expanded := geometry.expand_columnar_cells()) is not None
+        ):
             geometry, expanded_parents = expanded
             parents = parents[np.asarray(expanded_parents)]
         if refine:
@@ -422,15 +546,28 @@ def _build_discretization(
             dof_nodes, cell_dofs, boundary_dofs = geometry.build_quadratic_topology()
             cell_dofs, boundary_dofs = cell_dofs.long(), boundary_dofs.long()
         else:
-            dof_nodes, cell_dofs, boundary_dofs = geometry.nodes, geometry.cells.long(), geometry.boundary_edges.long()
+            dof_nodes, cell_dofs, boundary_dofs = (
+                geometry.nodes,
+                geometry.cells.long(),
+                geometry.boundary_edges.long(),
+            )
         if geometry.is_triangle_mesh:
-            stiffness, mass, boundary_mass = _triangle_templates(geometry, quadratic, quadrature_order)
+            stiffness, mass, boundary_mass = _triangle_templates(
+                geometry, quadratic, quadrature_order
+            )
         else:
             stiffness, mass, boundary_mass = _quad_templates(geometry, quadratic)
-        electrode_matrix = _interpolation(geometry, cell_dofs, int(dof_nodes.shape[0]), survey.electrode_positions)
-        center = np.mean(np.asarray(survey.electrode_positions, dtype=float), axis=0).astype(NP_FLOAT_DTYPE)
+        electrode_matrix = _interpolation(
+            geometry, cell_dofs, int(dof_nodes.shape[0]), survey.electrode_positions
+        )
+        center = np.mean(
+            np.asarray(survey.electrode_positions, dtype=float), axis=0
+        ).astype(NP_FLOAT_DTYPE)
         boundary_geometries = torch.stack(
-            [robin_boundary_coefficients(geometry, 1.0, center, float(k)) for k in wavenumbers.tolist()]
+            [
+                robin_boundary_coefficients(geometry, 1.0, center, float(k))
+                for k in wavenumbers.tolist()
+            ]
         )
 
     return _Discretization(
@@ -445,7 +582,9 @@ def _build_discretization(
         boundary_mass=boundary_mass,
         boundary_geometries=boundary_geometries,
         electrode_matrix=electrode_matrix,
-        pattern=_sparse_pattern(np.asarray(cell_dofs), np.asarray(boundary_dofs), int(dof_nodes.shape[0])),
+        pattern=_sparse_pattern(
+            np.asarray(cell_dofs), np.asarray(boundary_dofs), int(dof_nodes.shape[0])
+        ),
         spd=not auxiliary,
     )
 
@@ -485,7 +624,9 @@ def _check_finite(values: Tensor, context: str) -> None:
         raise FloatingPointError(f"{context} produced non-finite values")
 
 
-def _halfspace_primary(nodes: np.ndarray, source: np.ndarray, wavenumber: float, surface: float) -> np.ndarray:
+def _halfspace_primary(
+    nodes: np.ndarray, source: np.ndarray, wavenumber: float, surface: float
+) -> np.ndarray:
     """Analytic unit-resistivity half-space primary field (image source when buried)."""
 
     distance = np.linalg.norm(nodes - source, axis=1)
@@ -496,14 +637,19 @@ def _halfspace_primary(nodes: np.ndarray, source: np.ndarray, wavenumber: float,
         return values
     mirrored = np.linalg.norm(nodes - (source[0], 2.0 * surface - source[1]), axis=1)
     valid = (distance > 1e-12) & (mirrored > 1e-12)
-    values[valid] = (besselk0(distance[valid] * wavenumber) + besselk0(mirrored[valid] * wavenumber)) / (2.0 * np.pi)
+    values[valid] = (
+        besselk0(distance[valid] * wavenumber) + besselk0(mirrored[valid] * wavenumber)
+    ) / (2.0 * np.pi)
     return values
 
 
 def _exact_node_indices(dof_nodes, points, tol: float = 1e-6) -> np.ndarray:
     """Indices of DOF nodes coinciding with ``points``."""
 
-    dof_nodes, points = np.asarray(dof_nodes, dtype=float), np.asarray(points, dtype=float)
+    dof_nodes, points = (
+        np.asarray(dof_nodes, dtype=float),
+        np.asarray(points, dtype=float),
+    )
     lookup: dict[tuple[int, ...], int] = {}
     for node_id, node in enumerate(dof_nodes):
         lookup.setdefault(tuple(np.rint(node / tol).astype(np.int64).tolist()), node_id)
@@ -514,7 +660,9 @@ def _exact_node_indices(dof_nodes, points, tol: float = 1e-6) -> np.ndarray:
             distances = np.linalg.norm(dof_nodes - point, axis=1)
             nearest = int(np.argmin(distances))
             if distances[nearest] > tol:
-                raise ValueError("point does not coincide with a quadrilateral auxiliary node")
+                raise ValueError(
+                    "point does not coincide with a quadrilateral auxiliary node"
+                )
         indices[row] = nearest
     return indices
 
@@ -524,7 +672,9 @@ def _cupy():
         import cupy as cp
         import cupyx.scipy.sparse as cupy_sparse
     except ImportError as exc:
-        raise ImportError("ERTForward2p5D requires CuPy and cuDSS on a CUDA-capable system") from exc
+        raise ImportError(
+            "ERTForward2p5D requires CuPy and cuDSS on a CUDA-capable system"
+        ) from exc
     return cp, cupy_sparse
 
 
@@ -532,15 +682,25 @@ def _cudss_solver(matrices, rhs, *, spd: bool):
     try:
         from nvmath.sparse import advanced
     except ImportError as exc:
-        raise ImportError("ERTForward2p5D requires nvmath-python to use the cuDSS backend") from exc
-    matrix_type = advanced.DirectSolverMatrixType.SPD if spd else advanced.DirectSolverMatrixType.SYMMETRIC
-    options = advanced.DirectSolverOptions(sparse_system_type=matrix_type, logger=_CUDSS_LOGGER, blocking=True)
+        raise ImportError(
+            "ERTForward2p5D requires nvmath-python to use the cuDSS backend"
+        ) from exc
+    matrix_type = (
+        advanced.DirectSolverMatrixType.SPD
+        if spd
+        else advanced.DirectSolverMatrixType.SYMMETRIC
+    )
+    options = advanced.DirectSolverOptions(
+        sparse_system_type=matrix_type, logger=_CUDSS_LOGGER, blocking=True
+    )
     solver = advanced.DirectSolver(matrices, rhs, options=options)
     if not spd:
         if hasattr(advanced, "DirectSolverAlgType"):  # nvmath-python < 1.0
             solver.plan_config.algorithm = advanced.DirectSolverAlgType.ALG_1
         else:
-            solver.plan_config.reordering_algorithm = advanced.DirectSolverReorderingAlg.NESTED_DISSECTION
+            solver.plan_config.reordering_algorithm = (
+                advanced.DirectSolverReorderingAlg.NESTED_DISSECTION
+            )
     solver.plan()
     return solver
 
@@ -615,7 +775,9 @@ class ERTForward2p5D:
     normal_field_cache_max_entries: int = 8
     _cache: dict = field(default_factory=dict, init=False, repr=False)
     _cudss_state: dict = field(default_factory=dict, init=False, repr=False)
-    _field_cache: OrderedDict = field(default_factory=OrderedDict, init=False, repr=False)
+    _field_cache: OrderedDict = field(
+        default_factory=OrderedDict, init=False, repr=False
+    )
 
     @classmethod
     def from_mesh_survey(
@@ -630,15 +792,26 @@ class ERTForward2p5D:
         normal_field_cache_max_entries: int = 8,
     ) -> ERTForward2p5D:
         if not torch.cuda.is_available():
-            raise RuntimeError("ADTLERT requires an NVIDIA GPU with CUDA (cuDSS sparse solves)")
-        gf_mode = _choice(topographic_geometric_factor_mode, ("analytic", "numerical"), "topographic_geometric_factor_mode")
+            raise RuntimeError(
+                "ADTLERT requires an NVIDIA GPU with CUDA (cuDSS sparse solves)"
+            )
+        gf_mode = _choice(
+            topographic_geometric_factor_mode,
+            ("analytic", "numerical"),
+            "topographic_geometric_factor_mode",
+        )
         if int(normal_field_cache_max_entries) < 0:
             raise ValueError("normal_field_cache_max_entries must be non-negative")
         quadrature = build_inverse_cosine_weights(*survey_wavenumber_bounds(survey))
 
         def build(name, **options):
             return _build_discretization(
-                name, mesh, survey, quadrature.wavenumbers, quadrature_order=quadrature_order, **options
+                name,
+                mesh,
+                survey,
+                quadrature.wavenumbers,
+                quadrature_order=quadrature_order,
+                **options,
             )
 
         terrain = not mesh.is_flat_surface
@@ -646,11 +819,21 @@ class ERTForward2p5D:
         if terrain:
             # Terrain solves run in float64; historically this also switches Torch's default dtype.
             torch.set_default_dtype(torch.float64)
-            discretization = build("primary", auxiliary=True, refine=numerical_h2_refined)
-            potential = build("primary_potential", auxiliary=True, refine=numerical_h2_refined, quadratic=True)
+            discretization = build(
+                "primary", auxiliary=True, refine=numerical_h2_refined
+            )
+            potential = build(
+                "primary_potential",
+                auxiliary=True,
+                refine=numerical_h2_refined,
+                quadratic=True,
+            )
             if gf_mode == "numerical":
                 geometric = build(
-                    "geometric", auxiliary=True, refine=numerical_h2_refined, quadratic=numerical_p2_refined
+                    "geometric",
+                    auxiliary=True,
+                    refine=numerical_h2_refined,
+                    quadratic=numerical_p2_refined,
                 )
         else:
             discretization = build("native", auxiliary=False)
@@ -659,7 +842,9 @@ class ERTForward2p5D:
         nodes = np.asarray(mesh.nodes, dtype=float)
         distances = np.linalg.norm(nodes[None, :, :] - positions[:, None, :], axis=2)
         nearest = np.argmin(distances, axis=1)
-        source_node_ids = np.where(distances[np.arange(len(nearest)), nearest] <= 1e-2, nearest, -1)
+        source_node_ids = np.where(
+            distances[np.arange(len(nearest)), nearest] <= 1e-2, nearest, -1
+        )
 
         return cls(
             mesh=mesh,
@@ -708,24 +893,36 @@ class ERTForward2p5D:
     def _on(self, name: str, tensor_fn, device: torch.device) -> Tensor:
         return self._cached((name, str(device)), lambda: tensor_fn().to(device))
 
-    def _abmn(self, device: torch.device | str = "cpu") -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        quads = self._on("abmn", lambda: self.survey.measurements.long(), torch.device(device))
+    def _abmn(
+        self, device: torch.device | str = "cpu"
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        quads = self._on(
+            "abmn", lambda: self.survey.measurements.long(), torch.device(device)
+        )
         return quads[:, 0], quads[:, 1], quads[:, 2], quads[:, 3]
 
     # -- assembly -----------------------------------------------------------
 
-    def _volume_templates(self, d: _Discretization, device: torch.device | str = "cpu") -> Tensor:
+    def _volume_templates(
+        self, d: _Discretization, device: torch.device | str = "cpu"
+    ) -> Tensor:
         """``K + k_w^2 M`` per wavenumber, shape ``(W, cells, k, k)``."""
 
         def build():
             wavenumber_sq = torch.square(self.wavenumbers.to(self.dtype))
-            return d.stiffness.to(self.dtype) + wavenumber_sq[:, None, None, None] * d.mass.to(self.dtype)
+            return d.stiffness.to(self.dtype) + wavenumber_sq[
+                :, None, None, None
+            ] * d.mass.to(self.dtype)
 
         return self._on(f"{d.name}.volume_templates", build, torch.device(device))
 
-    def _boundary_templates(self, d: _Discretization, device: torch.device | str = "cpu") -> Tensor:
+    def _boundary_templates(
+        self, d: _Discretization, device: torch.device | str = "cpu"
+    ) -> Tensor:
         def build():
-            return d.boundary_geometries.to(self.dtype)[:, :, None, None] * d.boundary_mass.to(self.dtype)
+            return d.boundary_geometries.to(self.dtype)[
+                :, :, None, None
+            ] * d.boundary_mass.to(self.dtype)
 
         return self._on(f"{d.name}.boundary_templates", build, torch.device(device))
 
@@ -733,21 +930,33 @@ class ERTForward2p5D:
         """CSR values of ``A_w(conductivity)`` for every wavenumber, shape ``(W, nnz)``."""
 
         sigma = conductivity.to(self.dtype)
-        volume = sigma[d.parent_cell_ids][None, :, None, None] * self._volume_templates(d)
-        boundary = (sigma[d.parent_cell_ids[d.boundary_cells]][None, :] * d.boundary_geometries.to(self.dtype))[
-            :, :, None, None
-        ] * d.boundary_mass.to(self.dtype)
+        volume = sigma[d.parent_cell_ids][None, :, None, None] * self._volume_templates(
+            d
+        )
+        boundary = (
+            sigma[d.parent_cell_ids[d.boundary_cells]][None, :]
+            * d.boundary_geometries.to(self.dtype)
+        )[:, :, None, None] * d.boundary_mass.to(self.dtype)
         count = self.wavenumbers.shape[0]
         values = torch.zeros((count, d.pattern.nnz), dtype=self.dtype)
         values.index_add_(1, d.pattern.volume_inverse, volume.reshape(count, -1))
-        return values.index_add_(1, d.pattern.boundary_inverse, boundary.reshape(count, -1))
+        return values.index_add_(
+            1, d.pattern.boundary_inverse, boundary.reshape(count, -1)
+        )
 
     def _sigma(self, conductivity) -> Tensor:
         return _cell_vector(conductivity, self.mesh.cell_count)
 
     # -- linear solves ------------------------------------------------------
 
-    def _solve(self, d: _Discretization, values: Tensor, rhs: Tensor, *, refactorize: bool = True) -> Tensor:
+    def _solve(
+        self,
+        d: _Discretization,
+        values: Tensor,
+        rhs: Tensor,
+        *,
+        refactorize: bool = True,
+    ) -> Tensor:
         """Batched sparse solve ``A_b X_b = rhs_b``; plans are reused per pattern and RHS shape.
 
         Matrix buffers are refreshed in place, so the symbolic analysis survives across
@@ -755,16 +964,30 @@ class ERTForward2p5D:
         """
 
         cp, cupy_sparse = _cupy()
-        values_cp, rhs_cp = (cp.from_dlpack(tensor.to(_CUDA, self.dtype).contiguous()) for tensor in (values, rhs))
+        values_cp, rhs_cp = (
+            cp.from_dlpack(tensor.to(_CUDA, self.dtype).contiguous())
+            for tensor in (values, rhs)
+        )
         key = (d.name, tuple(rhs.shape))
         state = self._cudss_state.get(key)
         if state is None:
-            indptr, indices = cp.asarray(d.pattern.indptr), cp.asarray(d.pattern.indices)
+            indptr, indices = (
+                cp.asarray(d.pattern.indptr),
+                cp.asarray(d.pattern.indices),
+            )
             data = [cp.array(value, copy=True) for value in values_cp]
-            matrices = [cupy_sparse.csr_matrix((value, indices, indptr), shape=d.pattern.shape) for value in data]
+            matrices = [
+                cupy_sparse.csr_matrix((value, indices, indptr), shape=d.pattern.shape)
+                for value in data
+            ]
             rhs_buffer = rhs_cp.copy()
             rhs_view = rhs_buffer.transpose((0, 2, 1))
-            state = {"data": data, "matrices": matrices, "rhs": rhs_buffer, "rhs_view": rhs_view}
+            state = {
+                "data": data,
+                "matrices": matrices,
+                "rhs": rhs_buffer,
+                "rhs_view": rhs_view,
+            }
             state["solver"] = _cudss_solver(matrices, rhs_view, spd=d.spd)
             self._cudss_state[key] = state
             refactorize = True
@@ -788,7 +1011,14 @@ class ERTForward2p5D:
             ("version", _TERRAIN_CACHE_VERSION),
             ("name", name),
             ("dtype", str(self.dtype)),
-            ("options", (self.numerical_h2_refined, self.numerical_p2_refined, self.topographic_geometric_factor_mode)),
+            (
+                "options",
+                (
+                    self.numerical_h2_refined,
+                    self.numerical_p2_refined,
+                    self.topographic_geometric_factor_mode,
+                ),
+            ),
         ):
             digest.update(f"{label}={value!r};".encode())
         for array in (
@@ -807,14 +1037,20 @@ class ERTForward2p5D:
 
         def load_or_compute():
             path = self._disk_path(name, d)
-            shape = (self.wavenumbers.shape[0], self.survey.electrode_count, d.dof_count)
+            shape = (
+                self.wavenumbers.shape[0],
+                self.survey.electrode_count,
+                d.dof_count,
+            )
             if path is not None and path.exists():
                 try:
                     with np.load(path, allow_pickle=False) as payload:
                         cached = payload["value"]
                     if cached.shape == shape:
                         return torch.as_tensor(cached, dtype=self.dtype)
-                except Exception:  # corrupt or partial cache files are simply recomputed
+                except (
+                    Exception
+                ):  # corrupt or partial cache files are simply recomputed
                     pass
             value = compute()
             if path is not None:
@@ -833,8 +1069,12 @@ class ERTForward2p5D:
         """Unit-conductivity potentials of every electrode on ``d``."""
 
         def compute():
-            values = self._assemble(d, torch.ones(self.mesh.cell_count, dtype=FLOAT_DTYPE))
-            rhs = d.electrode_matrix.to(self.dtype).expand(self.wavenumbers.shape[0], -1, -1)
+            values = self._assemble(
+                d, torch.ones(self.mesh.cell_count, dtype=FLOAT_DTYPE)
+            )
+            rhs = d.electrode_matrix.to(self.dtype).expand(
+                self.wavenumbers.shape[0], -1, -1
+            )
             return self._solve(d, values, rhs)
 
         return self._disk_cached(f"{d.name}_sub_potentials", d, compute)
@@ -846,10 +1086,14 @@ class ERTForward2p5D:
             potential = self.primary_potential_discretization
 
             def project():
-                selection = _exact_node_indices(potential.dof_nodes, self.discretization.dof_nodes)
+                selection = _exact_node_indices(
+                    potential.dof_nodes, self.discretization.dof_nodes
+                )
                 return self._unit_potentials(potential)[..., torch.as_tensor(selection)]
 
-            return self._disk_cached("auxiliary_sub_potentials", self.discretization, project)
+            return self._disk_cached(
+                "auxiliary_sub_potentials", self.discretization, project
+            )
         return self._cached("analytic_primary", self._analytic_primary)
 
     def _analytic_primary(self) -> Tensor:
@@ -859,16 +1103,28 @@ class ERTForward2p5D:
         node_ids = self.source_node_ids.tolist()
         radii = {}
         for node in set(node_ids) - {-1}:
-            neighbors = np.setdiff1d(np.unique(cells[np.any(cells == node, axis=1)]), [node])
-            radii[node] = np.min(np.linalg.norm(nodes[neighbors] - nodes[node], axis=1)) if neighbors.size else None
+            neighbors = np.setdiff1d(
+                np.unique(cells[np.any(cells == node, axis=1)]), [node]
+            )
+            radii[node] = (
+                np.min(np.linalg.norm(nodes[neighbors] - nodes[node], axis=1))
+                if neighbors.size
+                else None
+            )
         positions = np.asarray(self.survey.electrode_positions, dtype=float)
         primary = np.zeros((self.wavenumbers.shape[0], len(positions), nodes.shape[0]))
         for w, wavenumber in enumerate(self.wavenumbers.double().tolist()):
             for s, (source, node) in enumerate(zip(positions, node_ids, strict=True)):
                 primary[w, s] = _halfspace_primary(nodes, source, wavenumber, surface)
-                if node >= 0:  # pyGIMLi's singular value: K0 at one sixth of the nearest-neighbor distance
+                if (
+                    node >= 0
+                ):  # pyGIMLi's singular value: K0 at one sixth of the nearest-neighbor distance
                     radius = radii[node]
-                    primary[w, s, node] = 0.0 if radius is None else besselk0(radius / 6.0 * wavenumber) / np.pi
+                    primary[w, s, node] = (
+                        0.0
+                        if radius is None
+                        else besselk0(radius / 6.0 * wavenumber) / np.pi
+                    )
         return torch.as_tensor(primary, dtype=FLOAT_DTYPE)
 
     def _reference_rhs(self) -> Tensor:
@@ -886,7 +1142,10 @@ class ERTForward2p5D:
 
         def node_cell_weights():
             cells = np.asarray(self.mesh.cells)
-            weights = np.zeros((self.survey.electrode_count, self.mesh.cell_count), dtype=NP_FLOAT_DTYPE)
+            weights = np.zeros(
+                (self.survey.electrode_count, self.mesh.cell_count),
+                dtype=NP_FLOAT_DTYPE,
+            )
             counts = np.ones(self.survey.electrode_count, dtype=NP_FLOAT_DTYPE)
             for source, node in enumerate(self.source_node_ids.tolist()):
                 if node >= 0:
@@ -895,8 +1154,12 @@ class ERTForward2p5D:
             return torch.as_tensor(weights), torch.as_tensor(counts)
 
         weights, counts = self._cached("source_cell_weights", node_cell_weights)
-        node_rho = torch.exp(torch.einsum("ec,c->e", weights, -torch.log(sigma)) / counts)
-        return torch.where(self.source_node_ids >= 0, node_rho, 1.0 / sigma[self.source_cell_ids])
+        node_rho = torch.exp(
+            torch.einsum("ec,c->e", weights, -torch.log(sigma)) / counts
+        )
+        return torch.where(
+            self.source_node_ids >= 0, node_rho, 1.0 / sigma[self.source_cell_ids]
+        )
 
     # -- field solves -------------------------------------------------------
 
@@ -904,7 +1167,10 @@ class ERTForward2p5D:
         if self.normal_field_cache_max_entries < 1:
             return None
         host = np.ascontiguousarray(sigma.detach().cpu().numpy())
-        return hashlib.blake2b(host.view(np.uint8), digest_size=16).digest() + host.dtype.str.encode()
+        return (
+            hashlib.blake2b(host.view(np.uint8), digest_size=16).digest()
+            + host.dtype.str.encode()
+        )
 
     def _fields(self, conductivity) -> _Fields:
         """Total fields for a conductivity model, served from an LRU cache when possible."""
@@ -920,7 +1186,9 @@ class ERTForward2p5D:
 
         d = self.discretization
         values = self._assemble(d, sigma)
-        primary = self._unit_primary() * self._source_resistivities(sigma)[None, :, None]
+        primary = (
+            self._unit_primary() * self._source_resistivities(sigma)[None, :, None]
+        )
         rhs = self._reference_rhs() - d.pattern.matvec(values, primary)
         fields = _Fields(values, self._solve(d, values, rhs) + primary)
         _check_finite(fields.total, "total fields")
@@ -951,7 +1219,9 @@ class ERTForward2p5D:
         def build():
             a, b, m, n = self._abmn()
             electrodes = self.discretization.electrode_matrix
-            return (electrodes[m] - electrodes[n]).to(self.dtype), (electrodes[a] - electrodes[b]).to(self.dtype)
+            return (electrodes[m] - electrodes[n]).to(self.dtype), (
+                electrodes[a] - electrodes[b]
+            ).to(self.dtype)
 
         return self._cached("receivers", build)
 
@@ -963,16 +1233,23 @@ class ERTForward2p5D:
         normal_receiver, current_receiver = self._receivers()
         normal = integrated @ normal_receiver.T
         reciprocal = integrated @ current_receiver.T
-        return normal[a, rows] - normal[b, rows], reciprocal[m, rows] - reciprocal[n, rows]
+        return normal[a, rows] - normal[b, rows], reciprocal[m, rows] - reciprocal[
+            n, rows
+        ]
 
     def _adjoint_rhs(self, cotangent: Tensor, *, reciprocal: bool = False) -> Tensor:
         """Transpose of the (reciprocal) measurement map for ``(Q, D)`` cotangents → ``(W, Q*E, dofs)``."""
 
         a, b, m, n = self._abmn()
         normal_receiver, current_receiver = self._receivers()
-        positive, negative, receiver = (m, n, current_receiver) if reciprocal else (a, b, normal_receiver)
+        positive, negative, receiver = (
+            (m, n, current_receiver) if reciprocal else (a, b, normal_receiver)
+        )
         weighted = cotangent.to(self.dtype)[:, :, None] * receiver[None]
-        sources = torch.zeros((cotangent.shape[0], self.survey.electrode_count, receiver.shape[1]), dtype=self.dtype)
+        sources = torch.zeros(
+            (cotangent.shape[0], self.survey.electrode_count, receiver.shape[1]),
+            dtype=self.dtype,
+        )
         sources.index_add_(1, positive, weighted).index_add_(1, negative, -weighted)
         rhs = self.weights.to(self.dtype)[:, None, None, None] * sources[None]
         return rhs.reshape(self.wavenumbers.shape[0], -1, receiver.shape[1])
@@ -1002,12 +1279,16 @@ class ERTForward2p5D:
         sources = potentials[a] - potentials[b]
         return 1.0 / (sources[rows, m] - sources[rows, n])
 
-    def _response(self, integrated: Tensor, normal: Tensor, reciprocal: Tensor, currents) -> ForwardResponse:
+    def _response(
+        self, integrated: Tensor, normal: Tensor, reciprocal: Tensor, currents
+    ) -> ForwardResponse:
         resistance = self._combine(normal, reciprocal)
         current = torch.as_tensor(currents, dtype=FLOAT_DTYPE)
         electrode_matrix = self.discretization.electrode_matrix.to(integrated.dtype)
         return ForwardResponse(
-            apparent_resistivity=torch.abs(self._geometric_factors()) * resistance / current,
+            apparent_resistivity=torch.abs(self._geometric_factors())
+            * resistance
+            / current,
             resistance=resistance,
             electrode_potentials=integrated @ electrode_matrix.T,
             integrated_potentials=integrated,
@@ -1039,7 +1320,11 @@ class ERTForward2p5D:
         """Return apparent resistivity values without allocating a ForwardResponse."""
 
         current = torch.as_tensor(currents, dtype=FLOAT_DTYPE)
-        return torch.abs(self._geometric_factors()) * self.resistance(conductivity) / current
+        return (
+            torch.abs(self._geometric_factors())
+            * self.resistance(conductivity)
+            / current
+        )
 
     def apparent_resistivity_series(self, conductivities, currents=1.0) -> Tensor:
         """Apparent resistivity for a ``(n_steps, n_cells)`` model series (currents may be per step)."""
@@ -1048,7 +1333,9 @@ class ERTForward2p5D:
         current = torch.as_tensor(currents, dtype=FLOAT_DTYPE)
         return torch.stack(
             [
-                self.apparent_resistivity_values(model, current[step] if current.ndim == 2 else current)
+                self.apparent_resistivity_values(
+                    model, current[step] if current.ndim == 2 else current
+                )
                 for step, model in enumerate(models)
             ]
         )
@@ -1056,7 +1343,9 @@ class ERTForward2p5D:
     def _series(self, conductivities) -> Tensor:
         models = torch.as_tensor(conductivities, dtype=FLOAT_DTYPE)
         if models.ndim != 2 or models.shape[1] != self.mesh.cell_count:
-            raise ValueError(f"conductivities must have shape (n_steps, {self.mesh.cell_count})")
+            raise ValueError(
+                f"conductivities must have shape (n_steps, {self.mesh.cell_count})"
+            )
         return models
 
     def prepare(self, conductivity=None, *, include_solver_state: bool = True) -> None:
@@ -1067,11 +1356,17 @@ class ERTForward2p5D:
         self._receivers()
         self._geometric_factors()
         if include_solver_state:
-            self._fields(torch.ones(self.mesh.cell_count) if conductivity is None else conductivity)
+            self._fields(
+                torch.ones(self.mesh.cell_count)
+                if conductivity is None
+                else conductivity
+            )
 
     # -- derivatives --------------------------------------------------------
 
-    def _target_cells(self, cell_parameter_ids, parameter_count) -> tuple[np.ndarray, int]:
+    def _target_cells(
+        self, cell_parameter_ids, parameter_count
+    ) -> tuple[np.ndarray, int]:
         """Map discretization cells to output columns (forward cells or inversion parameters)."""
 
         parents = self.discretization.parent_cell_ids.numpy()
@@ -1079,15 +1374,25 @@ class ERTForward2p5D:
             if parameter_count is not None:
                 raise ValueError("parameter_count requires cell_parameter_ids")
             return parents, self.mesh.cell_count
-        ids = np.asarray(cell_parameter_ids.cpu() if isinstance(cell_parameter_ids, Tensor) else cell_parameter_ids)
+        ids = np.asarray(
+            cell_parameter_ids.cpu()
+            if isinstance(cell_parameter_ids, Tensor)
+            else cell_parameter_ids
+        )
         ids = ids.astype(np.int64).reshape(-1)
         if ids.shape != (self.mesh.cell_count,):
-            raise ValueError(f"cell_parameter_ids must have shape ({self.mesh.cell_count},)")
+            raise ValueError(
+                f"cell_parameter_ids must have shape ({self.mesh.cell_count},)"
+            )
         if np.any(ids < -1) or not np.any(ids >= 0):
-            raise ValueError("cell_parameter_ids may only contain -1 or non-negative ids, with at least one active")
+            raise ValueError(
+                "cell_parameter_ids may only contain -1 or non-negative ids, with at least one active"
+            )
         count = int(ids.max()) + 1 if parameter_count is None else int(parameter_count)
         if count <= int(ids.max()):
-            raise ValueError("parameter_count is smaller than the largest cell parameter id")
+            raise ValueError(
+                "parameter_count is smaller than the largest cell parameter id"
+            )
         return ids[parents], count
 
     def _active_targets(self, targets: np.ndarray, device: torch.device):
@@ -1097,12 +1402,18 @@ class ERTForward2p5D:
 
         def build():
             active = np.flatnonzero(targets >= 0)
-            cells = None if active.size == targets.size else torch.as_tensor(active, device=device)
+            cells = (
+                None
+                if active.size == targets.size
+                else torch.as_tensor(active, device=device)
+            )
             return cells, torch.as_tensor(targets[active], device=device)
 
         return self._cached(("targets", digest, str(device)), build)
 
-    def _cell_gradient(self, phi: Tensor, lam: Tensor, *, robin: bool = True, targets=None, count=None) -> Tensor:
+    def _cell_gradient(
+        self, phi: Tensor, lam: Tensor, *, robin: bool = True, targets=None, count=None
+    ) -> Tensor:
         """``-sum_w lam^T dA_w/dsigma phi`` per output column; ``lam`` may carry a leading batch axis.
 
         The dense contraction runs on the GPU when one is available.
@@ -1118,17 +1429,28 @@ class ERTForward2p5D:
             templates, cell_dofs = templates[:, active], cell_dofs[active]
         phi, lam = phi.to(device), lam.to(device)
         batch = "q" if lam.ndim == 4 else ""
-        gradient = -torch.einsum(f"w{batch}sci,wcij,wscj->{batch}c", lam[..., cell_dofs], templates, phi[..., cell_dofs])
+        gradient = -torch.einsum(
+            f"w{batch}sci,wcij,wscj->{batch}c",
+            lam[..., cell_dofs],
+            templates,
+            phi[..., cell_dofs],
+        )
         if robin:
-            boundary_dofs = self._on(f"{d.name}.boundary_dofs", lambda: d.boundary_dofs, device)
+            boundary_dofs = self._on(
+                f"{d.name}.boundary_dofs", lambda: d.boundary_dofs, device
+            )
             boundary = -torch.einsum(
                 f"w{batch}sbi,wbij,wsbj->{batch}b",
                 lam[..., boundary_dofs],
                 self._boundary_templates(d, device),
                 phi[..., boundary_dofs],
             )
-            gradient = gradient.index_add(gradient.ndim - 1, d.boundary_cells.to(device), boundary)
-        out = torch.zeros((*gradient.shape[:-1], count), dtype=gradient.dtype, device=device)
+            gradient = gradient.index_add(
+                gradient.ndim - 1, d.boundary_cells.to(device), boundary
+            )
+        out = torch.zeros(
+            (*gradient.shape[:-1], count), dtype=gradient.dtype, device=device
+        )
         return out.index_add_(out.ndim - 1, columns, gradient).cpu()
 
     def vjp(self, conductivity, cotangent) -> Tensor:
@@ -1136,8 +1458,15 @@ class ERTForward2p5D:
 
         fields, _, normal, reciprocal = self._measure(conductivity)
         sign, scale = self._combine_scale(normal, reciprocal)
-        common = 0.5 * _measurement_vector(cotangent, self.survey.measurement_count, self.dtype) * sign / scale
-        rhs = self._adjoint_rhs((common * reciprocal)[None]) + self._adjoint_rhs((common * normal)[None], reciprocal=True)
+        common = (
+            0.5
+            * _measurement_vector(cotangent, self.survey.measurement_count, self.dtype)
+            * sign
+            / scale
+        )
+        rhs = self._adjoint_rhs((common * reciprocal)[None]) + self._adjoint_rhs(
+            (common * normal)[None], reciprocal=True
+        )
         lam = self._solve(self.discretization, fields.values, rhs)
         _check_finite(lam, "adjoint fields")
         gradient = self._cell_gradient(fields.on(self._device), lam)
@@ -1149,14 +1478,20 @@ class ERTForward2p5D:
 
         d = self.discretization
         fields, _, normal, reciprocal = self._measure(conductivity)
-        tangent_rhs = -d.pattern.matvec(self._assemble(d, self._sigma(delta_conductivity)), fields.total)
+        tangent_rhs = -d.pattern.matvec(
+            self._assemble(d, self._sigma(delta_conductivity)), fields.total
+        )
         delta = self._solve(d, fields.values, tangent_rhs)
         _check_finite(delta, "tangent fields")
         delta_normal, delta_reciprocal = self._normal_reciprocal(self._integrate(delta))
         sign, scale = self._combine_scale(normal, reciprocal)
-        return 0.5 * sign * (delta_normal * reciprocal + normal * delta_reciprocal) / scale
+        return (
+            0.5 * sign * (delta_normal * reciprocal + normal * delta_reciprocal) / scale
+        )
 
-    def normal_vjp(self, conductivity, cotangent, *, cell_parameter_ids=None, parameter_count=None) -> Tensor:
+    def normal_vjp(
+        self, conductivity, cotangent, *, cell_parameter_ids=None, parameter_count=None
+    ) -> Tensor:
         """Transpose of the normal-quadrupole sensitivity (see :meth:`normal_jvp`).
 
         ``cell_parameter_ids`` fuses the aggregation from forward cells into inversion
@@ -1166,7 +1501,9 @@ class ERTForward2p5D:
         targets, count = self._target_cells(cell_parameter_ids, parameter_count)
         device = self._device
         phi = self._fields(conductivity).on(device)
-        weights = _measurement_vector(cotangent, self.survey.measurement_count, phi.dtype).to(device)
+        weights = _measurement_vector(
+            cotangent, self.survey.measurement_count, phi.dtype
+        ).to(device)
         a, b, m, n = self._abmn(device)
         sources = self.survey.electrode_count
         pairs = torch.zeros(sources * sources, dtype=phi.dtype, device=device).index_add_(
@@ -1175,7 +1512,9 @@ class ERTForward2p5D:
         ).reshape(sources, sources)  # fmt: skip
         current = torch.einsum("ef,wfn->wen", pairs, phi)
         receiver = self.weights.to(device, phi.dtype)[:, None, None] * phi
-        gradient = self._cell_gradient(current, receiver, robin=False, targets=targets, count=count)
+        gradient = self._cell_gradient(
+            current, receiver, robin=False, targets=targets, count=count
+        )
         _check_finite(gradient, "normal sensitivity vjp")
         return gradient
 
@@ -1188,28 +1527,49 @@ class ERTForward2p5D:
 
         d, device = self.discretization, self._device
         phi = self._fields(conductivity).on(device)
-        direction = self._sigma(delta_conductivity).to(device, phi.dtype)[d.parent_cell_ids.to(device)]
+        direction = self._sigma(delta_conductivity).to(device, phi.dtype)[
+            d.parent_cell_ids.to(device)
+        ]
         volume = direction[None, :, None, None] * self._volume_templates(d, device)
         count = self.wavenumbers.shape[0]
-        tangent = torch.zeros((count, d.pattern.nnz), dtype=phi.dtype, device=device).index_add_(
-            1, d.pattern.volume_inverse.to(device), volume.reshape(count, -1)
+        tangent = torch.zeros(
+            (count, d.pattern.nnz), dtype=phi.dtype, device=device
+        ).index_add_(1, d.pattern.volume_inverse.to(device), volume.reshape(count, -1))
+        gram = torch.einsum(
+            "w,wen,wfn->ef",
+            self.weights.to(device, phi.dtype),
+            phi,
+            -d.pattern.matvec(tangent, phi),
         )
-        gram = torch.einsum("w,wen,wfn->ef", self.weights.to(device, phi.dtype), phi, -d.pattern.matvec(tangent, phi))
         a, b, m, n = self._abmn(device)
         result = (gram[m, a] - gram[m, b] - gram[n, a] + gram[n, b]).cpu()
         _check_finite(result, "normal sensitivity jvp")
         return result
 
-    def normal_vjp_series(self, conductivities, cotangents, *, cell_parameter_ids=None, parameter_count=None) -> Tensor:
+    def normal_vjp_series(
+        self,
+        conductivities,
+        cotangents,
+        *,
+        cell_parameter_ids=None,
+        parameter_count=None,
+    ) -> Tensor:
         """Apply :meth:`normal_vjp` to every step of a model series."""
 
         models = self._series(conductivities)
         cotangents = torch.as_tensor(cotangents, dtype=FLOAT_DTYPE)
         if tuple(cotangents.shape) != (models.shape[0], self.survey.measurement_count):
-            raise ValueError(f"cotangents must have shape {(models.shape[0], self.survey.measurement_count)}")
+            raise ValueError(
+                f"cotangents must have shape {(models.shape[0], self.survey.measurement_count)}"
+            )
         return torch.stack(
             [
-                self.normal_vjp(model, cotangent, cell_parameter_ids=cell_parameter_ids, parameter_count=parameter_count)
+                self.normal_vjp(
+                    model,
+                    cotangent,
+                    cell_parameter_ids=cell_parameter_ids,
+                    parameter_count=parameter_count,
+                )
                 for model, cotangent in zip(models, cotangents, strict=True)
             ]
         )
@@ -1220,17 +1580,25 @@ class ERTForward2p5D:
         if batch_size is None:
             if not direct:
                 return 8
-            return min(self.survey.measurement_count, 64) if self.mesh.cell_count >= 4096 else self.survey.measurement_count
+            return (
+                min(self.survey.measurement_count, 64)
+                if self.mesh.cell_count >= 4096
+                else self.survey.measurement_count
+            )
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1")
         return int(batch_size)
 
-    def _normal_jacobian(self, fields: _Fields, batch_size: int, targets: np.ndarray, count: int) -> Tensor:
+    def _normal_jacobian(
+        self, fields: _Fields, batch_size: int, targets: np.ndarray, count: int
+    ) -> Tensor:
         """Direct normal sensitivity ``-sum_w w_w (u_M - u_N)^T dA_w (u_A - u_B)`` per measurement chunk."""
 
         d, device = self.discretization, self._device
         active, columns = self._active_targets(targets, device)
-        templates = self.weights.to(device, self.dtype)[:, None, None, None] * self._volume_templates(d, device)
+        templates = self.weights.to(device, self.dtype)[
+            :, None, None, None
+        ] * self._volume_templates(d, device)
         cell_dofs = self._on(f"{d.name}.cell_dofs", lambda: d.cell_dofs, device)
         if active is not None:
             templates, cell_dofs = templates[:, active], cell_dofs[active]
@@ -1240,21 +1608,47 @@ class ERTForward2p5D:
         for start in range(0, self.survey.measurement_count, batch_size):
             chunk = slice(start, start + batch_size)
             if cell_dofs.shape[1] == 3:
-                rows.append(self._normal_jacobian_cuda(phi, a[chunk], b[chunk], m[chunk], n[chunk], cell_dofs, columns, templates, count))
+                rows.append(
+                    self._normal_jacobian_cuda(
+                        phi,
+                        a[chunk],
+                        b[chunk],
+                        m[chunk],
+                        n[chunk],
+                        cell_dofs,
+                        columns,
+                        templates,
+                        count,
+                    )
+                )
                 continue
             current = (phi[:, a[chunk]] - phi[:, b[chunk]])[..., cell_dofs]
             receiver = (phi[:, m[chunk]] - phi[:, n[chunk]])[..., cell_dofs]
             local = -torch.einsum("wbci,wcij,wbcj->bc", receiver, templates, current)
-            rows.append(torch.zeros((local.shape[0], count), dtype=local.dtype, device=device).index_add_(1, columns, local))
+            rows.append(
+                torch.zeros(
+                    (local.shape[0], count), dtype=local.dtype, device=device
+                ).index_add_(1, columns, local)
+            )
         return torch.cat(rows).cpu()
 
-    def _normal_jacobian_cuda(self, phi, a, b, m, n, cell_dofs, columns, templates, count) -> Tensor:
+    def _normal_jacobian_cuda(
+        self, phi, a, b, m, n, cell_dofs, columns, templates, count
+    ) -> Tensor:
         """Fused CuPy kernel avoiding ``W x B x C x 3`` gathered field blocks for triangle cells."""
 
         cp, _ = _cupy()
         scalar = "double" if phi.dtype == torch.float64 else "float"
-        kernel = self._cached(("sensitivity_kernel", scalar), lambda: cp.RawKernel(_SENSITIVITY_KERNEL.replace("SCALAR", scalar), "normal_sensitivity"))
-        as_int = [cp.from_dlpack(x.to(torch.int32).contiguous()) for x in (a, b, m, n, cell_dofs.reshape(-1), columns)]
+        kernel = self._cached(
+            ("sensitivity_kernel", scalar),
+            lambda: cp.RawKernel(
+                _SENSITIVITY_KERNEL.replace("SCALAR", scalar), "normal_sensitivity"
+            ),
+        )
+        as_int = [
+            cp.from_dlpack(x.to(torch.int32).contiguous())
+            for x in (a, b, m, n, cell_dofs.reshape(-1), columns)
+        ]
         out = torch.zeros((a.shape[0], count), dtype=phi.dtype, device=phi.device)
         cells = int(cell_dofs.shape[0])
         threads = a.shape[0] * cells
@@ -1267,7 +1661,15 @@ class ERTForward2p5D:
         )  # fmt: skip
         return out
 
-    def _adjoint_jacobian(self, fields, normal, reciprocal, batch_size: int, robin: bool, normal_sensitivity: bool) -> Tensor:
+    def _adjoint_jacobian(
+        self,
+        fields,
+        normal,
+        reciprocal,
+        batch_size: int,
+        robin: bool,
+        normal_sensitivity: bool,
+    ) -> Tensor:
         """Jacobian rows from batched adjoint solves (identity cotangents, last block zero-padded)."""
 
         count = self.survey.measurement_count
@@ -1277,14 +1679,22 @@ class ERTForward2p5D:
         rows = []
         for start in range(0, count, batch_size):
             cotangent = torch.zeros((batch_size, count), dtype=normal.dtype)
-            cotangent[: min(batch_size, count - start)] = eye[start : start + batch_size]
+            cotangent[: min(batch_size, count - start)] = eye[
+                start : start + batch_size
+            ]
             if normal_sensitivity:
                 rhs = self._adjoint_rhs(cotangent)
             else:
                 common = 0.5 * cotangent * sign[None, :] / scale[None, :]
-                rhs = self._adjoint_rhs(common * reciprocal[None, :]) + self._adjoint_rhs(common * normal[None, :], reciprocal=True)
-            lam = self._solve(self.discretization, fields.values, rhs, refactorize=start == 0)
-            lam = lam.reshape(self.wavenumbers.shape[0], batch_size, self.survey.electrode_count, -1)
+                rhs = self._adjoint_rhs(
+                    common * reciprocal[None, :]
+                ) + self._adjoint_rhs(common * normal[None, :], reciprocal=True)
+            lam = self._solve(
+                self.discretization, fields.values, rhs, refactorize=start == 0
+            )
+            lam = lam.reshape(
+                self.wavenumbers.shape[0], batch_size, self.survey.electrode_count, -1
+            )
             rows.append(self._cell_gradient(phi, lam, robin=robin)[: count - start])
         return torch.cat(rows)
 
@@ -1311,11 +1721,18 @@ class ERTForward2p5D:
         direct = normal_sensitivity and not include_robin_boundary_derivative
         batch_size = self._batch_size(batch_size, direct)
         if direct:
-            targets, count = self._target_cells(jacobian_cell_parameter_ids, jacobian_parameter_count)
+            targets, count = self._target_cells(
+                jacobian_cell_parameter_ids, jacobian_parameter_count
+            )
             jacobian = self._normal_jacobian(fields, batch_size, targets, count)
         else:
             jacobian = self._adjoint_jacobian(
-                fields, normal, reciprocal, batch_size, include_robin_boundary_derivative, normal_sensitivity
+                fields,
+                normal,
+                reciprocal,
+                batch_size,
+                include_robin_boundary_derivative,
+                normal_sensitivity,
             )
         return self._response(integrated, normal, reciprocal, currents), jacobian
 
@@ -1362,5 +1779,9 @@ class ERTForward2p5D:
 
 
 def _terrain_cache_dir(cache_dir: str | Path | None) -> Path | None:
-    cache_dir = cache_dir if cache_dir is not None else os.environ.get("ADTLERT_TERRAIN_CACHE_DIR", "").strip()
+    cache_dir = (
+        cache_dir
+        if cache_dir is not None
+        else os.environ.get("ADTLERT_TERRAIN_CACHE_DIR", "").strip()
+    )
     return Path(cache_dir).expanduser() if cache_dir else None

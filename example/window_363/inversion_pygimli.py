@@ -113,7 +113,11 @@ class _SimpleProgress:
         now = time.perf_counter()
         if self.count >= self.total or (now - self.last_print) >= 1.0:
             ratio = min(1.0, self.count / self.total)
-            print(f"\r{self.desc}: {self.count}/{self.total} ({ratio * 100.0:5.1f}%)", end="", flush=True)
+            print(
+                f"\r{self.desc}: {self.count}/{self.total} ({ratio * 100.0:5.1f}%)",
+                end="",
+                flush=True,
+            )
             self.last_print = now
         if self.count >= self.total:
             print("", flush=True)
@@ -258,6 +262,7 @@ def _run_window_inversion_job(
         "elapsed_sec": float(elapsed_sec),
     }
 
+
 def _run_windowed_inversion(
     *,
     data_files: list[str],
@@ -271,14 +276,18 @@ def _run_windowed_inversion(
     quiet_pygimli: bool,
     pygimli_log_level: str,
     suppress_window_stdout: bool,
-) -> tuple[np.ndarray, np.ndarray | None, np.ndarray, dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[
+    np.ndarray, np.ndarray | None, np.ndarray, dict[str, Any], list[dict[str, Any]]
+]:
     n_steps = len(data_files)
     window_starts = _build_window_starts(n_steps, window_size, window_step)
 
     total_windows = len(window_starts)
     desc = "Window inversion"
     window_results = []
-    with _progress_bar(total=total_windows, desc=desc, enabled=bool(show_progress)) as bar:
+    with _progress_bar(
+        total=total_windows, desc=desc, enabled=bool(show_progress)
+    ) as bar:
         for start_idx in window_starts:
             wr = _run_window_inversion_job(
                 int(start_idx),
@@ -298,7 +307,9 @@ def _run_windowed_inversion(
 
     first_fm = np.asarray(window_results[0]["final_models"], dtype=float)
     if first_fm.ndim != 2:
-        raise ValueError(f"Window {window_results[0]['start_idx']}: final_models not 2D: {first_fm.shape}")
+        raise ValueError(
+            f"Window {window_results[0]['start_idx']}: final_models not 2D: {first_fm.shape}"
+        )
     n_cells = int(first_fm.shape[0])
 
     contrib_models = [[] for _ in range(n_steps)]
@@ -312,9 +323,13 @@ def _run_windowed_inversion(
         if fm.ndim != 2:
             raise ValueError(f"Window {start_idx}: final_models not 2D: {fm.shape}")
         if fm.shape[1] != int(window_size):
-            raise ValueError(f"Window {start_idx}: expected width {window_size}, got {fm.shape[1]}")
+            raise ValueError(
+                f"Window {start_idx}: expected width {window_size}, got {fm.shape[1]}"
+            )
         if fm.shape[0] != n_cells:
-            raise ValueError(f"Window {start_idx}: expected n_cells {n_cells}, got {fm.shape[0]}")
+            raise ValueError(
+                f"Window {start_idx}: expected n_cells {n_cells}, got {fm.shape[0]}"
+            )
 
         for local_i in range(fm.shape[1]):
             global_idx = start_idx + local_i
@@ -331,7 +346,9 @@ def _run_windowed_inversion(
         final_chi = _extract_window_final_chi2(chi)
         if final_chi is not None:
             window_final_chi2.append(final_chi)
-        iterations = int(wr.get("iterations", chi.shape[0] if chi.ndim > 0 else int(chi.size > 0)))
+        iterations = int(
+            wr.get("iterations", chi.shape[0] if chi.ndim > 0 else int(chi.size > 0))
+        )
         setup_elapsed_sec = float(wr.get("setup_elapsed_sec", np.nan))
         run_elapsed_sec = float(wr.get("run_elapsed_sec", np.nan))
         elapsed_sec = float(wr.get("elapsed_sec", np.nan))
@@ -340,7 +357,9 @@ def _run_windowed_inversion(
                 "start_idx": int(start_idx),
                 "end_idx": int(start_idx + window_size - 1),
                 "start_step": int(steps[start_idx]),
-                "end_step": int(steps[min(start_idx + window_size - 1, len(steps) - 1)]),
+                "end_step": int(
+                    steps[min(start_idx + window_size - 1, len(steps) - 1)]
+                ),
                 "final_chi2_data": final_chi,
                 "iterations": int(iterations),
                 "setup_elapsed_sec": setup_elapsed_sec,
@@ -352,7 +371,9 @@ def _run_windowed_inversion(
     final_cols: list[np.ndarray] = []
     for idx, models in enumerate(contrib_models):
         if len(models) == 0:
-            raise ValueError(f"No window contribution for timestep index={idx}, step={int(steps[idx])}")
+            raise ValueError(
+                f"No window contribution for timestep index={idx}, step={int(steps[idx])}"
+            )
         stack = np.column_stack(models)
         column = np.exp(np.mean(np.log(np.clip(stack, 1.0e-12, None)), axis=1))
         final_cols.append(column)
@@ -364,10 +385,16 @@ def _run_windowed_inversion(
 
     chi2_all = np.asarray(window_final_chi2, dtype=float)
     elapsed_values = np.asarray(
-        [report["elapsed_sec"] for report in window_reports if np.isfinite(report["elapsed_sec"])],
+        [
+            report["elapsed_sec"]
+            for report in window_reports
+            if np.isfinite(report["elapsed_sec"])
+        ],
         dtype=float,
     )
-    iteration_values = np.asarray([report["iterations"] for report in window_reports], dtype=float)
+    iteration_values = np.asarray(
+        [report["iterations"] for report in window_reports], dtype=float
+    )
     run_meta = {
         "inversion_mode": "windowed",
         "n_windows": int(len(window_starts)),
@@ -375,15 +402,33 @@ def _run_windowed_inversion(
         "window_step": int(max(1, window_step)),
         "progress": bool(show_progress),
         "mesh_reused": bool(inversion_mesh is not None),
-        "window_elapsed_sec_mean": float(np.mean(elapsed_values)) if elapsed_values.size else None,
-        "window_elapsed_sec_median": float(np.median(elapsed_values)) if elapsed_values.size else None,
-        "window_elapsed_sec_min": float(np.min(elapsed_values)) if elapsed_values.size else None,
-        "window_elapsed_sec_max": float(np.max(elapsed_values)) if elapsed_values.size else None,
-        "window_elapsed_sec_sum": float(np.sum(elapsed_values)) if elapsed_values.size else None,
-        "window_iterations_mean": float(np.mean(iteration_values)) if iteration_values.size else None,
-        "window_iterations_median": float(np.median(iteration_values)) if iteration_values.size else None,
-        "window_iterations_min": float(np.min(iteration_values)) if iteration_values.size else None,
-        "window_iterations_max": float(np.max(iteration_values)) if iteration_values.size else None,
+        "window_elapsed_sec_mean": float(np.mean(elapsed_values))
+        if elapsed_values.size
+        else None,
+        "window_elapsed_sec_median": float(np.median(elapsed_values))
+        if elapsed_values.size
+        else None,
+        "window_elapsed_sec_min": float(np.min(elapsed_values))
+        if elapsed_values.size
+        else None,
+        "window_elapsed_sec_max": float(np.max(elapsed_values))
+        if elapsed_values.size
+        else None,
+        "window_elapsed_sec_sum": float(np.sum(elapsed_values))
+        if elapsed_values.size
+        else None,
+        "window_iterations_mean": float(np.mean(iteration_values))
+        if iteration_values.size
+        else None,
+        "window_iterations_median": float(np.median(iteration_values))
+        if iteration_values.size
+        else None,
+        "window_iterations_min": float(np.min(iteration_values))
+        if iteration_values.size
+        else None,
+        "window_iterations_max": float(np.max(iteration_values))
+        if iteration_values.size
+        else None,
     }
     return final_models, coverage, chi2_all, run_meta, window_reports
 
@@ -509,7 +554,9 @@ def _plot_true_vs_inverted(
     ax_inv = fig.add_subplot(grid[1, 0], sharex=ax_true, sharey=ax_true)
     cax = fig.add_subplot(grid[:, 1])
 
-    ax_true.pcolormesh(x_grid, z_grid, rho_true_plot, shading="auto", cmap=cmap, norm=norm)
+    ax_true.pcolormesh(
+        x_grid, z_grid, rho_true_plot, shading="auto", cmap=cmap, norm=norm
+    )
     ax_true.set_title(f"True Model (t{mid_step:05d})")
 
     pg.show(
@@ -564,21 +611,33 @@ def _predict_rhoa(
             fwd = ert.ERTModelling()
             fwd.setData(data)
             fwd.setMesh(mesh)
-            response = np.asarray(fwd.response(pg.Vector(final_models[:, idx])), dtype=float).ravel()
+            response = np.asarray(
+                fwd.response(pg.Vector(final_models[:, idx])), dtype=float
+            ).ravel()
             predictions.append(response)
     return np.vstack(predictions)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project-root", default=None, help="Repository root. Auto-detected by default.")
-    parser.add_argument("--forward-dir", default="result/1_timelapsedERT_forward_adtlert")
+    parser.add_argument(
+        "--project-root",
+        default=None,
+        help="Repository root. Auto-detected by default.",
+    )
+    parser.add_argument(
+        "--forward-dir", default="result/1_timelapsedERT_forward_adtlert"
+    )
     parser.add_argument("--true-model-dir", default="resistivity_models_2d")
-    parser.add_argument("--output-dir", default="result/2_timelapsedERT_inversion_pygimli")
+    parser.add_argument(
+        "--output-dir", default="result/2_timelapsedERT_inversion_pygimli"
+    )
     parser.add_argument("--y-index", type=int, default=2)
     parser.add_argument("--file-stride", type=int, default=1)
     parser.add_argument("--max-timesteps", type=int, default=None)
-    parser.add_argument("--inversion-mode", choices=("windowed", "full"), default="windowed")
+    parser.add_argument(
+        "--inversion-mode", choices=("windowed", "full"), default="windowed"
+    )
     parser.add_argument("--window-size", type=int, default=3)
     parser.add_argument("--window-step", type=int, default=1)
     parser.add_argument(
@@ -597,7 +656,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--relative-error", type=float, default=0.05)
     parser.add_argument("--method", default="cgls")
     parser.add_argument("--coverage-percentile", type=float, default=20.0)
-    parser.add_argument("--quiet-pygimli", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--quiet-pygimli", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--pygimli-log-level", default="WARNING")
     parser.add_argument(
         "--progress",
@@ -618,7 +679,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    root = Path(args.project_root).resolve() if args.project_root else Path(__file__).resolve().parents[2]
+    root = (
+        Path(args.project_root).resolve()
+        if args.project_root
+        else Path(__file__).resolve().parents[2]
+    )
     forward_dir = _resolve(root, args.forward_dir)
     true_model_dir = _resolve(root, args.true_model_dir)
     output_dir = _resolve(root, args.output_dir)
@@ -689,18 +754,20 @@ def main(argv: list[str] | None = None) -> int:
             "mesh_build_elapsed_sec": mesh_build_elapsed_sec,
         }
     else:
-        final_models, coverage, chi2_all, run_meta, window_reports = _run_windowed_inversion(
-            data_files=data_files,
-            measurement_times=measurement_times,
-            steps=steps,
-            inversion_params=inversion_params,
-            inversion_mesh=shared_mesh,
-            window_size=int(args.window_size),
-            window_step=int(args.window_step),
-            show_progress=bool(args.progress),
-            quiet_pygimli=bool(args.quiet_pygimli),
-            pygimli_log_level=str(args.pygimli_log_level),
-            suppress_window_stdout=bool(args.suppress_window_stdout),
+        final_models, coverage, chi2_all, run_meta, window_reports = (
+            _run_windowed_inversion(
+                data_files=data_files,
+                measurement_times=measurement_times,
+                steps=steps,
+                inversion_params=inversion_params,
+                inversion_mesh=shared_mesh,
+                window_size=int(args.window_size),
+                window_step=int(args.window_step),
+                show_progress=bool(args.progress),
+                quiet_pygimli=bool(args.quiet_pygimli),
+                pygimli_log_level=str(args.pygimli_log_level),
+                suppress_window_stdout=bool(args.suppress_window_stdout),
+            )
         )
         mesh_for_plot = shared_mesh
         if mesh_for_plot is None:
@@ -718,13 +785,21 @@ def main(argv: list[str] | None = None) -> int:
     coverage_mask = None
     if coverage is not None:
         coverage = np.asarray(coverage, dtype=float).ravel()
-        coverage_threshold = float(np.percentile(coverage, float(args.coverage_percentile)))
+        coverage_threshold = float(
+            np.percentile(coverage, float(args.coverage_percentile))
+        )
         coverage_mask = coverage < coverage_threshold
 
     np.save(output_dir / "final_models.npy", np.asarray(final_models, dtype=float))
-    np.save(output_dir / "final_log_models.npy", np.log(np.clip(np.asarray(final_models, dtype=float), 1.0e-12, None)))
+    np.save(
+        output_dir / "final_log_models.npy",
+        np.log(np.clip(np.asarray(final_models, dtype=float), 1.0e-12, None)),
+    )
     np.save(output_dir / "steps.npy", steps)
-    np.save(output_dir / "measurement_times_days.npy", np.asarray(measurement_times, dtype=float))
+    np.save(
+        output_dir / "measurement_times_days.npy",
+        np.asarray(measurement_times, dtype=float),
+    )
     np.save(output_dir / "chi2_all.npy", np.asarray(chi2_all, dtype=float))
     if coverage is not None:
         np.save(output_dir / "coverage.npy", coverage)
@@ -752,7 +827,9 @@ def main(argv: list[str] | None = None) -> int:
         if coverage_mask is not None:
             masked = model.copy()
             masked[coverage_mask] = np.nan
-            np.save(output_dir / f"inverted_model_masked_nan_t{int(step):05d}.npy", masked)
+            np.save(
+                output_dir / f"inverted_model_masked_nan_t{int(step):05d}.npy", masked
+            )
 
     with (output_dir / "used_data_files.txt").open("w", encoding="utf-8") as stream:
         for path in data_files:
@@ -764,14 +841,21 @@ def main(argv: list[str] | None = None) -> int:
     plot_files: dict[str, str] = {}
     if not args.no_plot:
         chi2_plot = output_dir / "timelapse_chi2.png"
-        _plot_chi2(chi2_plot, np.asarray(chi2_all, dtype=float), windowed=args.inversion_mode == "windowed")
+        _plot_chi2(
+            chi2_plot,
+            np.asarray(chi2_all, dtype=float),
+            windowed=args.inversion_mode == "windowed",
+        )
         if chi2_plot.exists():
             plot_files["chi2"] = str(chi2_plot)
 
         geometry_file = forward_dir / "forward_geometry.npz"
         if geometry_file.exists() and mesh_for_plot is not None:
             geometry = _load_geometry(geometry_file)
-            mid_plot = output_dir / f"true_vs_inverted_mid_t{int(steps[len(steps) // 2]):05d}.png"
+            mid_plot = (
+                output_dir
+                / f"true_vs_inverted_mid_t{int(steps[len(steps) // 2]):05d}.png"
+            )
             _plot_true_vs_inverted(
                 mid_plot,
                 mesh=mesh_for_plot,

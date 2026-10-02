@@ -41,7 +41,9 @@ def _project_root() -> Path:
     """Locate repository root so defaults work when script lives in examples/."""
     here = Path(__file__).resolve()
     for parent in [here.parent, *here.parents]:
-        if (parent / "pyproject.toml").exists() and (parent / "parflow_models").exists():
+        if (parent / "pyproject.toml").exists() and (
+            parent / "parflow_models"
+        ).exists():
             return parent
     # Fallback: historical layout expects parflow_models next to cwd/script.
     return Path.cwd().resolve()
@@ -74,13 +76,17 @@ class UnitRange:
 FIXED_PRESETS: dict[str, dict[int, UnitParams]] = {
     # Table 1 values (synthetic model) from Chen & Niu (2022).
     "table1_mean": {
-        1: UnitParams(name="regolith", rho_sat=170.0, rho_sat_s=510.0, n=2.2, porosity=0.40),
+        1: UnitParams(
+            name="regolith", rho_sat=170.0, rho_sat_s=510.0, n=2.2, porosity=0.40
+        ),
         2: UnitParams(name="fractured_bedrock", rho_sat=1100.0, n=1.8, porosity=0.18),
         3: UnitParams(name="fresh_bedrock", rho_sat=2400.0, n=2.5, porosity=0.05),
     },
     # Midpoints of Table 2 field ranges in Chen & Niu (2022).
     "table2_mid": {
-        1: UnitParams(name="regolith", rho_sat=150.0, rho_sat_s=1800.0, n=1.75, porosity=0.375),
+        1: UnitParams(
+            name="regolith", rho_sat=150.0, rho_sat_s=1800.0, n=1.75, porosity=0.375
+        ),
         2: UnitParams(name="fractured_bedrock", rho_sat=257.5, n=2.1, porosity=0.25),
         3: UnitParams(name="fresh_bedrock", rho_sat=662.5, n=2.0, porosity=0.10),
     },
@@ -91,7 +97,9 @@ RANGE_PRESETS: dict[str, dict[int, UnitRange]] = {
     # Table 1 "Mean value and variation range" (NOT "Range used in MC").
     # Regolith and fractured bedrock use variation ranges; fresh bedrock keeps true values.
     "table1_range": {
-        1: UnitRange(rho_sat=(100.0, 350.0), rho_sat_s=(400.0, 1400.0), porosity=(0.25, 0.5)),
+        1: UnitRange(
+            rho_sat=(100.0, 350.0), rho_sat_s=(400.0, 1400.0), porosity=(0.25, 0.5)
+        ),
         2: UnitRange(rho_sat=(500.0, 1920.0), porosity=(0.11, 0.25)),
         3: UnitRange(),
     }
@@ -144,15 +152,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=2026,
         help="Random seed used when --range-preset is enabled.",
     )
-    parser.add_argument("--y-index", type=int, default=2, help="Y-index of the 2D slice.")
+    parser.add_argument(
+        "--y-index", type=int, default=2, help="Y-index of the 2D slice."
+    )
     parser.add_argument(
         "--saturation-floor",
         type=float,
         default=1.0e-4,
         help="Lower bound used when clipping saturation to avoid division by zero.",
     )
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing .npy outputs.")
-    parser.add_argument("--max-files", type=int, default=None, help="Optional cap for quick tests.")
+    parser.add_argument(
+        "--overwrite", action="store_true", help="Overwrite existing .npy outputs."
+    )
+    parser.add_argument(
+        "--max-files", type=int, default=None, help="Optional cap for quick tests."
+    )
     parser.add_argument(
         "--save-petrophysical-models",
         action=argparse.BooleanOptionalAction,
@@ -204,11 +218,17 @@ def _validate_params(params: dict[int, UnitParams]) -> None:
         if class_id <= 0:
             raise ValueError(f"class ids must be positive integers, got {class_id}")
         if unit.rho_sat <= 0:
-            raise ValueError(f"class {class_id} ({unit.name}) has non-positive rho_sat={unit.rho_sat}")
+            raise ValueError(
+                f"class {class_id} ({unit.name}) has non-positive rho_sat={unit.rho_sat}"
+            )
         if unit.n <= 0:
-            raise ValueError(f"class {class_id} ({unit.name}) has non-positive n={unit.n}")
+            raise ValueError(
+                f"class {class_id} ({unit.name}) has non-positive n={unit.n}"
+            )
         if unit.rho_sat_s is not None and unit.rho_sat_s <= 0:
-            raise ValueError(f"class {class_id} ({unit.name}) has non-positive rho_sat_s={unit.rho_sat_s}")
+            raise ValueError(
+                f"class {class_id} ({unit.name}) has non-positive rho_sat_s={unit.rho_sat_s}"
+            )
         if unit.rho_sat_s is not None and unit.rho_sat_s <= unit.rho_sat:
             raise ValueError(
                 f"class {class_id} ({unit.name}) needs rho_sat_s > rho_sat to keep sigma_sat_p positive "
@@ -228,9 +248,13 @@ def _validate_ranges(ranges: dict[int, UnitRange]) -> None:
                 continue
             lo, hi = float(value[0]), float(value[1])
             if lo <= 0 or hi <= 0:
-                raise ValueError(f"class {class_id} has non-positive {name} range={value}")
+                raise ValueError(
+                    f"class {class_id} has non-positive {name} range={value}"
+                )
             if hi < lo:
-                raise ValueError(f"class {class_id} has invalid {name} range={value} (hi < lo)")
+                raise ValueError(
+                    f"class {class_id} has invalid {name} range={value} (hi < lo)"
+                )
 
 
 def _sample_params(
@@ -252,7 +276,11 @@ def _sample_params(
             if unit_range.rho_sat_s is not None
             else base_unit.rho_sat_s
         )
-        n = float(rng.uniform(*unit_range.n)) if unit_range.n is not None else base_unit.n
+        n = (
+            float(rng.uniform(*unit_range.n))
+            if unit_range.n is not None
+            else base_unit.n
+        )
         porosity = (
             float(rng.uniform(*unit_range.porosity))
             if unit_range.porosity is not None
@@ -279,10 +307,14 @@ def saturation_to_resistivity(
     sat = np.asarray(saturation, dtype=float)
     classes = np.asarray(class_ids, dtype=np.int32)
     if sat.shape != classes.shape:
-        raise ValueError(f"saturation shape {sat.shape} does not match class shape {classes.shape}")
+        raise ValueError(
+            f"saturation shape {sat.shape} does not match class shape {classes.shape}"
+        )
     sat = np.clip(sat, saturation_floor, 1.0)
 
-    missing = sorted(int(value) for value in np.unique(classes) if int(value) not in params)
+    missing = sorted(
+        int(value) for value in np.unique(classes) if int(value) not in params
+    )
     if missing:
         raise ValueError(
             f"Class ids {missing} are present in class.pfb but missing in preset parameters {sorted(params)}"
@@ -300,12 +332,16 @@ def saturation_to_resistivity(
         else:
             sigma_sat_s = 1.0 / unit.rho_sat_s
             sigma_sat_p = sigma_sat - sigma_sat_s
-            sigma_local = sigma_sat_p * np.power(sat_local, unit.n) + sigma_sat_s * np.power(sat_local, unit.n - 1.0)
+            sigma_local = sigma_sat_p * np.power(
+                sat_local, unit.n
+            ) + sigma_sat_s * np.power(sat_local, unit.n - 1.0)
         rho[mask] = 1.0 / sigma_local
     return rho
 
 
-def _params_to_jsonable(params: dict[int, UnitParams]) -> dict[str, dict[str, float | str | None]]:
+def _params_to_jsonable(
+    params: dict[int, UnitParams],
+) -> dict[str, dict[str, float | str | None]]:
     output: dict[str, dict[str, float | str | None]] = {}
     for class_id, unit in sorted(params.items()):
         output[str(class_id)] = {
@@ -318,19 +354,29 @@ def _params_to_jsonable(params: dict[int, UnitParams]) -> dict[str, dict[str, fl
     return output
 
 
-def _ranges_to_jsonable(ranges: dict[int, UnitRange]) -> dict[str, dict[str, list[float] | None]]:
+def _ranges_to_jsonable(
+    ranges: dict[int, UnitRange],
+) -> dict[str, dict[str, list[float] | None]]:
     output: dict[str, dict[str, list[float] | None]] = {}
     for class_id, unit in sorted(ranges.items()):
         output[str(class_id)] = {
-            "rho_sat": None if unit.rho_sat is None else [float(unit.rho_sat[0]), float(unit.rho_sat[1])],
-            "rho_sat_s": None if unit.rho_sat_s is None else [float(unit.rho_sat_s[0]), float(unit.rho_sat_s[1])],
+            "rho_sat": None
+            if unit.rho_sat is None
+            else [float(unit.rho_sat[0]), float(unit.rho_sat[1])],
+            "rho_sat_s": None
+            if unit.rho_sat_s is None
+            else [float(unit.rho_sat_s[0]), float(unit.rho_sat_s[1])],
             "n": None if unit.n is None else [float(unit.n[0]), float(unit.n[1])],
-            "porosity": None if unit.porosity is None else [float(unit.porosity[0]), float(unit.porosity[1])],
+            "porosity": None
+            if unit.porosity is None
+            else [float(unit.porosity[0]), float(unit.porosity[1])],
         }
     return output
 
 
-def _map_from_class_values(class_ids: np.ndarray, values_by_class: dict[int, float | None]) -> np.ndarray:
+def _map_from_class_values(
+    class_ids: np.ndarray, values_by_class: dict[int, float | None]
+) -> np.ndarray:
     model = np.full(class_ids.shape, np.nan, dtype=float)
     for class_id, value in values_by_class.items():
         if value is None:
@@ -370,7 +416,9 @@ def _save_petrophysical_models(
     }
     for key, getter in base_value_getters.items():
         values = {class_id: getter(unit) for class_id, unit in base_params.items()}
-        models[f"{key}2d_{ytag}_base_{fixed_preset}"] = _map_from_class_values(class_ids, values)
+        models[f"{key}2d_{ytag}_base_{fixed_preset}"] = _map_from_class_values(
+            class_ids, values
+        )
     models[f"phi2d_{ytag}_base_{fixed_preset}"] = phi_source
 
     if range_params is not None and range_preset is not None:
@@ -390,8 +438,12 @@ def _save_petrophysical_models(
                 else:
                     lo_values[class_id] = float(value[0])
                     hi_values[class_id] = float(value[1])
-            models[f"{key}2d_{ytag}_range_{range_preset}_min"] = _map_from_class_values(class_ids, lo_values)
-            models[f"{key}2d_{ytag}_range_{range_preset}_max"] = _map_from_class_values(class_ids, hi_values)
+            models[f"{key}2d_{ytag}_range_{range_preset}_min"] = _map_from_class_values(
+                class_ids, lo_values
+            )
+            models[f"{key}2d_{ytag}_range_{range_preset}_max"] = _map_from_class_values(
+                class_ids, hi_values
+            )
 
     files: dict[str, str] = {}
     for name, values in models.items():
@@ -421,7 +473,9 @@ def _save_petrophysical_models(
             "phi2d is always read from porosity_file, not from preset porosity values."
         ),
         "base_parameters": _params_to_jsonable(base_params),
-        "variation_ranges": None if range_params is None else _ranges_to_jsonable(range_params),
+        "variation_ranges": None
+        if range_params is None
+        else _ranges_to_jsonable(range_params),
         "files": files,
     }
     summary_name = f"petrophysical_models2d_{ytag}_{fixed_preset}"
@@ -482,7 +536,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_files is not None:
         pairs = pairs[: max(int(args.max_files), 0)]
     if not pairs:
-        raise SystemExit(f"No saturation files found in {input_dir} matching sc2d_6.out.satur.*.pfb")
+        raise SystemExit(
+            f"No saturation files found in {input_dir} matching sc2d_6.out.satur.*.pfb"
+        )
 
     written = 0
     skipped = 0
@@ -532,8 +588,12 @@ def main(argv: list[str] | None = None) -> int:
         "rho_max_written": None if written == 0 else float(rho_max),
         "outputs_written": outputs,
         "base_parameters": _params_to_jsonable(base_params),
-        "variation_ranges": None if range_params is None else _ranges_to_jsonable(range_params),
-        "petrophysical_output_dir": None if petrophysical_output_dir is None else str(petrophysical_output_dir),
+        "variation_ranges": None
+        if range_params is None
+        else _ranges_to_jsonable(range_params),
+        "petrophysical_output_dir": None
+        if petrophysical_output_dir is None
+        else str(petrophysical_output_dir),
         "petrophysical_files": petrophysical_files,
     }
     summary_path = output_dir / "conversion_summary.json"

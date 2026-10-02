@@ -11,8 +11,16 @@ import numpy as np
 import torch
 
 from adtlert.inr.networks import MultiscaleINR
-from adtlert.inr.physics import matrix_free_log_rhoa, matrix_free_log_rhoa_series, prepare_cuda_forward, select_cuda_device
-from adtlert.inversion.regularization import first_order_constraint_matrix, regularization_mesh
+from adtlert.inr.physics import (
+    matrix_free_log_rhoa,
+    matrix_free_log_rhoa_series,
+    prepare_cuda_forward,
+    select_cuda_device,
+)
+from adtlert.inversion.regularization import (
+    first_order_constraint_matrix,
+    regularization_mesh,
+)
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -49,9 +57,13 @@ class INRConfig:
     full_evaluation_interval: int = 25
     alternate_window_direction: bool = True
     snapshot_interval: int | None = None
-    progress_callback: ProgressCallback | None = field(default=None, repr=False, compare=False)
+    progress_callback: ProgressCallback | None = field(
+        default=None, repr=False, compare=False
+    )
     # Weighted scalar added to the objective; receives the full log-resistivity model and the iteration.
-    extra_penalty: PenaltyCallback | None = field(default=None, repr=False, compare=False)
+    extra_penalty: PenaltyCallback | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def validate(self) -> None:
         if self.max_iterations < 1:
@@ -63,8 +75,13 @@ class INRConfig:
         if self.scheduler not in {"multistep", "plateau", "none"}:
             raise ValueError("scheduler must be 'multistep', 'plateau', or 'none'")
         if any(step < 1 for step in self.learning_rate_milestones):
-            raise ValueError("learning_rate_milestones must contain positive iterations")
-        if tuple(sorted(set(self.learning_rate_milestones))) != self.learning_rate_milestones:
+            raise ValueError(
+                "learning_rate_milestones must contain positive iterations"
+            )
+        if (
+            tuple(sorted(set(self.learning_rate_milestones)))
+            != self.learning_rate_milestones
+        ):
             raise ValueError("learning_rate_milestones must be strictly increasing")
         if self.target_chi2 is not None and self.target_chi2 <= 0.0:
             raise ValueError("target_chi2 must be positive")
@@ -77,12 +94,17 @@ class INRConfig:
         if not (0.0 < self.plateau_factor < 1.0):
             raise ValueError("plateau_factor must be in (0, 1)")
         if not (0.0 < self.minimum_learning_rate <= self.learning_rate):
-            raise ValueError("minimum_learning_rate must be positive and <= learning_rate")
+            raise ValueError(
+                "minimum_learning_rate must be positive and <= learning_rate"
+            )
         if self.log_every < 1:
             raise ValueError("log_every must be >= 1")
         if self.progressive_full_iteration < 1:
             raise ValueError("progressive_full_iteration must be >= 1")
-        if self.progressive_spatial_start_levels < 0 or self.progressive_temporal_start_levels < 0:
+        if (
+            self.progressive_spatial_start_levels < 0
+            or self.progressive_temporal_start_levels < 0
+        ):
             raise ValueError("progressive start levels must be non-negative")
         if self.spatial_regularization < 0.0 or self.temporal_regularization < 0.0:
             raise ValueError("regularization strengths must be non-negative")
@@ -132,7 +154,9 @@ class INRResult:
     physics_vjp_timesteps: int
 
 
-def _build_optimizer(config: INRConfig, network: torch.nn.Module) -> torch.optim.Optimizer:
+def _build_optimizer(
+    config: INRConfig, network: torch.nn.Module
+) -> torch.optim.Optimizer:
     """Build a one-forward/one-VJP optimizer suitable for expensive ERT physics."""
 
     kwargs = {
@@ -149,7 +173,11 @@ def _build_optimizer(config: INRConfig, network: torch.nn.Module) -> torch.optim
 def _build_scheduler(
     config: INRConfig,
     optimizer: torch.optim.Optimizer,
-) -> torch.optim.lr_scheduler.LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau | None:
+) -> (
+    torch.optim.lr_scheduler.LRScheduler
+    | torch.optim.lr_scheduler.ReduceLROnPlateau
+    | None
+):
     if config.scheduler == "none":
         return None
     if config.scheduler == "multistep":
@@ -174,13 +202,19 @@ def _validated_data(
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     observed = np.asarray(observed_rhoa, dtype=np.float32)
-    if observed.ndim not in (1, 2) or not np.all(np.isfinite(observed)) or np.any(observed <= 0.0):
+    if (
+        observed.ndim not in (1, 2)
+        or not np.all(np.isfinite(observed))
+        or np.any(observed <= 0.0)
+    ):
         raise ValueError("observed_rhoa must be a finite positive 1D or 2D array")
     std = np.asarray(data_std, dtype=np.float32)
     try:
         std = np.broadcast_to(std, observed.shape).copy()
     except ValueError as exc:
-        raise ValueError(f"data_std cannot broadcast to observed shape {observed.shape}") from exc
+        raise ValueError(
+            f"data_std cannot broadcast to observed shape {observed.shape}"
+        ) from exc
     if not np.all(np.isfinite(std)) or np.any(std <= 0.0):
         raise ValueError("data_std must contain positive finite values")
     return (
@@ -198,13 +232,21 @@ def _synchronize(device: torch.device) -> None:
     torch.cuda.synchronize(device)
 
 
-def _spatial_operator(forward: Any, cell_count: int, device: torch.device) -> torch.Tensor:
+def _spatial_operator(
+    forward: Any, cell_count: int, device: torch.device
+) -> torch.Tensor:
     matrix = first_order_constraint_matrix(regularization_mesh(forward)).tocoo()
     if matrix.shape[1] != cell_count:
-        raise ValueError("spatial regularization mesh does not match the INR parameter count")
-    indices = torch.as_tensor(np.vstack((matrix.row, matrix.col)), dtype=torch.int64, device=device)
+        raise ValueError(
+            "spatial regularization mesh does not match the INR parameter count"
+        )
+    indices = torch.as_tensor(
+        np.vstack((matrix.row, matrix.col)), dtype=torch.int64, device=device
+    )
     values = torch.as_tensor(matrix.data, dtype=torch.float32, device=device)
-    return torch.sparse_coo_tensor(indices, values, matrix.shape, device=device).coalesce()
+    return torch.sparse_coo_tensor(
+        indices, values, matrix.shape, device=device
+    ).coalesce()
 
 
 def _huber_mean(values: torch.Tensor, delta: float) -> torch.Tensor:
@@ -212,7 +254,13 @@ def _huber_mean(values: torch.Tensor, delta: float) -> torch.Tensor:
         return values.sum()
     absolute = torch.abs(values)
     delta_t = torch.as_tensor(delta, dtype=values.dtype, device=values.device)
-    return torch.mean(torch.where(absolute <= delta_t, 0.5 * values.square() / delta_t, absolute - 0.5 * delta_t))
+    return torch.mean(
+        torch.where(
+            absolute <= delta_t,
+            0.5 * values.square() / delta_t,
+            absolute - 0.5 * delta_t,
+        )
+    )
 
 
 def _detach_encoded(encoded: Any) -> Any:
@@ -223,7 +271,9 @@ def _detach_encoded(encoded: Any) -> Any:
     raise TypeError("network.encode must return a Tensor or tuple of Tensors")
 
 
-def _window_schedule(n_times: int, size: int, step: int) -> tuple[list[np.ndarray], np.ndarray]:
+def _window_schedule(
+    n_times: int, size: int, step: int
+) -> tuple[list[np.ndarray], np.ndarray]:
     size = min(int(size), n_times)
     starts = list(range(0, max(n_times - size + 1, 1), int(step)))
     final_start = n_times - size
@@ -234,7 +284,9 @@ def _window_schedule(n_times: int, size: int, step: int) -> tuple[list[np.ndarra
     for indices in windows:
         coverage[indices] += 1
     if np.any(coverage == 0):
-        raise ValueError("time windows do not cover every timestep; reduce time_window_step")
+        raise ValueError(
+            "time windows do not cover every timestep; reduce time_window_step"
+        )
     return windows, coverage
 
 
@@ -255,11 +307,16 @@ def _fit(
     network = network.to(device=device, dtype=torch.float32)
     coordinate_values = np.asarray(coordinates, dtype=np.float32)
     expected_ndim = 3 if series else 2
-    if coordinate_values.ndim != expected_ndim or coordinate_values.shape[-1] != network.input_dimensions:
+    if (
+        coordinate_values.ndim != expected_ndim
+        or coordinate_values.shape[-1] != network.input_dimensions
+    ):
         raise ValueError(
             f"coordinates must have {expected_ndim} dimensions and end with {network.input_dimensions} features"
         )
-    coordinates_t = torch.as_tensor(coordinate_values, device=device, dtype=torch.float32)
+    coordinates_t = torch.as_tensor(
+        coordinate_values, device=device, dtype=torch.float32
+    )
     with torch.no_grad():
         if config.progressive_encoding:
             network.set_progressive_levels(
@@ -273,21 +330,33 @@ def _fit(
     observed_log, std = _validated_data(observed_rhoa, data_std, device=device)
     expected_model_shape = tuple(coordinate_values.shape[:-1])
     if tuple(initial_log.shape) != expected_model_shape:
-        raise ValueError(f"network model shape {tuple(initial_log.shape)} does not match {expected_model_shape}")
+        raise ValueError(
+            f"network model shape {tuple(initial_log.shape)} does not match {expected_model_shape}"
+        )
     forward_cell_count = getattr(forward, "cell_count", None)
-    if forward_cell_count is not None and expected_model_shape[-1] != int(forward_cell_count):
+    if forward_cell_count is not None and expected_model_shape[-1] != int(
+        forward_cell_count
+    ):
         raise ValueError(
             f"coordinates describe {expected_model_shape[-1]} cells, but forward expects {int(forward_cell_count)}"
         )
     expected_data_ndim = 2 if series else 1
     if observed_log.ndim != expected_data_ndim:
-        raise ValueError(f"observed_rhoa must be {expected_data_ndim}D for this training mode")
+        raise ValueError(
+            f"observed_rhoa must be {expected_data_ndim}D for this training mode"
+        )
     if series and observed_log.shape[0] != expected_model_shape[0]:
-        raise ValueError("observed_rhoa timestep count must match spatiotemporal coordinates")
+        raise ValueError(
+            "observed_rhoa timestep count must match spatiotemporal coordinates"
+        )
     if not series and config.time_window_size is not None:
         raise ValueError("time_window_size is only valid for time-lapse inversion")
     n_times = expected_model_shape[0] if series else 1
-    windowed = bool(series and config.time_window_size is not None and config.time_window_size < n_times)
+    windowed = bool(
+        series
+        and config.time_window_size is not None
+        and config.time_window_size < n_times
+    )
     if windowed:
         windows, window_coverage = _window_schedule(
             n_times,
@@ -301,7 +370,9 @@ def _fit(
         )
     else:
         windows = [np.arange(n_times, dtype=np.int64)]
-        inverse_window_coverage = torch.ones(n_times, device=device, dtype=torch.float32)
+        inverse_window_coverage = torch.ones(
+            n_times, device=device, dtype=torch.float32
+        )
     # The VJP reuses forward fields from the operator LRU; a cache smaller than one
     # forward/VJP batch evicts them and silently re-solves every forward in backward.
     operator = getattr(forward, "forward_operator", forward)
@@ -314,13 +385,17 @@ def _fit(
         )
     survey = getattr(forward, "survey", None)
     measurement_count = getattr(survey, "measurement_count", None)
-    if measurement_count is not None and observed_log.shape[-1] != int(measurement_count):
+    if measurement_count is not None and observed_log.shape[-1] != int(
+        measurement_count
+    ):
         raise ValueError(
             f"observed_rhoa has {observed_log.shape[-1]} measurements, but survey expects {int(measurement_count)}"
         )
 
     if config.prepare_solver:
-        preparation_model = initial_log.detach().to(device="cpu", dtype=torch.float64).numpy()
+        preparation_model = (
+            initial_log.detach().to(device="cpu", dtype=torch.float64).numpy()
+        )
         if series:
             preparation_model = preparation_model[0]
         prepare_cuda_forward(forward, preparation_model, device=device)
@@ -341,7 +416,9 @@ def _fit(
     full_chi2_history: list[float] = []
     best: dict[str, Any] = {"chi2": float("inf"), "iteration": 0}
 
-    def remember(iteration: int, chi2_value: float, model: torch.Tensor, prediction: torch.Tensor) -> None:
+    def remember(
+        iteration: int, chi2_value: float, model: torch.Tensor, prediction: torch.Tensor
+    ) -> None:
         """Record a full-data chi-square; keep the best model, prediction, and network state."""
 
         full_chi2_iterations.append(iteration)
@@ -352,8 +429,12 @@ def _fit(
                 iteration=iteration,
                 model=model.detach().clone(),
                 prediction=prediction.detach().clone(),
-                state={name: value.detach().clone() for name, value in network.state_dict().items()},
+                state={
+                    name: value.detach().clone()
+                    for name, value in network.state_dict().items()
+                },
             )
+
     stop_reason = "max_iterations"
     forward_seconds = 0.0
     backward_seconds = 0.0
@@ -377,25 +458,46 @@ def _fit(
             and iteration > 0
             and iteration % config.snapshot_interval == 0
         )
-        evaluate_full = not windowed or iteration == 0 or iteration == config.max_iterations
-        evaluate_full = evaluate_full or iteration % config.full_evaluation_interval == 0 or snapshot_due
+        evaluate_full = (
+            not windowed or iteration == 0 or iteration == config.max_iterations
+        )
+        evaluate_full = (
+            evaluate_full
+            or iteration % config.full_evaluation_interval == 0
+            or snapshot_due
+        )
         full_chi2: float | None = None
         full_rms: float | None = None
         if windowed and evaluate_full:
             with torch.no_grad():
-                full_prediction = matrix_free_log_rhoa_series(log_model.detach(), forward)
+                full_prediction = matrix_free_log_rhoa_series(
+                    log_model.detach(), forward
+                )
                 full_residual = (full_prediction - observed_log) / std
                 full_chi2 = float(torch.mean(full_residual.square()).item())
                 full_rms = float(
-                    (100.0 * torch.sqrt(torch.mean(torch.expm1(full_prediction - observed_log).square()))).item()
+                    (
+                        100.0
+                        * torch.sqrt(
+                            torch.mean(
+                                torch.expm1(full_prediction - observed_log).square()
+                            )
+                        )
+                    ).item()
                 )
             physics_forward_timesteps += n_times
             remember(iteration, full_chi2, log_model, full_prediction)
         if windowed:
             cycle, position = divmod(iteration, len(windows))
-            schedule_position = len(windows) - 1 - position if config.alternate_window_direction and cycle % 2 else position
+            schedule_position = (
+                len(windows) - 1 - position
+                if config.alternate_window_direction and cycle % 2
+                else position
+            )
             batch_indices_np = windows[schedule_position]
-            batch_indices = torch.as_tensor(batch_indices_np, device=device, dtype=torch.int64)
+            batch_indices = torch.as_tensor(
+                batch_indices_np, device=device, dtype=torch.int64
+            )
             batch_model = log_model.index_select(0, batch_indices)
             batch_observed = observed_log.index_select(0, batch_indices)
             batch_std = std.index_select(0, batch_indices)
@@ -406,7 +508,10 @@ def _fit(
                 residual.shape[1] * torch.sum(time_weights)
             )
             rms_tensor = 100.0 * torch.sqrt(
-                torch.sum(torch.expm1(predicted_log - batch_observed).square() * time_weights[:, None])
+                torch.sum(
+                    torch.expm1(predicted_log - batch_observed).square()
+                    * time_weights[:, None]
+                )
                 / (residual.shape[1] * torch.sum(time_weights))
             )
             batch_timestep_count = int(batch_indices.numel())
@@ -415,14 +520,18 @@ def _fit(
             predicted_log = physics(log_model, forward)
             residual = (predicted_log - observed_log) / std
             chi2_tensor = torch.mean(torch.square(residual))
-            rms_tensor = 100.0 * torch.sqrt(torch.mean(torch.square(torch.expm1(predicted_log - observed_log))))
+            rms_tensor = 100.0 * torch.sqrt(
+                torch.mean(torch.square(torch.expm1(predicted_log - observed_log)))
+            )
             batch_timestep_count = n_times
         physics_forward_timesteps += batch_timestep_count
         spatial_penalty = torch.zeros((), device=device)
         if spatial_operator is not None:
             model_columns = log_model.transpose(0, 1) if series else log_model[:, None]
             spatial_differences = torch.sparse.mm(spatial_operator, model_columns)
-            spatial_penalty = _huber_mean(spatial_differences, config.regularization_huber_delta)
+            spatial_penalty = _huber_mean(
+                spatial_differences, config.regularization_huber_delta
+            )
         temporal_penalty = torch.zeros((), device=device)
         if series and config.temporal_regularization > 0.0:
             temporal_penalty = _huber_mean(
@@ -458,8 +567,16 @@ def _fit(
             full_rms = rms
             remember(iteration, full_chi2, log_model, full_prediction)
 
-        target_reached = config.target_chi2 is not None and full_chi2 is not None and full_chi2 <= config.target_chi2
-        if iteration % config.log_every == 0 or target_reached or iteration == config.max_iterations:
+        target_reached = (
+            config.target_chi2 is not None
+            and full_chi2 is not None
+            and full_chi2 <= config.target_chi2
+        )
+        if (
+            iteration % config.log_every == 0
+            or target_reached
+            or iteration == config.max_iterations
+        ):
             _emit(
                 config,
                 "iteration",
@@ -484,7 +601,9 @@ def _fit(
                 chi2=full_chi2,
                 rms=full_rms,
                 learning_rate=float(optimizer.param_groups[0]["lr"]),
-                log_resistivity=log_model.detach().to(device="cpu", dtype=torch.float64).numpy(),
+                log_resistivity=log_model.detach()
+                .to(device="cpu", dtype=torch.float64)
+                .numpy(),
             )
         if target_reached:
             stop_reason = "target_chi2"
@@ -497,7 +616,9 @@ def _fit(
         objective.backward()
         physics_vjp_timesteps += batch_timestep_count
         if config.gradient_clip_norm is not None:
-            torch.nn.utils.clip_grad_norm_(network.parameters(), float(config.gradient_clip_norm))
+            torch.nn.utils.clip_grad_norm_(
+                network.parameters(), float(config.gradient_clip_norm)
+            )
         _synchronize(device)
         backward_seconds += time.perf_counter() - backward_started
         optimizer_started = time.perf_counter()

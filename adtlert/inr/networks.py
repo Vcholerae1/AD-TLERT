@@ -54,7 +54,9 @@ class MultiscaleFourierEncoder(nn.Module):
     ) -> None:
         super().__init__()
         if input_dimensions not in (1, 2, 3):
-            raise ValueError("input_dimensions must be 1 (time), 2 (space), or 3 (space-time)")
+            raise ValueError(
+                "input_dimensions must be 1 (time), 2 (space), or 3 (space-time)"
+            )
         if spatial_levels < 0 or temporal_levels < 0:
             raise ValueError("Fourier levels must be non-negative")
         self.input_dimensions = int(input_dimensions)
@@ -84,20 +86,34 @@ class MultiscaleFourierEncoder(nn.Module):
 
     @property
     def output_dimensions(self) -> int:
-        spatial_features = 2 * 2 * self.spatial_levels if self.input_dimensions >= 2 else 0
-        temporal_features = 2 * self.temporal_levels if self.input_dimensions in (1, 3) else 0
+        spatial_features = (
+            2 * 2 * self.spatial_levels if self.input_dimensions >= 2 else 0
+        )
+        temporal_features = (
+            2 * self.temporal_levels if self.input_dimensions in (1, 3) else 0
+        )
         return self.input_dimensions + spatial_features + temporal_features
 
     def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
         if coordinates.shape[-1] != self.input_dimensions:
-            raise ValueError(f"coordinates must end with {self.input_dimensions} dimensions")
+            raise ValueError(
+                f"coordinates must end with {self.input_dimensions} dimensions"
+            )
         features = [coordinates]
         if self.input_dimensions >= 2 and self.spatial_levels:
             spatial_phase = coordinates[..., :2, None] * self.spatial_frequencies
-            features.extend((torch.sin(spatial_phase).flatten(-2), torch.cos(spatial_phase).flatten(-2)))
+            features.extend(
+                (
+                    torch.sin(spatial_phase).flatten(-2),
+                    torch.cos(spatial_phase).flatten(-2),
+                )
+            )
         if self.input_dimensions in (1, 3) and self.temporal_levels:
             temporal_index = 0 if self.input_dimensions == 1 else 2
-            temporal_phase = coordinates[..., temporal_index : temporal_index + 1] * self.temporal_frequencies
+            temporal_phase = (
+                coordinates[..., temporal_index : temporal_index + 1]
+                * self.temporal_frequencies
+            )
             features.extend((torch.sin(temporal_phase), torch.cos(temporal_phase)))
         return torch.cat(features, dim=-1)
 
@@ -115,7 +131,9 @@ class MultiscaleFourierEncoder(nn.Module):
         return torch.cat(parts)
 
     @staticmethod
-    def _progressive_weights(levels: int, start_levels: int, progress: float) -> torch.Tensor:
+    def _progressive_weights(
+        levels: int, start_levels: int, progress: float
+    ) -> torch.Tensor:
         if levels == 0:
             return torch.empty(0, dtype=torch.float32)
         start = min(max(int(start_levels), 0), levels)
@@ -138,14 +156,24 @@ class MultiscaleFourierEncoder(nn.Module):
         """Smoothly unlock high-frequency features from coarse to fine."""
 
         self.spatial_level_weights.copy_(
-            self._progressive_weights(self.spatial_levels, spatial_start_levels, progress)
+            self._progressive_weights(
+                self.spatial_levels, spatial_start_levels, progress
+            )
         )
         self.temporal_level_weights.copy_(
-            self._progressive_weights(self.temporal_levels, temporal_start_levels, progress)
+            self._progressive_weights(
+                self.temporal_levels, temporal_start_levels, progress
+            )
         )
 
 
-def _mlp(input_width: int, hidden_width: int, hidden_layers: int, *, zero_output: bool = False) -> nn.Sequential:
+def _mlp(
+    input_width: int,
+    hidden_width: int,
+    hidden_layers: int,
+    *,
+    zero_output: bool = False,
+) -> nn.Sequential:
     layers: list[nn.Module] = []
     for _ in range(int(hidden_layers)):
         layers.extend((nn.Linear(int(input_width), int(hidden_width)), nn.SiLU()))
@@ -160,13 +188,21 @@ def _mlp(input_width: int, hidden_width: int, hidden_layers: int, *, zero_output
 class _BoundedLogResistivity(nn.Module):
     """Maps a residual to ``log rho``: ``log rho0 + r``, or a shifted sigmoid inside ``resistivity_bounds``."""
 
-    def _init_output(self, initial_resistivity: float, resistivity_bounds: tuple[float, float] | None) -> None:
+    def _init_output(
+        self, initial_resistivity: float, resistivity_bounds: tuple[float, float] | None
+    ) -> None:
         if not np.isfinite(initial_resistivity) or initial_resistivity <= 0.0:
             raise ValueError("initial_resistivity must be positive and finite")
         self.initial_resistivity = float(initial_resistivity)
-        self.resistivity_bounds = None if resistivity_bounds is None else tuple(float(v) for v in resistivity_bounds)
+        self.resistivity_bounds = (
+            None
+            if resistivity_bounds is None
+            else tuple(float(v) for v in resistivity_bounds)
+        )
         self.bounded_output = resistivity_bounds is not None
-        buffer = lambda name, value: self.register_buffer(name, torch.tensor(value, dtype=torch.float32))  # noqa: E731
+        buffer = lambda name, value: self.register_buffer(
+            name, torch.tensor(value, dtype=torch.float32)
+        )  # noqa: E731
         buffer("initial_log_resistivity", math.log(initial_resistivity))
         if resistivity_bounds is None:
             log_lower = log_upper = float("nan")
@@ -174,9 +210,13 @@ class _BoundedLogResistivity(nn.Module):
         else:
             lower, upper = self.resistivity_bounds
             if not 0.0 < lower < initial_resistivity < upper:
-                raise ValueError("resistivity_bounds must strictly contain initial_resistivity")
+                raise ValueError(
+                    "resistivity_bounds must strictly contain initial_resistivity"
+                )
             log_lower, log_upper = math.log(lower), math.log(upper)
-            fraction = (math.log(initial_resistivity) - log_lower) / (log_upper - log_lower)
+            fraction = (math.log(initial_resistivity) - log_lower) / (
+                log_upper - log_lower
+            )
             initial_logit = math.log(fraction / (1.0 - fraction))
         buffer("log_lower_bound", log_lower)
         buffer("log_upper_bound", log_upper)
@@ -186,7 +226,10 @@ class _BoundedLogResistivity(nn.Module):
         if not self.bounded_output:
             return self.initial_log_resistivity + residual
         fraction = torch.sigmoid(self.initial_logit + residual)
-        return self.log_lower_bound + (self.log_upper_bound - self.log_lower_bound) * fraction
+        return (
+            self.log_lower_bound
+            + (self.log_upper_bound - self.log_lower_bound) * fraction
+        )
 
 
 class MultiscaleINR(_BoundedLogResistivity):
@@ -221,7 +264,12 @@ class MultiscaleINR(_BoundedLogResistivity):
             temporal_levels=temporal_levels,
             frequency_spacing=frequency_spacing,
         )
-        self.mlp = _mlp(self.encoder.output_dimensions, hidden_width, hidden_layers, zero_output=True)
+        self.mlp = _mlp(
+            self.encoder.output_dimensions,
+            hidden_width,
+            hidden_layers,
+            zero_output=True,
+        )
         self._init_output(initial_resistivity, resistivity_bounds)
 
     @property
@@ -259,7 +307,9 @@ class MultiscaleINR(_BoundedLogResistivity):
         }
 
     def forward_encoded(self, encoded_coordinates: torch.Tensor) -> torch.Tensor:
-        feature_mask = self.encoder.feature_mask(dtype=encoded_coordinates.dtype, device=encoded_coordinates.device)
+        feature_mask = self.encoder.feature_mask(
+            dtype=encoded_coordinates.dtype, device=encoded_coordinates.device
+        )
         return self._output(self.mlp(encoded_coordinates * feature_mask).squeeze(-1))
 
     def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
@@ -299,16 +349,43 @@ class DualNetworkINR(_BoundedLogResistivity):
         frequency_spacing: str = "log_uniform",
     ) -> None:
         super().__init__()
-        if min(spatial_hidden_width, temporal_hidden_width, spatial_hidden_layers, temporal_hidden_layers) < 1:
+        if (
+            min(
+                spatial_hidden_width,
+                temporal_hidden_width,
+                spatial_hidden_layers,
+                temporal_hidden_layers,
+            )
+            < 1
+        ):
             raise ValueError("hidden widths and layer counts must be positive")
         self.spatial_hidden_width = int(spatial_hidden_width)
         self.temporal_hidden_width = int(temporal_hidden_width)
         self.spatial_hidden_layers = int(spatial_hidden_layers)
         self.temporal_hidden_layers = int(temporal_hidden_layers)
-        self.spatial_encoder = MultiscaleFourierEncoder(2, spatial_levels=spatial_levels, temporal_levels=0, frequency_spacing=frequency_spacing)
-        self.temporal_encoder = MultiscaleFourierEncoder(1, spatial_levels=0, temporal_levels=temporal_levels, frequency_spacing=frequency_spacing)
-        self.spatial_mlp = _mlp(self.spatial_encoder.output_dimensions, spatial_hidden_width, spatial_hidden_layers)
-        self.temporal_mlp = _mlp(self.temporal_encoder.output_dimensions, temporal_hidden_width, temporal_hidden_layers, zero_output=True)
+        self.spatial_encoder = MultiscaleFourierEncoder(
+            2,
+            spatial_levels=spatial_levels,
+            temporal_levels=0,
+            frequency_spacing=frequency_spacing,
+        )
+        self.temporal_encoder = MultiscaleFourierEncoder(
+            1,
+            spatial_levels=0,
+            temporal_levels=temporal_levels,
+            frequency_spacing=frequency_spacing,
+        )
+        self.spatial_mlp = _mlp(
+            self.spatial_encoder.output_dimensions,
+            spatial_hidden_width,
+            spatial_hidden_layers,
+        )
+        self.temporal_mlp = _mlp(
+            self.temporal_encoder.output_dimensions,
+            temporal_hidden_width,
+            temporal_hidden_layers,
+            zero_output=True,
+        )
         self._init_output(initial_resistivity, resistivity_bounds)
 
     @property
@@ -317,10 +394,14 @@ class DualNetworkINR(_BoundedLogResistivity):
 
     def encode(self, coordinates: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if coordinates.ndim != 3 or coordinates.shape[-1] != 3:
-            raise ValueError("DualNetworkINR coordinates must have shape (time, cell, 3)")
+            raise ValueError(
+                "DualNetworkINR coordinates must have shape (time, cell, 3)"
+            )
         spatial_coordinates = coordinates[0, :, :2]
         temporal_coordinates = coordinates[:, 0, 2:3]
-        return self.spatial_encoder(spatial_coordinates), self.temporal_encoder(temporal_coordinates)
+        return self.spatial_encoder(spatial_coordinates), self.temporal_encoder(
+            temporal_coordinates
+        )
 
     def set_progressive_levels(
         self,
@@ -353,7 +434,9 @@ class DualNetworkINR(_BoundedLogResistivity):
             "frequency_spacing": self.spatial_encoder.frequency_spacing,
         }
 
-    def forward_encoded(self, encoded_coordinates: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    def forward_encoded(
+        self, encoded_coordinates: tuple[torch.Tensor, torch.Tensor]
+    ) -> torch.Tensor:
         spatial_encoded, temporal_encoded = encoded_coordinates
         spatial_features = spatial_encoded * self.spatial_encoder.feature_mask(
             dtype=spatial_encoded.dtype,

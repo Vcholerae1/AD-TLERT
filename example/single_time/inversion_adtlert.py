@@ -59,7 +59,18 @@ def _synchronize_gpu() -> None:
 
 def _load_forward_npz(path: Path) -> dict[str, np.ndarray]:
     with np.load(path) as data:
-        required = {"rhoa", "a", "b", "m", "n", "elec_x", "elec_z", "x_nodes", "z_top", "layer_thickness"}
+        required = {
+            "rhoa",
+            "a",
+            "b",
+            "m",
+            "n",
+            "elec_x",
+            "elec_z",
+            "x_nodes",
+            "z_top",
+            "layer_thickness",
+        }
         missing = required.difference(data.files)
         if missing:
             raise KeyError(f"{path} missing required arrays: {sorted(missing)}")
@@ -97,7 +108,9 @@ def _load_forward_dat(path: Path) -> dict[str, np.ndarray]:
     return loaded
 
 
-def _resolve_data_std(args: argparse.Namespace, forward_data: dict[str, np.ndarray]) -> tuple[float | np.ndarray, str]:
+def _resolve_data_std(
+    args: argparse.Namespace, forward_data: dict[str, np.ndarray]
+) -> tuple[float | np.ndarray, str]:
     if args.data_std is not None:
         return float(args.data_std), "cli"
     err = forward_data.get("err")
@@ -106,7 +119,9 @@ def _resolve_data_std(args: argparse.Namespace, forward_data: dict[str, np.ndarr
     return 0.05, "default_0.05"
 
 
-def _data_std_summary(data_std: float | np.ndarray, shape: tuple[int, ...]) -> dict[str, float]:
+def _data_std_summary(
+    data_std: float | np.ndarray, shape: tuple[int, ...]
+) -> dict[str, float]:
     values = np.asarray(data_std, dtype=float)
     if values.ndim == 0:
         values = np.full(shape, float(values), dtype=float)
@@ -175,7 +190,9 @@ def _plot_comparison(
     ax_inv = fig.add_subplot(grid[1, 0], sharex=ax_true, sharey=ax_true)
     cax = fig.add_subplot(grid[:, 1])
 
-    ax_true.pcolormesh(x_grid, z_grid, true_top, shading="auto", cmap="turbo", norm=norm)
+    ax_true.pcolormesh(
+        x_grid, z_grid, true_top, shading="auto", cmap="turbo", norm=norm
+    )
     ax_true.plot(case.x_nodes, -case.z_top, color="black", linewidth=1.5)
     ax_true.set_title(f"True Model (t{step:05d})")
 
@@ -221,7 +238,11 @@ def _plot_comparison(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project-root", default=None, help="Repository root. Auto-detected by default.")
+    parser.add_argument(
+        "--project-root",
+        default=None,
+        help="Repository root. Auto-detected by default.",
+    )
     parser.add_argument(
         "--forward-npz",
         default="result/1_single_forward_adtlert/synthetic_ert_terrain_vardz.npz",
@@ -232,14 +253,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="result/1_single_forward_adtlert/synthetic_ert_terrain_vardz.dat",
         help="Notebook .dat file used for observed data and source-position mesh generation.",
     )
-    parser.add_argument("--true-model", default="resistivity_models_2d/resistivity2d_y2_t04536.npy")
+    parser.add_argument(
+        "--true-model", default="resistivity_models_2d/resistivity2d_y2_t04536.npy"
+    )
     parser.add_argument("--model-dir", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", default="result/2_single_inversion_adtlert")
     parser.add_argument("--max-iterations", type=int, default=20)
     parser.add_argument("--data-std", type=float, default=None)
-    parser.add_argument("--data-misfit", choices=available_data_misfits(), default="weighted_log_l2")
+    parser.add_argument(
+        "--data-misfit", choices=available_data_misfits(), default="weighted_log_l2"
+    )
     parser.add_argument("--regularization", type=float, default=50.0)
-    parser.add_argument("--regularization-mode", choices=("model", "update"), default="update")
+    parser.add_argument(
+        "--regularization-mode", choices=("model", "update"), default="update"
+    )
     parser.add_argument(
         "--regularization-domain",
         choices=("state", "physical"),
@@ -303,7 +330,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adam-epsilon", type=float, default=1.0e-8)
     parser.add_argument("--model-min", type=float, default=10.0)
     parser.add_argument("--model-max", type=float, default=20000.0)
-    parser.add_argument("--inversion-depth-levels", type=int, default=11, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--inversion-depth-levels", type=int, default=11, help=argparse.SUPPRESS
+    )
     parser.add_argument("--inversion-mesh-quality", type=float, default=34.0)
     parser.add_argument("--inversion-mesh-smoothing-iterations", type=int, default=10)
     parser.add_argument(
@@ -320,18 +349,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-log-step", type=float, default=None)
     parser.add_argument("--coverage-percentile", type=float, default=20.0)
     parser.add_argument("--terrain-cache-dir", default=None)
-    parser.add_argument("--quiet", action="store_true", help="Disable progress output on stderr.")
+    parser.add_argument(
+        "--quiet", action="store_true", help="Disable progress output on stderr."
+    )
     parser.add_argument("--no-plot", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    root = Path(args.project_root).resolve() if args.project_root else Path(__file__).resolve().parents[2]
+    root = (
+        Path(args.project_root).resolve()
+        if args.project_root
+        else Path(__file__).resolve().parents[2]
+    )
     forward_npz = resolve(root, args.forward_npz)
     forward_dat = resolve(root, args.forward_dat) if args.forward_dat else None
     true_model_file = resolve(root, args.true_model)
-    mesh_reference = resolve(root, args.inversion_mesh_reference) if args.inversion_mesh_reference else None
+    mesh_reference = (
+        resolve(root, args.inversion_mesh_reference)
+        if args.inversion_mesh_reference
+        else None
+    )
     output_dir = resolve(root, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -340,7 +379,9 @@ def main(argv: list[str] | None = None) -> int:
     if mesh_reference is None and not args.no_mesh_cache and mesh_cache.exists():
         mesh_reference = mesh_cache
     forward_meta = _load_forward_npz(forward_npz)
-    forward_data = _load_forward_dat(forward_dat) if forward_dat is not None else forward_meta
+    forward_data = (
+        _load_forward_dat(forward_dat) if forward_dat is not None else forward_meta
+    )
     forward_data["x_nodes"] = forward_meta["x_nodes"]
     forward_data["z_top"] = forward_meta["z_top"]
     forward_data["layer_thickness"] = forward_meta["layer_thickness"]
@@ -372,12 +413,16 @@ def main(argv: list[str] | None = None) -> int:
         case.survey,
         case.parameter_cell_ids,
         regularization_mesh=case.mesh,
-        terrain_cache_dir=None if args.terrain_cache_dir is None else resolve(root, args.terrain_cache_dir),
+        terrain_cache_dir=None
+        if args.terrain_cache_dir is None
+        else resolve(root, args.terrain_cache_dir),
     )
     petrophysical_parameter_dir = (
         resolve(root, args.petrophysical_parameter_dir)
         if args.petrophysical_parameter_dir is not None
-        else true_model_file.parent.parent / "parflow_models" / "petrophysical_models_2d"
+        else true_model_file.parent.parent
+        / "parflow_models"
+        / "petrophysical_models_2d"
     )
     petrophysical_parameters = None
     if str(args.petrophysical_transform).replace("-", "_") == "saturation":
@@ -421,7 +466,9 @@ def main(argv: list[str] | None = None) -> int:
             target_chi2=args.target_chi2,
             progress_callback=progress,
         )
-        initial_model = np.full(case.mesh.cell_count, float(np.median(observed_rhoa)), dtype=float)
+        initial_model = np.full(
+            case.mesh.cell_count, float(np.median(observed_rhoa)), dtype=float
+        )
         inversion = ERTInversion(
             forward=forward,
             observed_data=observed_rhoa,
@@ -447,16 +494,34 @@ def main(argv: list[str] | None = None) -> int:
     np.save(output_dir / "final_model.npy", result.final_model)
     np.save(output_dir / "final_log_model.npy", result.final_log_model)
     np.save(output_dir / "predicted_rhoa.npy", result.predicted_data)
-    final_parameter_model = None if result.final_parameter_model is None else np.asarray(result.final_parameter_model, dtype=float)
-    if final_parameter_model is not None and result.final_parameter_name != "resistivity":
-        np.save(output_dir / f"final_{result.final_parameter_name}_model.npy", final_parameter_model)
-        if result.final_parameter_name == "saturation" and petrophysical_parameters is not None and "phi" in petrophysical_parameters:
-            water_content = final_parameter_model * np.asarray(petrophysical_parameters["phi"], dtype=float)
+    final_parameter_model = (
+        None
+        if result.final_parameter_model is None
+        else np.asarray(result.final_parameter_model, dtype=float)
+    )
+    if (
+        final_parameter_model is not None
+        and result.final_parameter_name != "resistivity"
+    ):
+        np.save(
+            output_dir / f"final_{result.final_parameter_name}_model.npy",
+            final_parameter_model,
+        )
+        if (
+            result.final_parameter_name == "saturation"
+            and petrophysical_parameters is not None
+            and "phi" in petrophysical_parameters
+        ):
+            water_content = final_parameter_model * np.asarray(
+                petrophysical_parameters["phi"], dtype=float
+            )
             np.save(output_dir / "final_water_content_model.npy", water_content)
     np.save(output_dir / "coverage.npy", plot_coverage)
     np.save(output_dir / "coverage_mask.npy", coverage_mask)
     np.save(output_dir / "final_model_masked_nan.npy", masked_model)
-    np.save(output_dir / "chi2_history.npy", np.asarray(result.iteration_chi2, dtype=float))
+    np.save(
+        output_dir / "chi2_history.npy", np.asarray(result.iteration_chi2, dtype=float)
+    )
     mesh_file = output_dir / f"inversion_mesh_t{step:05d}.npz"
     _save_mesh_npz(mesh_file, case)
 
@@ -471,17 +536,25 @@ def main(argv: list[str] | None = None) -> int:
         "mesh_nodes": int(case.mesh.node_count),
         "forward_mesh_cells": int(case.forward_mesh.cell_count),
         "forward_mesh_nodes": int(case.forward_mesh.node_count),
-        "inversion_mesh": "cached_para_domain" if mesh_reference is not None else "native_source_position_triangle",
+        "inversion_mesh": "cached_para_domain"
+        if mesh_reference is not None
+        else "native_source_position_triangle",
         "inversion_mesh_file": str(mesh_file),
-        "inversion_mesh_reference": None if mesh_reference is None else str(mesh_reference),
+        "inversion_mesh_reference": None
+        if mesh_reference is None
+        else str(mesh_reference),
         "inversion_mesh_quality": float(args.inversion_mesh_quality),
-        "inversion_mesh_smoothing_iterations": int(args.inversion_mesh_smoothing_iterations),
+        "inversion_mesh_smoothing_iterations": int(
+            args.inversion_mesh_smoothing_iterations
+        ),
         "measurements": int(case.survey.measurement_count),
         "max_iterations": int(args.max_iterations),
         "iterations": len(result.iteration_chi2),
         "inversion_sec": float(inversion_sec),
         "inversion_timing_scope": "ERTInversion.run with GPU synchronization",
-        "final_chi2": float(result.iteration_chi2[-1]) if result.iteration_chi2 else None,
+        "final_chi2": float(result.iteration_chi2[-1])
+        if result.iteration_chi2
+        else None,
         "regularization": float(args.regularization),
         "regularization_mode": args.regularization_mode,
         "regularization_domain": str(args.regularization_domain),
@@ -493,7 +566,10 @@ def main(argv: list[str] | None = None) -> int:
         "petrophysical_parameter_dir": str(petrophysical_parameter_dir),
         "petrophysical_preset": str(args.petrophysical_preset),
         "saturation_floor": float(args.saturation_floor),
-        "saved_parameter_model": bool(final_parameter_model is not None and result.final_parameter_name != "resistivity"),
+        "saved_parameter_model": bool(
+            final_parameter_model is not None
+            and result.final_parameter_name != "resistivity"
+        ),
         "saved_water_content_model": bool(
             final_parameter_model is not None
             and result.final_parameter_name == "saturation"

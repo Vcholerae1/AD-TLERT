@@ -38,25 +38,39 @@ def _write_summary(path: Path, summary: dict[str, object]) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project-root", default=None, help="Repository root. Auto-detected by default.")
+    parser.add_argument(
+        "--project-root",
+        default=None,
+        help="Repository root. Auto-detected by default.",
+    )
     parser.add_argument(
         "--input-file",
         default="resistivity_models_2d/resistivity2d_y2_t04536.npy",
         help="2D ParFlow resistivity slice in bottom-to-top z ordering.",
     )
-    parser.add_argument("--model-dir", default="parflow_models", help="Directory containing pftcl and slope_x files.")
+    parser.add_argument(
+        "--model-dir",
+        default="parflow_models",
+        help="Directory containing pftcl and slope_x files.",
+    )
     parser.add_argument("--output-dir", default="result/1_single_forward_adtlert")
     parser.add_argument("--n-electrodes", type=int, default=48)
     parser.add_argument("--relative-error", type=float, default=0.03)
     parser.add_argument("--topo-offset", type=float, default=0.0)
     parser.add_argument("--terrain-cache-dir", default=None)
-    parser.add_argument("--no-plot", action="store_true", help="Do not save the PNG preview.")
+    parser.add_argument(
+        "--no-plot", action="store_true", help="Do not save the PNG preview."
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    root = Path(args.project_root).resolve() if args.project_root else Path(__file__).resolve().parents[2]
+    root = (
+        Path(args.project_root).resolve()
+        if args.project_root
+        else Path(__file__).resolve().parents[2]
+    )
     input_file = resolve(root, args.input_file)
     model_dir = resolve(root, args.model_dir)
     output_dir = resolve(root, args.output_dir)
@@ -77,7 +91,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     rhoa = run_terrain_forward(
         case,
-        terrain_cache_dir=None if args.terrain_cache_dir is None else resolve(root, args.terrain_cache_dir),
+        terrain_cache_dir=None
+        if args.terrain_cache_dir is None
+        else resolve(root, args.terrain_cache_dir),
     )
 
     dat_file = output_dir / "synthetic_ert_terrain_vardz.dat"

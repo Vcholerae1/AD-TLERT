@@ -60,22 +60,35 @@ def _save_geometry(path: Path, case, grid, *, first_step: int) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project-root", default=None, help="Repository root. Defaults to this script directory.")
+    parser.add_argument(
+        "--project-root",
+        default=None,
+        help="Repository root. Defaults to this script directory.",
+    )
     parser.add_argument(
         "--input-dir",
         default="../resistivity_models_2d",
         help="Directory containing notebook-style resistivity_t*.npy or resistivity2d_y{y}_t*.npy terrain slices.",
     )
     parser.add_argument("--model-dir", default="../parflow_models")
-    parser.add_argument("--output-dir", default="../result/1_timelapsedERT_forward_adtlert")
+    parser.add_argument(
+        "--output-dir", default="../result/1_timelapsedERT_forward_adtlert"
+    )
     parser.add_argument("--y-index", type=int, default=2)
     parser.add_argument("--file-stride", type=int, default=1)
-    parser.add_argument("--max-steps", type=int, default=None, help="Limit selected timesteps for quick checks.")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Limit selected timesteps for quick checks.",
+    )
     parser.add_argument("--n-electrodes", type=int, default=48)
     parser.add_argument("--relative-error", type=float, default=0.03)
     parser.add_argument("--topo-offset", type=float, default=0.0)
     parser.add_argument("--terrain-cache-dir", default=None)
-    parser.add_argument("--skip-existing", action="store_true", help="Reuse existing .dat/.npz files.")
+    parser.add_argument(
+        "--skip-existing", action="store_true", help="Reuse existing .dat/.npz files."
+    )
     parser.add_argument(
         "--reuse-solver-state",
         action=argparse.BooleanOptionalAction,
@@ -95,7 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    root = Path(args.project_root).resolve() if args.project_root else Path(__file__).resolve().parent
+    root = (
+        Path(args.project_root).resolve()
+        if args.project_root
+        else Path(__file__).resolve().parent
+    )
     input_dir = _resolve(root, args.input_dir)
     model_dir = _resolve(root, args.model_dir)
     output_dir = _resolve(root, args.output_dir)
@@ -139,7 +156,9 @@ def main(argv: list[str] | None = None) -> int:
         relative_error=args.relative_error,
         overwrite=not args.skip_existing,
         reuse_solver_state=args.reuse_solver_state,
-        terrain_cache_dir=None if args.terrain_cache_dir is None else _resolve(root, args.terrain_cache_dir),
+        terrain_cache_dir=None
+        if args.terrain_cache_dir is None
+        else _resolve(root, args.terrain_cache_dir),
         prepare_forward=args.prepare_forward,
     )
     elapsed_sec = time.perf_counter() - start
@@ -151,7 +170,9 @@ def main(argv: list[str] | None = None) -> int:
         "output_dir": str(output_dir),
         "n_selected": int(len(pairs)),
         "n_ok": int(sum(1 for record in manifest if record.status == "ok")),
-        "n_skipped": int(sum(1 for record in manifest if record.status == "skipped_existing")),
+        "n_skipped": int(
+            sum(1 for record in manifest if record.status == "skipped_existing")
+        ),
         "n_failed": int(len(failures)),
         "first_step": int(pairs[0][0]),
         "last_step": int(pairs[-1][0]),

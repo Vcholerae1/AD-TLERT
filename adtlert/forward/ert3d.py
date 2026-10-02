@@ -107,13 +107,19 @@ class ERTForward3D:
             return value
 
         self.boundary_mode = choice("boundary_mode", ("mixed", "dirichlet"))
-        self.geometric_factor_mode = choice("geometric_factor_mode", ("auto", "analytic", "numerical"))
+        self.geometric_factor_mode = choice(
+            "geometric_factor_mode", ("auto", "analytic", "numerical")
+        )
         if not torch.cuda.is_available():
-            raise RuntimeError("ADTLERT requires an NVIDIA GPU with CUDA (cuDSS sparse solves)")
+            raise RuntimeError(
+                "ADTLERT requires an NVIDIA GPU with CUDA (cuDSS sparse solves)"
+            )
         if self.element_order not in (1, 2):
             raise ValueError("element_order must be 1 or 2")
         if self.survey.dimension != 3:
-            raise ValueError("ERTForward3D requires three-coordinate electrode positions")
+            raise ValueError(
+                "ERTForward3D requires three-coordinate electrode positions"
+            )
         self._cudss_state: dict[str, object] = {}
         self._cached_geometric_factors: torch.Tensor | None = None
         self._reset_solution_cache()
@@ -121,21 +127,37 @@ class ERTForward3D:
         quads = np.asarray(self.survey.measurements, dtype=np.int32)
         self._current_electrode_ids = np.unique(quads[:, :2]).astype(np.int32)
         self._receiver_electrode_ids = np.unique(quads[:, 2:]).astype(np.int32)
-        self._rhs_capacity = max(len(self._current_electrode_ids), len(self._receiver_electrode_ids))
-        self._current_electrode_map = np.full(self.survey.electrode_count, -1, dtype=np.int32)
-        self._receiver_electrode_map = np.full(self.survey.electrode_count, -1, dtype=np.int32)
-        self._current_electrode_map[self._current_electrode_ids] = np.arange(len(self._current_electrode_ids))
-        self._receiver_electrode_map[self._receiver_electrode_ids] = np.arange(len(self._receiver_electrode_ids))
+        self._rhs_capacity = max(
+            len(self._current_electrode_ids), len(self._receiver_electrode_ids)
+        )
+        self._current_electrode_map = np.full(
+            self.survey.electrode_count, -1, dtype=np.int32
+        )
+        self._receiver_electrode_map = np.full(
+            self.survey.electrode_count, -1, dtype=np.int32
+        )
+        self._current_electrode_map[self._current_electrode_ids] = np.arange(
+            len(self._current_electrode_ids)
+        )
+        self._receiver_electrode_map[self._receiver_electrode_ids] = np.arange(
+            len(self._receiver_electrode_ids)
+        )
         if self.element_order == 2:
             element_data = build_tetrahedron_p2_data(self.mesh)
             self._dof_nodes = np.asarray(element_data.dof_nodes, dtype=float)
-            self._cell_connectivity = np.asarray(element_data.cell_connectivity, dtype=np.int32)
-            self._boundary_connectivity = np.asarray(element_data.boundary_connectivity, dtype=np.int32)
+            self._cell_connectivity = np.asarray(
+                element_data.cell_connectivity, dtype=np.int32
+            )
+            self._boundary_connectivity = np.asarray(
+                element_data.boundary_connectivity, dtype=np.int32
+            )
         else:
             element_data = build_tetrahedron_p1_data(self.mesh)
             self._dof_nodes = np.asarray(self.mesh.nodes, dtype=float)
             self._cell_connectivity = np.asarray(self.mesh.cells, dtype=np.int32)
-            self._boundary_connectivity = np.asarray(self.mesh.boundary_faces, dtype=np.int32)
+            self._boundary_connectivity = np.asarray(
+                self.mesh.boundary_faces, dtype=np.int32
+            )
         self._electrode_matrix = _interpolation_matrix(
             self.mesh,
             electrodes,
@@ -143,13 +165,17 @@ class ERTForward3D:
             cell_connectivity=self._cell_connectivity,
             dof_count=self._dof_nodes.shape[0],
         )
-        self._volume_templates = np.asarray(element_data.stiffness_templates, dtype=np.float64)
+        self._volume_templates = np.asarray(
+            element_data.stiffness_templates, dtype=np.float64
+        )
         self._cell_templates = self._volume_templates.copy()
         if self.boundary_mode == "mixed":
             self._add_mixed_boundary_templates()
         self._build_assembly_routing()
 
-        self._unit_operator = self._assemble_operator(np.ones(self.mesh.cell_count, dtype=float))
+        self._unit_operator = self._assemble_operator(
+            np.ones(self.mesh.cell_count, dtype=float)
+        )
         if self.boundary_mode == "dirichlet":
             self._unit_operator = self._apply_dirichlet_matrix(self._unit_operator)
         self._source_rhs = self._build_source_rhs()
@@ -166,9 +192,13 @@ class ERTForward3D:
         areas = np.asarray(self.mesh.boundary_face_areas, dtype=float)
         normals = np.asarray(self.mesh.boundary_face_normals, dtype=float)
         surface_mask = np.asarray(self.mesh.surface_face_mask, dtype=bool)
-        source_center = np.mean(np.asarray(self.survey.electrode_positions, dtype=float), axis=0)
+        source_center = np.mean(
+            np.asarray(self.survey.electrode_positions, dtype=float), axis=0
+        )
 
-        triangle_mass = np.asarray(((2.0, 1.0, 1.0), (1.0, 2.0, 1.0), (1.0, 1.0, 2.0))) / 12.0
+        triangle_mass = (
+            np.asarray(((2.0, 1.0, 1.0), (1.0, 2.0, 1.0), (1.0, 1.0, 2.0))) / 12.0
+        )
         for face_id in np.flatnonzero(~surface_mask):
             radial = centers[face_id] - source_center
             radius_sq = float(np.dot(radial, radial))
@@ -178,7 +208,9 @@ class ERTForward3D:
             if alpha == 0.0:
                 continue
             cell_id = int(face_cells[face_id])
-            local = _local_face_indices(self._cell_connectivity[cell_id], self._boundary_connectivity[face_id])
+            local = _local_face_indices(
+                self._cell_connectivity[cell_id], self._boundary_connectivity[face_id]
+            )
             face_mass = (
                 p2_triangle_mass_template(areas[face_id])
                 if self.element_order == 2
@@ -218,7 +250,12 @@ class ERTForward3D:
         self._assembly_inverse = inverse.astype(np.int32)
         self._csr_indices = (unique_keys % dof_count).astype(np.int32)
         self._csr_indptr = np.concatenate(
-            ((0,), np.cumsum(np.bincount(unique_rows, minlength=dof_count), dtype=np.int64))
+            (
+                (0,),
+                np.cumsum(
+                    np.bincount(unique_rows, minlength=dof_count), dtype=np.int64
+                ),
+            )
         ).astype(np.int32)
 
     def _dirichlet_node_ids(self) -> np.ndarray:
@@ -246,8 +283,12 @@ class ERTForward3D:
         # pyGIMLi's 3D nodal electrode singular value uses half the shortest
         # adjacent-node distance (its 2.5D Bessel path uses one sixth).
         fallback_radius = max(float(np.min(positive)) / 2.0, 1.0e-12)
-        direct_distance = np.where(direct_distance > 1.0e-12, direct_distance, fallback_radius)
-        mirror_distance = np.where(mirror_distance > 1.0e-12, mirror_distance, fallback_radius)
+        direct_distance = np.where(
+            direct_distance > 1.0e-12, direct_distance, fallback_radius
+        )
+        mirror_distance = np.where(
+            mirror_distance > 1.0e-12, mirror_distance, fallback_radius
+        )
         return (1.0 / direct_distance + 1.0 / mirror_distance) / (4.0 * np.pi)
 
     def _build_source_rhs(self) -> np.ndarray:
@@ -255,7 +296,9 @@ class ERTForward3D:
             primary = np.stack(
                 [
                     self._primary_potential(source)
-                    for source in np.asarray(self.survey.electrode_positions, dtype=float)[self._current_electrode_ids]
+                    for source in np.asarray(
+                        self.survey.electrode_positions, dtype=float
+                    )[self._current_electrode_ids]
                 ],
                 axis=0,
             )
@@ -272,11 +315,17 @@ class ERTForward3D:
         """Assembled operator for ``conductivity``; a new model invalidates the cached fields."""
 
         values = np.asarray(conductivity, dtype=np.float64).reshape(-1)
-        if self._cached_conductivity is None or not np.array_equal(values, self._cached_conductivity):
+        if self._cached_conductivity is None or not np.array_equal(
+            values, self._cached_conductivity
+        ):
             operator = self._assemble_operator(values)
             self._reset_solution_cache()
             self._cached_conductivity = values.copy()
-            self._cached_operator = self._apply_dirichlet_matrix(operator) if self.boundary_mode == "dirichlet" else operator
+            self._cached_operator = (
+                self._apply_dirichlet_matrix(operator)
+                if self.boundary_mode == "dirichlet"
+                else operator
+            )
         return self._cached_operator
 
     def _solve_cudss_rhs(
@@ -292,9 +341,15 @@ class ERTForward3D:
         try:
             import cupy as cp
             import cupyx.scipy.sparse as cupy_sparse
-            from nvmath.sparse.advanced import DirectSolver, DirectSolverMatrixType, DirectSolverOptions
+            from nvmath.sparse.advanced import (
+                DirectSolver,
+                DirectSolverMatrixType,
+                DirectSolverOptions,
+            )
         except ImportError as exc:
-            raise ImportError("ERTForward3D requires CuPy and nvmath-python for the cuDSS backend") from exc
+            raise ImportError(
+                "ERTForward3D requires CuPy and nvmath-python for the cuDSS backend"
+            ) from exc
 
         canonical = operator
         matrix_data = self._cudss_state.get("matrix_data")
@@ -302,9 +357,16 @@ class ERTForward3D:
             indptr = cp.asarray(canonical.indptr, dtype=cp.int32)
             indices = cp.asarray(canonical.indices, dtype=cp.int32)
             matrix_data = cp.asarray(canonical.data)
-            matrix_gpu = cupy_sparse.csr_matrix((matrix_data, indices, indptr), shape=canonical.shape)
+            matrix_gpu = cupy_sparse.csr_matrix(
+                (matrix_data, indices, indptr), shape=canonical.shape
+            )
             self._cudss_state.update(
-                {"matrix_data": matrix_data, "matrix_gpu": matrix_gpu, "indptr": indptr, "indices": indices}
+                {
+                    "matrix_data": matrix_data,
+                    "matrix_gpu": matrix_gpu,
+                    "indptr": indptr,
+                    "indices": indices,
+                }
             )
         else:
             if int(matrix_data.size) != int(canonical.data.size):
@@ -315,7 +377,9 @@ class ERTForward3D:
         gpu_rhs_key = f"rhs_{rhs_key}"
         rhs_gpu = self._cudss_state.get(gpu_rhs_key)
         if rhs_gpu is None:
-            rhs_gpu = cp.asfortranarray(cp.asarray(np.asarray(rhs, dtype=canonical.dtype).T))
+            rhs_gpu = cp.asfortranarray(
+                cp.asarray(np.asarray(rhs, dtype=canonical.dtype).T)
+            )
             self._cudss_state[gpu_rhs_key] = rhs_gpu
         solver = self._cudss_state.get("solver")
         if solver is None:
@@ -342,11 +406,17 @@ class ERTForward3D:
         values = values.reshape(-1)
         operator = self._operator(values)
         if self._cached_node_fields is None:
-            self._cached_node_fields = self._solve_cudss_rhs(operator, self._source_rhs, factorize=True, rhs_key="sources")
+            self._cached_node_fields = self._solve_cudss_rhs(
+                operator, self._source_rhs, factorize=True, rhs_key="sources"
+            )
         return self._cached_node_fields[: len(self._current_electrode_ids)]
 
-    def _measurement_values(self, node_fields: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        electrode_potentials = np.asarray(node_fields @ self._electrode_matrix.T, dtype=np.float64)
+    def _measurement_values(
+        self, node_fields: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        electrode_potentials = np.asarray(
+            node_fields @ self._electrode_matrix.T, dtype=np.float64
+        )
         quads = np.asarray(self.survey.measurements, dtype=np.int32)
         a, b, m, n = quads.T
         a = self._current_electrode_map[a]
@@ -359,8 +429,14 @@ class ERTForward3D:
         )
         return electrode_potentials, resistance
 
-    def _expanded_fields(self, node_fields: np.ndarray, electrode_potentials: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        full_node_fields = np.full((self.survey.electrode_count, node_fields.shape[1]), np.nan, dtype=np.float64)
+    def _expanded_fields(
+        self, node_fields: np.ndarray, electrode_potentials: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        full_node_fields = np.full(
+            (self.survey.electrode_count, node_fields.shape[1]),
+            np.nan,
+            dtype=np.float64,
+        )
         full_electrode_potentials = np.full(
             (self.survey.electrode_count, self.survey.electrode_count),
             np.nan,
@@ -377,11 +453,17 @@ class ERTForward3D:
         if not use_numerical:
             return self.survey.geometric_factors()
         if self._cached_geometric_factors is None:
-            unit_fields = self._solve_node_fields(np.ones(self.mesh.cell_count, dtype=float))
+            unit_fields = self._solve_node_fields(
+                np.ones(self.mesh.cell_count, dtype=float)
+            )
             _, unit_resistance = self._measurement_values(unit_fields)
             if np.any(np.abs(unit_resistance) <= np.finfo(float).tiny):
-                raise ValueError("numerical geometric-factor solve produced zero resistance")
-            self._cached_geometric_factors = torch.as_tensor(1.0 / unit_resistance, dtype=FLOAT_DTYPE)
+                raise ValueError(
+                    "numerical geometric-factor solve produced zero resistance"
+                )
+            self._cached_geometric_factors = torch.as_tensor(
+                1.0 / unit_resistance, dtype=FLOAT_DTYPE
+            )
         return self._cached_geometric_factors
 
     def _response_from_fields(
@@ -406,26 +488,40 @@ class ERTForward3D:
         return ForwardResponse3D(
             apparent_resistivity=torch.as_tensor(apparent, dtype=FLOAT_DTYPE),
             resistance=torch.as_tensor(resistance, dtype=FLOAT_DTYPE),
-            electrode_potentials=torch.as_tensor(response_electrode_potentials, dtype=FLOAT_DTYPE),
+            electrode_potentials=torch.as_tensor(
+                response_electrode_potentials, dtype=FLOAT_DTYPE
+            ),
             node_potentials=torch.as_tensor(response_node_fields, dtype=FLOAT_DTYPE),
         )
 
-    def solve(self, conductivity: torch.Tensor | float, currents: torch.Tensor | float = 1.0) -> ForwardResponse3D:
-        return self._response_from_fields(self._solve_node_fields(conductivity), currents, include_fields=True)
+    def solve(
+        self, conductivity: torch.Tensor | float, currents: torch.Tensor | float = 1.0
+    ) -> ForwardResponse3D:
+        return self._response_from_fields(
+            self._solve_node_fields(conductivity), currents, include_fields=True
+        )
 
     def resistance(self, conductivity: torch.Tensor | float) -> torch.Tensor:
         _, resistance = self._measurement_values(self._solve_node_fields(conductivity))
         return torch.as_tensor(resistance, dtype=FLOAT_DTYPE)
 
-    def apparent_resistivity_values(self, conductivity: torch.Tensor | float, currents: torch.Tensor | float = 1.0) -> torch.Tensor:
+    def apparent_resistivity_values(
+        self, conductivity: torch.Tensor | float, currents: torch.Tensor | float = 1.0
+    ) -> torch.Tensor:
         resistance = np.asarray(self.resistance(conductivity), dtype=float)
         factors = np.abs(np.asarray(self._geometric_factors(), dtype=float))
-        return torch.as_tensor(factors * resistance / np.asarray(currents, dtype=float), dtype=FLOAT_DTYPE)
+        return torch.as_tensor(
+            factors * resistance / np.asarray(currents, dtype=float), dtype=FLOAT_DTYPE
+        )
 
-    def apparent_resistivity_series(self, conductivities: torch.Tensor, currents: torch.Tensor | float = 1.0) -> torch.Tensor:
+    def apparent_resistivity_series(
+        self, conductivities: torch.Tensor, currents: torch.Tensor | float = 1.0
+    ) -> torch.Tensor:
         values = np.asarray(conductivities, dtype=float)
         if values.ndim != 2 or values.shape[1] != self.mesh.cell_count:
-            raise ValueError(f"conductivities must have shape (n_steps, {self.mesh.cell_count})")
+            raise ValueError(
+                f"conductivities must have shape (n_steps, {self.mesh.cell_count})"
+            )
         currents_np = np.asarray(currents, dtype=float)
         rows = []
         for index, model in enumerate(values):
@@ -445,32 +541,56 @@ class ERTForward3D:
         del normal_sensitivity
         fields = self._solve_node_fields(conductivity)
         if self._cached_receiver_fields is None:
-            point_source_rhs = not self.singularity_removal or not self.mesh.is_flat_surface
-            if point_source_rhs and np.array_equal(self._current_electrode_ids, self._receiver_electrode_ids):
+            point_source_rhs = (
+                not self.singularity_removal or not self.mesh.is_flat_surface
+            )
+            if point_source_rhs and np.array_equal(
+                self._current_electrode_ids, self._receiver_electrode_ids
+            ):
                 self._cached_receiver_fields = fields
             else:
-                receiver_values = self._electrode_matrix[self._receiver_electrode_ids].toarray()
-                receiver_rhs = np.zeros((self._rhs_capacity, receiver_values.shape[1]), dtype=np.float64)
+                receiver_values = self._electrode_matrix[
+                    self._receiver_electrode_ids
+                ].toarray()
+                receiver_rhs = np.zeros(
+                    (self._rhs_capacity, receiver_values.shape[1]), dtype=np.float64
+                )
                 receiver_rhs[: receiver_values.shape[0]] = receiver_values
                 if self.boundary_mode == "dirichlet":
                     receiver_rhs[:, self._dirichlet_node_ids()] = 0.0
-                receiver_fields = self._solve_cudss_rhs(self._cached_operator, receiver_rhs, factorize=False, rhs_key="receivers")
-                self._cached_receiver_fields = receiver_fields[: len(self._receiver_electrode_ids)]
+                receiver_fields = self._solve_cudss_rhs(
+                    self._cached_operator,
+                    receiver_rhs,
+                    factorize=False,
+                    rhs_key="receivers",
+                )
+                self._cached_receiver_fields = receiver_fields[
+                    : len(self._receiver_electrode_ids)
+                ]
         receiver_basis_fields = self._cached_receiver_fields
         quads = np.asarray(self.survey.measurements, dtype=np.int32)
         cells = self._cell_connectivity
-        templates = self._cell_templates if include_robin_boundary_derivative else self._volume_templates
+        templates = (
+            self._cell_templates
+            if include_robin_boundary_derivative
+            else self._volume_templates
+        )
         if batch_size is None:
             batch_size = min(max(self.survey.measurement_count, 1), 64)
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1")
 
-        result = np.empty((self.survey.measurement_count, self.mesh.cell_count), dtype=np.float64)
+        result = np.empty(
+            (self.survey.measurement_count, self.mesh.cell_count), dtype=np.float64
+        )
         width = int(cells.shape[1])
         for start in range(0, self.survey.measurement_count, batch_size):
             chunk = quads[start : start + batch_size]
             a, b, m, n = chunk.T
-            current_fields = fields[self._current_electrode_map[a]] - fields[self._current_electrode_map[b]]
+            current_fields = (
+                fields[self._current_electrode_map[a]]
+                - fields[self._current_electrode_map[b]]
+            )
             receiver_fields = (
                 receiver_basis_fields[self._receiver_electrode_map[m]]
                 - receiver_basis_fields[self._receiver_electrode_map[n]]
@@ -480,11 +600,15 @@ class ERTForward3D:
             if resolved_cell_batch_size is None:
                 # Each local field block contains batch*cells*local_dofs
                 # float64 values. Cap each of the two gathered blocks near 32 MB.
-                resolved_cell_batch_size = max(1, min(self.mesh.cell_count, 4_000_000 // (chunk_size * width)))
+                resolved_cell_batch_size = max(
+                    1, min(self.mesh.cell_count, 4_000_000 // (chunk_size * width))
+                )
             if resolved_cell_batch_size < 1:
                 raise ValueError("cell_batch_size must be >= 1")
             for cell_start in range(0, self.mesh.cell_count, resolved_cell_batch_size):
-                cell_stop = min(cell_start + resolved_cell_batch_size, self.mesh.cell_count)
+                cell_stop = min(
+                    cell_start + resolved_cell_batch_size, self.mesh.cell_count
+                )
                 cell_nodes = cells[cell_start:cell_stop]
                 current_local = current_fields[:, cell_nodes]
                 receiver_local = receiver_fields[:, cell_nodes]
@@ -509,7 +633,9 @@ class ERTForward3D:
         **_: object,
     ) -> tuple[ForwardResponse3D, torch.Tensor]:
         fields = self._solve_node_fields(conductivity)
-        response = self._response_from_fields(fields, currents, include_fields=include_fields)
+        response = self._response_from_fields(
+            fields, currents, include_fields=include_fields
+        )
         jacobian = self.jacobian(
             conductivity,
             batch_size=batch_size,
@@ -519,7 +645,12 @@ class ERTForward3D:
         )
         return response, jacobian
 
-    def prepare(self, conductivity: torch.Tensor | None = None, *, include_solver_state: bool = True) -> None:
+    def prepare(
+        self,
+        conductivity: torch.Tensor | None = None,
+        *,
+        include_solver_state: bool = True,
+    ) -> None:
         if conductivity is not None and include_solver_state:
             self._operator(np.asarray(conductivity, dtype=float))
 

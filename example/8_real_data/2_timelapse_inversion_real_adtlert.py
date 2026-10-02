@@ -50,8 +50,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", default=None)
     parser.add_argument("--input-dir", default="ProcessedData")
-    parser.add_argument("--output-dir", default="result/8_real_data/2_timelapse_inversion_real_adtlert")
-    parser.add_argument("--mesh-file", default=None, help="Optional saved timelapse_inversion_mesh.npz to reuse.")
+    parser.add_argument(
+        "--output-dir", default="result/8_real_data/2_timelapse_inversion_real_adtlert"
+    )
+    parser.add_argument(
+        "--mesh-file",
+        default=None,
+        help="Optional saved timelapse_inversion_mesh.npz to reuse.",
+    )
     parser.add_argument(
         "--start-date",
         default="2022-03-26",
@@ -62,27 +68,64 @@ def build_parser() -> argparse.ArgumentParser:
         default="2022-05-12",
         help="Inclusive date if YYYY-MM-DD is supplied; internally handled as next-day exclusive.",
     )
-    parser.add_argument("--file-stride", type=int, default=8, help="Use every Nth processed file after date filtering.")
+    parser.add_argument(
+        "--file-stride",
+        type=int,
+        default=8,
+        help="Use every Nth processed file after date filtering.",
+    )
     parser.add_argument("--max-timesteps", type=int, default=None)
-    parser.add_argument("--inversion-mode", choices=("windowed", "full"), default="windowed")
+    parser.add_argument(
+        "--inversion-mode", choices=("windowed", "full"), default="windowed"
+    )
     parser.add_argument("--window-size", type=int, default=3)
     parser.add_argument("--window-step", type=int, default=1)
     parser.add_argument("--depth", type=float, default=90.0)
     parser.add_argument("--n-layers", type=int, default=28)
     parser.add_argument("--layer-stretch", type=float, default=1.08)
-    parser.add_argument("--data-stride", type=int, default=1, help="Use every Nth common valid datum; keep 1 for production.")
-    parser.add_argument("--max-error", type=float, default=None, help="Optional common maximum reciprocal/data error filter.")
+    parser.add_argument(
+        "--data-stride",
+        type=int,
+        default=1,
+        help="Use every Nth common valid datum; keep 1 for production.",
+    )
+    parser.add_argument(
+        "--max-error",
+        type=float,
+        default=None,
+        help="Optional common maximum reciprocal/data error filter.",
+    )
     parser.add_argument("--relative-error", type=float, default=0.05)
     parser.add_argument("--minimum-log-std", type=float, default=1.0e-3)
-    parser.add_argument("--data-misfit", choices=available_data_misfits(), default="weighted_log_l2")
+    parser.add_argument(
+        "--data-misfit", choices=available_data_misfits(), default="weighted_log_l2"
+    )
     parser.add_argument("--regularization", type=float, default=50.0)
     parser.add_argument("--temporal-regularization", type=float, default=10.0)
-    parser.add_argument("--temporal-regularization-type", choices=available_temporal_regularizations(), default="temporal_smoothness")
-    parser.add_argument("--regularization-mode", choices=("model", "update"), default="model")
-    parser.add_argument("--spatial-regularization", choices=available_spatial_regularizations(), default="first_order_smoothness")
+    parser.add_argument(
+        "--temporal-regularization-type",
+        choices=available_temporal_regularizations(),
+        default="temporal_smoothness",
+    )
+    parser.add_argument(
+        "--regularization-mode", choices=("model", "update"), default="model"
+    )
+    parser.add_argument(
+        "--spatial-regularization",
+        choices=available_spatial_regularizations(),
+        default="first_order_smoothness",
+    )
     parser.add_argument("--z-weight", type=float, default=1.0)
-    parser.add_argument("--optimizer", choices=available_optimization_algorithms(), default="gauss_newton_cgls")
-    parser.add_argument("--linearized-solver", choices=available_linearized_optimizers(), default="gpu_cgls")
+    parser.add_argument(
+        "--optimizer",
+        choices=available_optimization_algorithms(),
+        default="gauss_newton_cgls",
+    )
+    parser.add_argument(
+        "--linearized-solver",
+        choices=available_linearized_optimizers(),
+        default="gpu_cgls",
+    )
     parser.add_argument("--terrain-cache-dir", default=None)
     parser.add_argument("--lm-damping", type=float, default=1.0e-2)
     parser.add_argument("--cgls-tolerance", type=float, default=1.0e-8)
@@ -93,7 +136,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-log-step", type=float, default=1.0)
     parser.add_argument("--target-chi2", type=float, default=None)
     parser.add_argument("--step-tolerance", type=float, default=1.0e-4)
-    parser.add_argument("--line-search", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--line-search", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--inversion-mesh-quality", type=float, default=34.0)
     parser.add_argument("--inversion-mesh-smoothing-iterations", type=int, default=10)
     parser.add_argument("--coverage-percentile", type=float, default=20.0)
@@ -107,11 +152,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    root = Path(args.project_root).resolve() if args.project_root else find_project_root(Path(__file__))
+    root = (
+        Path(args.project_root).resolve()
+        if args.project_root
+        else find_project_root(Path(__file__))
+    )
     input_dir = resolve_path(root, args.input_dir)
     output_dir = resolve_path(root, args.output_dir)
     mesh_file = None if args.mesh_file is None else resolve_path(root, args.mesh_file)
-    terrain_cache_dir = None if args.terrain_cache_dir is None else resolve_path(root, args.terrain_cache_dir)
+    terrain_cache_dir = (
+        None
+        if args.terrain_cache_dir is None
+        else resolve_path(root, args.terrain_cache_dir)
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     paths = discover_processed_files(
@@ -122,12 +175,16 @@ def main(argv: list[str] | None = None) -> int:
         max_timesteps=args.max_timesteps,
     )
     if len(paths) < 2:
-        raise ValueError(f"Need at least two real ERT files after filtering in {input_dir}.")
+        raise ValueError(
+            f"Need at least two real ERT files after filtering in {input_dir}."
+        )
 
     first = read_processed_ert(paths[0])
     raw_records = [first]
     for path in paths[1:]:
-        current = read_processed_ert(path, elevation_reference=first.elevation_reference)
+        current = read_processed_ert(
+            path, elevation_reference=first.elevation_reference
+        )
         check_same_layout(first, current)
         raw_records.append(current)
 
@@ -136,11 +193,17 @@ def main(argv: list[str] | None = None) -> int:
         common_mask &= quality_mask(record, max_error=args.max_error)
     common_mask = apply_data_stride(common_mask, args.data_stride)
     if int(common_mask.sum()) < 4:
-        raise ValueError("Need at least four common valid measurements after filtering.")
+        raise ValueError(
+            "Need at least four common valid measurements after filtering."
+        )
 
     records = [record.with_measurement_mask(common_mask) for record in raw_records]
     observed_rhoa = np.vstack([record.rhoa for record in records])
-    err_matrix = None if any(record.err is None for record in records) else np.vstack([record.err for record in records])
+    err_matrix = (
+        None
+        if any(record.err is None for record in records)
+        else np.vstack([record.err for record in records])
+    )
     data_std = data_std_from_err(
         err_matrix,
         shape=observed_rhoa.shape,
@@ -151,9 +214,15 @@ def main(argv: list[str] | None = None) -> int:
     if all(timestamp is not None for timestamp in timestamps):
         start_time = timestamps[0]
         measurement_times_days = np.asarray(
-            [(timestamp - start_time).total_seconds() / 86400.0 for timestamp in timestamps], dtype=float
+            [
+                (timestamp - start_time).total_seconds() / 86400.0
+                for timestamp in timestamps
+            ],
+            dtype=float,
         )
-        timestamp_labels = [timestamp.strftime("%Y-%m-%d %H:%M") for timestamp in timestamps]
+        timestamp_labels = [
+            timestamp.strftime("%Y-%m-%d %H:%M") for timestamp in timestamps
+        ]
     else:
         measurement_times_days = np.arange(len(records), dtype=float)
         timestamp_labels = [path.stem for path in paths]
@@ -207,20 +276,33 @@ def main(argv: list[str] | None = None) -> int:
     run_start = time.perf_counter()
     try:
         if args.inversion_mode == "full":
-            result = TimeLapseERTInversion(
-                forward=forward,
-                observed_data=observed_rhoa,
-                config=config,
-            ).setup().run(initial_model)
-            run_meta = {"inversion_mode": "full", "n_windows": 1, "window_size": None, "window_step": None}
+            result = (
+                TimeLapseERTInversion(
+                    forward=forward,
+                    observed_data=observed_rhoa,
+                    config=config,
+                )
+                .setup()
+                .run(initial_model)
+            )
+            run_meta = {
+                "inversion_mode": "full",
+                "n_windows": 1,
+                "window_size": None,
+                "window_step": None,
+            }
         else:
-            result = WindowedTimeLapseERTInversion(
-                forward=forward,
-                observed_data=observed_rhoa,
-                config=config,
-                window_size=args.window_size,
-                window_step=args.window_step,
-            ).setup().run(initial_model)
+            result = (
+                WindowedTimeLapseERTInversion(
+                    forward=forward,
+                    observed_data=observed_rhoa,
+                    config=config,
+                    window_size=args.window_size,
+                    window_step=args.window_step,
+                )
+                .setup()
+                .run(initial_model)
+            )
             run_meta = {
                 "inversion_mode": "windowed",
                 "n_windows": int(len(result.window_reports)),
@@ -238,8 +320,14 @@ def main(argv: list[str] | None = None) -> int:
     coverage_mask = coverage < coverage_threshold
 
     np.save(output_dir / "final_models.npy", final_models)
-    np.save(output_dir / "final_log_models.npy", np.asarray(result.final_log_models, dtype=float))
-    np.save(output_dir / "predicted_rhoa.npy", np.asarray(result.predicted_data, dtype=float))
+    np.save(
+        output_dir / "final_log_models.npy",
+        np.asarray(result.final_log_models, dtype=float),
+    )
+    np.save(
+        output_dir / "predicted_rhoa.npy",
+        np.asarray(result.predicted_data, dtype=float),
+    )
     np.save(output_dir / "observed_rhoa.npy", observed_rhoa)
     np.save(output_dir / "data_std.npy", np.asarray(data_std, dtype=float))
     np.save(output_dir / "steps.npy", steps)
@@ -291,7 +379,11 @@ def main(argv: list[str] | None = None) -> int:
             vmax=args.plot_vmax,
         )
         chi2_plot = output_dir / "timelapse_real_chi2.png"
-        plot_chi2(chi2_plot, np.asarray(result.all_chi2, dtype=float), xlabel="Window index" if args.inversion_mode == "windowed" else "Iteration")
+        plot_chi2(
+            chi2_plot,
+            np.asarray(result.all_chi2, dtype=float),
+            xlabel="Window index" if args.inversion_mode == "windowed" else "Iteration",
+        )
         plot_files = {"resistivity": str(model_plot), "chi2": str(chi2_plot)}
 
     summary = {
@@ -300,7 +392,9 @@ def main(argv: list[str] | None = None) -> int:
         "start_date": args.start_date,
         "end_date": args.end_date,
         "file_stride": int(args.file_stride),
-        "max_timesteps": None if args.max_timesteps is None else int(args.max_timesteps),
+        "max_timesteps": None
+        if args.max_timesteps is None
+        else int(args.max_timesteps),
         "n_timesteps": int(len(records)),
         "first_timestamp": timestamp_labels[0],
         "last_timestamp": timestamp_labels[-1],
@@ -329,7 +423,9 @@ def main(argv: list[str] | None = None) -> int:
         "optimizer": str(args.optimizer),
         "linearized_solver": str(args.linearized_solver),
         "max_iterations": int(args.max_iterations),
-        "final_chi2": float(result.iteration_chi2[-1]) if result.iteration_chi2 else None,
+        "final_chi2": float(result.iteration_chi2[-1])
+        if result.iteration_chi2
+        else None,
         "model_bounds": [float(args.model_min), float(args.model_max)],
         "coverage_percentile": float(args.coverage_percentile),
         "coverage_threshold": coverage_threshold,

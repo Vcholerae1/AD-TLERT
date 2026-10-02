@@ -72,13 +72,17 @@ def _cellwise(value: ArrayLike, like: np.ndarray) -> np.ndarray:
     return value.reshape(-1, 1) if np.ndim(like) == 2 else value
 
 
-def _parameter_array(value: ArrayLike, *, n_cells: int, name: str, allow_time: bool = False) -> np.ndarray:
+def _parameter_array(
+    value: ArrayLike, *, n_cells: int, name: str, allow_time: bool = False
+) -> np.ndarray:
     array = np.asarray(value, dtype=float)
     if array.ndim == 0:
         return np.full(n_cells, float(array))
     if allow_time and array.ndim > 1:
         if array.shape[0] != n_cells:
-            raise ValueError(f"{name} first dimension must be {n_cells}, got {array.shape}")
+            raise ValueError(
+                f"{name} first dimension must be {n_cells}, got {array.shape}"
+            )
         return array
     array = array.reshape(-1)
     if array.shape != (n_cells,):
@@ -111,7 +115,11 @@ class LogResistivityTransform:
             return _clip_log(log_resistivity, self.model_bounds)
         lo, hi = self._bounds()
         span = hi - lo
-        rho = np.clip(np.exp(np.asarray(log_resistivity, dtype=float)), lo + span * 1.0e-12, hi - span * 1.0e-12)
+        rho = np.clip(
+            np.exp(np.asarray(log_resistivity, dtype=float)),
+            lo + span * 1.0e-12,
+            hi - span * 1.0e-12,
+        )
         return np.log(rho - lo) - np.log(hi - rho)
 
     def log_resistivity_from_state(self, state):
@@ -132,7 +140,11 @@ class LogResistivityTransform:
         return ((rho - lo) * (hi - rho)) / ((hi - lo) * rho)
 
     def clip_state(self, state):
-        return _clip_log(state, self.model_bounds) if self.model_transform == "log" else np.asarray(state, dtype=float)
+        return (
+            _clip_log(state, self.model_bounds)
+            if self.model_transform == "log"
+            else np.asarray(state, dtype=float)
+        )
 
     def parameter_from_state(self, state):
         return np.exp(self.log_resistivity_from_state(state))
@@ -161,7 +173,11 @@ class LogConductivityTransform:
     def clip_state(self, state):
         state = np.asarray(state, dtype=float)
         log_bounds = _log_bounds(self.model_bounds)
-        return state if log_bounds is None else np.clip(state, -log_bounds[1], -log_bounds[0])
+        return (
+            state
+            if log_bounds is None
+            else np.clip(state, -log_bounds[1], -log_bounds[0])
+        )
 
     def parameter_from_state(self, state):
         return np.exp(self.clip_state(state))
@@ -200,7 +216,9 @@ class SaturationTransform:
             sigma_s[surface] = 1.0 / rho_sat_s[surface]
         sigma_p = sigma_sat - sigma_s
         if np.any(sigma_p <= 0.0):
-            raise ValueError("rho_sat_s must be larger than rho_sat where surface conduction is used")
+            raise ValueError(
+                "rho_sat_s must be larger than rho_sat where surface conduction is used"
+            )
         return sigma_p, sigma_s
 
     def _saturation(self, state):
@@ -210,10 +228,16 @@ class SaturationTransform:
     def _sigma(self, saturation):
         saturation = np.asarray(saturation, dtype=float)
         if np.asarray(self.rho_sat).shape[0] != saturation.shape[0]:
-            raise ValueError("saturation state first dimension does not match petrophysical parameter count")
+            raise ValueError(
+                "saturation state first dimension does not match petrophysical parameter count"
+            )
         n = _cellwise(self.n, saturation)
-        sigma_p, sigma_s = (_cellwise(value, saturation) for value in self._conductivities())
-        return sigma_p * np.power(saturation, n) + sigma_s * np.power(saturation, n - 1.0)
+        sigma_p, sigma_s = (
+            _cellwise(value, saturation) for value in self._conductivities()
+        )
+        return sigma_p * np.power(saturation, n) + sigma_s * np.power(
+            saturation, n - 1.0
+        )
 
     def state_from_log_resistivity(self, log_resistivity):
         """Invert the monotone ``S -> sigma`` map by 60 bisection steps."""
@@ -229,12 +253,16 @@ class SaturationTransform:
         return _logit((saturation - floor) / (1.0 - floor))
 
     def log_resistivity_from_state(self, state):
-        return -np.log(np.maximum(self._sigma(self._saturation(state)), np.finfo(float).tiny))
+        return -np.log(
+            np.maximum(self._sigma(self._saturation(state)), np.finfo(float).tiny)
+        )
 
     def d_log_resistivity_d_state(self, state):
         saturation = self._saturation(state)
         n = _cellwise(self.n, saturation)
-        sigma_p, sigma_s = (_cellwise(value, saturation) for value in self._conductivities())
+        sigma_p, sigma_s = (
+            _cellwise(value, saturation) for value in self._conductivities()
+        )
         d_sigma = sigma_p * n * np.power(saturation, n - 1.0)
         if np.any(sigma_s != 0.0):
             d_sigma = d_sigma + sigma_s * (n - 1.0) * np.power(saturation, n - 2.0)
@@ -272,8 +300,13 @@ class RelativeArchieWaterContentTransform:
     parameter_name: str = "water_content"
 
     def __post_init__(self) -> None:
-        rho0, theta0, n = (np.asarray(value, dtype=float) for value in (self.rho0, self.theta0, self.n))
-        theta_min, theta_max = np.asarray(self.theta_min, dtype=float), np.asarray(self.theta_max, dtype=float)
+        rho0, theta0, n = (
+            np.asarray(value, dtype=float) for value in (self.rho0, self.theta0, self.n)
+        )
+        theta_min, theta_max = (
+            np.asarray(self.theta_min, dtype=float),
+            np.asarray(self.theta_max, dtype=float),
+        )
         if np.any(rho0 <= 0.0) or not np.all(np.isfinite(rho0)):
             raise ValueError("rho0 must be positive and finite")
         if np.any(theta0 <= 0.0) or not np.all(np.isfinite(theta0)):
@@ -287,7 +320,9 @@ class RelativeArchieWaterContentTransform:
         if self.temperature_correction_factor is not None:
             factor = np.asarray(self.temperature_correction_factor, dtype=float)
             if np.any(factor <= 0.0) or not np.all(np.isfinite(factor)):
-                raise ValueError("temperature_correction_factor must be positive and finite")
+                raise ValueError(
+                    "temperature_correction_factor must be positive and finite"
+                )
 
     def _temperature_factor(self, state: np.ndarray) -> np.ndarray:
         if self.temperature_correction_factor is None:
@@ -312,21 +347,35 @@ class RelativeArchieWaterContentTransform:
 
     def state_from_log_resistivity(self, log_resistivity):
         log_rho = np.asarray(log_resistivity, dtype=float)
-        rho0, theta0, n = (_cellwise(value, log_rho) for value in (self.rho0, self.theta0, self.n))
+        rho0, theta0, n = (
+            _cellwise(value, log_rho) for value in (self.rho0, self.theta0, self.n)
+        )
         theta_min, theta_max = self._bounds(log_rho)
-        theta = theta0 * np.exp(-(log_rho + np.log(self._temperature_factor(log_rho)) - np.log(rho0)) / n)
+        theta = theta0 * np.exp(
+            -(log_rho + np.log(self._temperature_factor(log_rho)) - np.log(rho0)) / n
+        )
         span = theta_max - theta_min
         theta = np.clip(theta, theta_min + span * 1.0e-12, theta_max - span * 1.0e-12)
         return _logit((theta - theta_min) / span)
 
     def log_resistivity_from_state(self, state):
         state = np.asarray(state, dtype=float)
-        rho0, theta0, n = (_cellwise(value, state) for value in (self.rho0, self.theta0, self.n))
-        return np.log(rho0) - n * (np.log(self._theta(state)) - np.log(theta0)) - np.log(self._temperature_factor(state))
+        rho0, theta0, n = (
+            _cellwise(value, state) for value in (self.rho0, self.theta0, self.n)
+        )
+        return (
+            np.log(rho0)
+            - n * (np.log(self._theta(state)) - np.log(theta0))
+            - np.log(self._temperature_factor(state))
+        )
 
     def d_log_resistivity_d_state(self, state):
         state = np.asarray(state, dtype=float)
-        return -_cellwise(self.n, state) * self.d_parameter_d_state(state) / self._theta(state)
+        return (
+            -_cellwise(self.n, state)
+            * self.d_parameter_d_state(state)
+            / self._theta(state)
+        )
 
     def clip_state(self, state):
         return np.asarray(state, dtype=float)
@@ -345,7 +394,12 @@ _TRANSFORM_ALIASES = {
     "log_resistivity": ("log_resistivity", "resistivity", "rho"),
     "log_conductivity": ("log_conductivity", "conductivity", "sigma"),
     "saturation": ("saturation", "water_saturation"),
-    "relative_archie_water_content": ("relative_archie_water_content", "relative_archie", "water_content", "theta"),
+    "relative_archie_water_content": (
+        "relative_archie_water_content",
+        "relative_archie",
+        "water_content",
+        "theta",
+    ),
 }
 
 
@@ -366,14 +420,27 @@ def build_petrophysical_transform(
 ) -> PetrophysicalTransform:
     """Resolve and instantiate a petrophysical transform."""
 
-    if hasattr(name, "log_resistivity_from_state") and hasattr(name, "d_log_resistivity_d_state"):
+    if hasattr(name, "log_resistivity_from_state") and hasattr(
+        name, "d_log_resistivity_d_state"
+    ):
         return name  # type: ignore[return-value]
     key = str(name).strip().lower().replace("-", "_")
-    kind = next((canonical for canonical, aliases in _TRANSFORM_ALIASES.items() if key in aliases), None)
+    kind = next(
+        (
+            canonical
+            for canonical, aliases in _TRANSFORM_ALIASES.items()
+            if key in aliases
+        ),
+        None,
+    )
     if kind is None:
-        raise ValueError(f"unknown petrophysical_transform={name!r}; available choices: {', '.join(_TRANSFORM_ALIASES)}")
+        raise ValueError(
+            f"unknown petrophysical_transform={name!r}; available choices: {', '.join(_TRANSFORM_ALIASES)}"
+        )
     if kind == "log_resistivity":
-        return LogResistivityTransform(model_transform=model_transform, model_bounds=model_bounds)
+        return LogResistivityTransform(
+            model_transform=model_transform, model_bounds=model_bounds
+        )
     if model_transform != "log":
         raise ValueError(f"{kind} currently supports model_transform='log' only")
     if kind == "log_conductivity":
@@ -388,11 +455,20 @@ def build_petrophysical_transform(
 
     def cellwise(param: str, default=None, allow_time: bool = False):
         value = params.get(param, default)
-        return None if value is None else _parameter_array(value, n_cells=n_cells, name=param, allow_time=allow_time)
+        return (
+            None
+            if value is None
+            else _parameter_array(
+                value, n_cells=n_cells, name=param, allow_time=allow_time
+            )
+        )
 
     if kind == "saturation":
         return SaturationTransform(
-            rho_sat=cellwise("rho_sat"), n=cellwise("n"), rho_sat_s=cellwise("rho_sat_s"), saturation_floor=saturation_floor
+            rho_sat=cellwise("rho_sat"),
+            n=cellwise("n"),
+            rho_sat_s=cellwise("rho_sat_s"),
+            saturation_floor=saturation_floor,
         )
     return RelativeArchieWaterContentTransform(
         rho0=cellwise("rho0"),
@@ -400,5 +476,7 @@ def build_petrophysical_transform(
         n=cellwise("n"),
         theta_min=cellwise("theta_min", 0.02),
         theta_max=cellwise("theta_max", 0.5),
-        temperature_correction_factor=cellwise("temperature_correction_factor", allow_time=True),
+        temperature_correction_factor=cellwise(
+            "temperature_correction_factor", allow_time=True
+        ),
     )

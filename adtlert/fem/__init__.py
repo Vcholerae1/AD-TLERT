@@ -1,6 +1,10 @@
 """Finite-element bases, quadrature, and local element matrices."""
 
-from adtlert.fem.boundary import assemble_local_boundary_mass, assemble_local_boundary_mass_p2, robin_boundary_coefficients
+from adtlert.fem.boundary import (
+    assemble_local_boundary_mass,
+    assemble_local_boundary_mass_p2,
+    robin_boundary_coefficients,
+)
 from adtlert.fem.tetrahedron import (
     TetrahedronP1Data,
     TetrahedronP2Data,

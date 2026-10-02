@@ -18,25 +18,37 @@ class DataMisfit(Protocol):
 
     name: str
 
-    def residual(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    def residual(
+        self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray
+    ) -> np.ndarray:
         """Return the weighted residual used for objective reporting."""
 
-    def linearized_rhs(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    def linearized_rhs(
+        self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray
+    ) -> np.ndarray:
         """Return the right-hand side for the linearized data equation."""
 
-    def weighted_jacobian(self, jacobian: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    def weighted_jacobian(
+        self, jacobian: np.ndarray, weights: np.ndarray
+    ) -> np.ndarray:
         """Apply data weights to a Jacobian block."""
 
-    def linearized_system(self, predicted, observed, weights, jacobian) -> tuple[np.ndarray, np.ndarray]:
+    def linearized_system(
+        self, predicted, observed, weights, jacobian
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Return ``(A, b)`` for the current linearized data term."""
 
     def linearized_cotangent(self, predicted, observed, weights) -> np.ndarray:
         """Return the data-space cotangent whose VJP is the model gradient."""
 
-    def phi(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> float:
+    def phi(
+        self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray
+    ) -> float:
         """Return the unnormalized data objective."""
 
-    def chi2(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> float:
+    def chi2(
+        self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray
+    ) -> float:
         """Return the mean squared weighted residual."""
 
 
@@ -54,7 +66,9 @@ def huber_irls_weight(residual: np.ndarray, delta: float, epsilon: float) -> np.
     absolute = np.abs(residual)
     weight_sq = np.ones_like(absolute, dtype=float)
     outliers = absolute > delta
-    weight_sq[outliers] = delta / np.maximum(absolute[outliers], max(float(epsilon), np.finfo(float).eps))
+    weight_sq[outliers] = delta / np.maximum(
+        absolute[outliers], max(float(epsilon), np.finfo(float).eps)
+    )
     return np.sqrt(weight_sq)
 
 
@@ -65,7 +79,9 @@ class _LogMisfit:
         return None
 
     def residual(self, predicted, observed, weights) -> np.ndarray:
-        return (np.asarray(predicted, dtype=float) - np.asarray(observed, dtype=float)) * np.asarray(weights, dtype=float)
+        return (
+            np.asarray(predicted, dtype=float) - np.asarray(observed, dtype=float)
+        ) * np.asarray(weights, dtype=float)
 
     def linearized_rhs(self, predicted, observed, weights) -> np.ndarray:
         return -self.residual(predicted, observed, weights)
@@ -76,15 +92,21 @@ class _LogMisfit:
         if matrix.ndim != 2:
             raise ValueError("jacobian must be a 2D array")
         if weights.shape != (matrix.shape[0],):
-            raise ValueError(f"weights must have one value per Jacobian row ({weights.shape} != ({matrix.shape[0]},))")
+            raise ValueError(
+                f"weights must have one value per Jacobian row ({weights.shape} != ({matrix.shape[0]},))"
+            )
         return matrix * weights[:, None]
 
-    def linearized_system(self, predicted, observed, weights, jacobian) -> tuple[np.ndarray, np.ndarray]:
+    def linearized_system(
+        self, predicted, observed, weights, jacobian
+    ) -> tuple[np.ndarray, np.ndarray]:
         residual = self.residual(predicted, observed, weights)
         scale = self._irls(residual)
         if scale is None:
             return self.weighted_jacobian(jacobian, weights), -residual
-        return self.weighted_jacobian(jacobian, weights) * scale.reshape(-1)[:, None], -scale * residual
+        return self.weighted_jacobian(jacobian, weights) * scale.reshape(-1)[
+            :, None
+        ], -scale * residual
 
     def linearized_cotangent(self, predicted, observed, weights) -> np.ndarray:
         residual = self.residual(predicted, observed, weights)
@@ -137,7 +159,13 @@ class WeightedLogHuberMisfit(_LogMisfit):
     def phi(self, predicted, observed, weights) -> float:
         residual = np.abs(self.residual(predicted, observed, weights).reshape(-1))
         delta = max(float(self.delta), np.finfo(float).eps)
-        return float(np.sum(np.where(residual <= delta, residual**2, 2.0 * delta * residual - delta**2)))
+        return float(
+            np.sum(
+                np.where(
+                    residual <= delta, residual**2, 2.0 * delta * residual - delta**2
+                )
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -163,7 +191,9 @@ _ALIASES = {
         "time_lapse_difference_l2",
     ),
 }
-_DATA_MISFITS: dict[str, DataMisfit] = {alias: misfit for misfit, aliases in _ALIASES.items() for alias in aliases}
+_DATA_MISFITS: dict[str, DataMisfit] = {
+    alias: misfit for misfit, aliases in _ALIASES.items() for alias in aliases
+}
 
 
 def available_data_misfits() -> tuple[str, ...]:
@@ -180,4 +210,6 @@ def build_data_misfit(name: str | DataMisfit) -> DataMisfit:
     try:
         return _DATA_MISFITS[str(name).strip().lower().replace("-", "_")]
     except KeyError as exc:
-        raise ValueError(f"unknown data_misfit={name!r}; available choices: {', '.join(available_data_misfits())}") from exc
+        raise ValueError(
+            f"unknown data_misfit={name!r}; available choices: {', '.join(available_data_misfits())}"
+        ) from exc

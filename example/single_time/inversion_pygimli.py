@@ -54,9 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     total_start = time.perf_counter()
     load_start = time.perf_counter()
     data = ert.load(str(data_file))
-    data["err"] = np.full(
-        data.size(), float(args.relative_error), dtype=float
-    )
+    data["err"] = np.full(data.size(), float(args.relative_error), dtype=float)
     data_load_sec = time.perf_counter() - load_start
 
     mesh_start = time.perf_counter()

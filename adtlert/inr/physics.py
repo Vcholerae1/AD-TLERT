@@ -52,12 +52,18 @@ def select_cuda_device(device: torch.device | str = "cuda") -> dict[str, Any]:
     return {"gpu_device_index": index, "gpu_name": torch.cuda.get_device_name(index)}
 
 
-def prepare_cuda_forward(forward: Any, parameter_log: np.ndarray, *, device: torch.device | str = "cuda") -> dict[str, Any]:
+def prepare_cuda_forward(
+    forward: Any, parameter_log: np.ndarray, *, device: torch.device | str = "cuda"
+) -> dict[str, Any]:
     """Select the CUDA device and warm the forward caches and cuDSS plans at ``parameter_log``."""
 
     report = select_cuda_device(device)
-    full_log = _full_log_model(forward, np.asarray(parameter_log, dtype=float).reshape(-1))
-    forward_operator(forward).prepare(torch.as_tensor(np.exp(-full_log), dtype=FLOAT_DTYPE), include_solver_state=True)
+    full_log = _full_log_model(
+        forward, np.asarray(parameter_log, dtype=float).reshape(-1)
+    )
+    forward_operator(forward).prepare(
+        torch.as_tensor(np.exp(-full_log), dtype=FLOAT_DTYPE), include_solver_state=True
+    )
     return report
 
 
@@ -81,7 +87,9 @@ def _exact_log_response_vjp(
         projection = None
 
     conductivity = np.exp(-full_log)
-    geometric_factors = np.abs(np.asarray(operator._geometric_factors(), dtype=float)).reshape(-1)
+    geometric_factors = np.abs(
+        np.asarray(operator._geometric_factors(), dtype=float)
+    ).reshape(-1)
     resistance_cotangent = data_cotangent * geometric_factors / np.exp(predicted)
     full_gradient_sigma = np.asarray(
         operator.vjp(
@@ -91,13 +99,18 @@ def _exact_log_response_vjp(
         dtype=float,
     ).reshape(-1)
 
-    if isinstance(forward, ParameterizedERTForward2p5D) and forward.background_mode == "pygimli_prolongation":
+    if (
+        isinstance(forward, ParameterizedERTForward2p5D)
+        and forward.background_mode == "pygimli_prolongation"
+    ):
         prolongation = forward._resistivity_prolongation_matrix
         if prolongation is None:
             raise ValueError("resistivity prolongation matrix has not been initialized")
         parameter_resistivity = np.exp(parameter_log)
         full_gradient_resistivity = -(conductivity**2) * full_gradient_sigma
-        return parameter_resistivity * np.asarray(prolongation.T @ full_gradient_resistivity).reshape(-1)
+        return parameter_resistivity * np.asarray(
+            prolongation.T @ full_gradient_resistivity
+        ).reshape(-1)
 
     full_gradient_log_rho = -conductivity * full_gradient_sigma
     if projection is not None:
@@ -114,22 +127,38 @@ class _MatrixFreeLogRhoaSeries(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx: Any, log_resistivity: torch.Tensor, forward: Any) -> torch.Tensor:
-        parameter_log = log_resistivity.detach().to(device="cpu", dtype=torch.float64).numpy()
-        predicted = np.asarray(_forward_log_response_series(forward, parameter_log), dtype=float)
-        ctx.forward_model, ctx.parameter_log, ctx.predicted = forward, parameter_log, predicted
-        return torch.as_tensor(predicted, device=log_resistivity.device, dtype=log_resistivity.dtype)
+        parameter_log = (
+            log_resistivity.detach().to(device="cpu", dtype=torch.float64).numpy()
+        )
+        predicted = np.asarray(
+            _forward_log_response_series(forward, parameter_log), dtype=float
+        )
+        ctx.forward_model, ctx.parameter_log, ctx.predicted = (
+            forward,
+            parameter_log,
+            predicted,
+        )
+        return torch.as_tensor(
+            predicted, device=log_resistivity.device, dtype=log_resistivity.dtype
+        )
 
     @staticmethod
     @once_differentiable
     def backward(ctx: Any, output_cotangent: torch.Tensor) -> tuple[torch.Tensor, None]:
-        cotangent = output_cotangent.detach().to(device="cpu", dtype=torch.float64).numpy()
+        cotangent = (
+            output_cotangent.detach().to(device="cpu", dtype=torch.float64).numpy()
+        )
         gradient = np.vstack(
             [
                 _exact_log_response_vjp(ctx.forward_model, model, response, weight)
-                for model, response, weight in zip(ctx.parameter_log, ctx.predicted, cotangent, strict=True)
+                for model, response, weight in zip(
+                    ctx.parameter_log, ctx.predicted, cotangent, strict=True
+                )
             ]
         )
-        return torch.as_tensor(gradient, device=output_cotangent.device, dtype=output_cotangent.dtype), None
+        return torch.as_tensor(
+            gradient, device=output_cotangent.device, dtype=output_cotangent.dtype
+        ), None
 
 
 def matrix_free_log_rhoa(log_resistivity: torch.Tensor, forward: Any) -> torch.Tensor:
@@ -138,7 +167,9 @@ def matrix_free_log_rhoa(log_resistivity: torch.Tensor, forward: Any) -> torch.T
     return _MatrixFreeLogRhoaSeries.apply(log_resistivity[None, :], forward)[0]
 
 
-def matrix_free_log_rhoa_series(log_resistivity: torch.Tensor, forward: Any) -> torch.Tensor:
+def matrix_free_log_rhoa_series(
+    log_resistivity: torch.Tensor, forward: Any
+) -> torch.Tensor:
     """Time-series form using cached field solves and exact per-step VJPs."""
 
     return _MatrixFreeLogRhoaSeries.apply(log_resistivity, forward)

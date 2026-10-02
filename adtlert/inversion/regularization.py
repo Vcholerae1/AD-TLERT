@@ -26,7 +26,14 @@ class SpatialRegularization(Protocol):
         """Build the spatial regularization matrix for the current parameter mesh."""
 
     def linearized_system(
-        self, forward, current_model, n_cells: int, *, reference_roughness, scale: float = 1.0, z_weight: float = 1.0
+        self,
+        forward,
+        current_model,
+        n_cells: int,
+        *,
+        reference_roughness,
+        scale: float = 1.0,
+        z_weight: float = 1.0,
     ) -> tuple[sp.csr_matrix, np.ndarray]:
         """Build ``(A, b)`` for the current spatial regularization update."""
 
@@ -36,10 +43,14 @@ class TemporalRegularization(Protocol):
 
     name: str
 
-    def matrix(self, n_cells: int, n_times: int, *, scale: float = 1.0) -> sp.csr_matrix:
+    def matrix(
+        self, n_cells: int, n_times: int, *, scale: float = 1.0
+    ) -> sp.csr_matrix:
         """Build the temporal regularization matrix."""
 
-    def linearized_system(self, current_model, n_cells: int, n_times: int, *, scale: float = 1.0) -> tuple[sp.csr_matrix, np.ndarray]:
+    def linearized_system(
+        self, current_model, n_cells: int, n_times: int, *, scale: float = 1.0
+    ) -> tuple[sp.csr_matrix, np.ndarray]:
         """Build ``(A, b)`` for the current temporal regularization update."""
 
 
@@ -51,18 +62,25 @@ def regularization_mesh(forward) -> Mesh | Mesh3D:
         if isinstance(mesh, (Mesh, Mesh3D)):
             return mesh
         raise TypeError("forward.regularization_mesh must be a adtlert Mesh or Mesh3D")
-    if hasattr(forward, "_resolved_mesh") and isinstance(resolved := forward._resolved_mesh(), (Mesh, Mesh3D)):
+    if hasattr(forward, "_resolved_mesh") and isinstance(
+        resolved := forward._resolved_mesh(), (Mesh, Mesh3D)
+    ):
         return resolved
     mesh = getattr(forward, "mesh", None)
     if isinstance(mesh, (Mesh, Mesh3D)):
         return mesh
-    raise TypeError("forward must expose a Mesh or Mesh3D for first-order regularization")
+    raise TypeError(
+        "forward must expose a Mesh or Mesh3D for first-order regularization"
+    )
 
 
 def cell_edges(cell: np.ndarray) -> list[tuple[int, int]]:
     """Return the edges of a polygon cell as node-id pairs."""
 
-    return [(int(cell[index]), int(cell[(index + 1) % cell.size])) for index in range(cell.size)]
+    return [
+        (int(cell[index]), int(cell[(index + 1) % cell.size]))
+        for index in range(cell.size)
+    ]
 
 
 def tetrahedron_faces(cell: np.ndarray) -> list[tuple[int, int, int]]:
@@ -102,59 +120,99 @@ def _difference_rows(pairs, weights: np.ndarray, n_cells: int) -> sp.csr_matrix:
     pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
     rows = np.repeat(np.arange(len(pairs)), 2)
     data = np.column_stack((weights, -weights)).reshape(-1)
-    return sp.coo_matrix((data, (rows, pairs.reshape(-1))), shape=(len(pairs), n_cells)).tocsr()
+    return sp.coo_matrix(
+        (data, (rows, pairs.reshape(-1))), shape=(len(pairs), n_cells)
+    ).tocsr()
 
 
-def first_order_constraint_matrix(mesh: Mesh | Mesh3D, *, z_weight: float = 1.0) -> sp.csr_matrix:
+def first_order_constraint_matrix(
+    mesh: Mesh | Mesh3D, *, z_weight: float = 1.0
+) -> sp.csr_matrix:
     """First-order neighbor differences, weighted by ``z_weight`` across horizontal interfaces."""
 
     pairs, normal_z = _neighbor_pairs(mesh)
-    return _difference_rows(pairs, 1.0 + normal_z * (float(z_weight) - 1.0), int(mesh.cell_count))
+    return _difference_rows(
+        pairs, 1.0 + normal_z * (float(z_weight) - 1.0), int(mesh.cell_count)
+    )
 
 
 def structure_guided_constraint_matrix(
-    mesh: Mesh | Mesh3D, structural_ids: np.ndarray, *, z_weight: float = 1.0, cross_structure_weight: float = 0.05
+    mesh: Mesh | Mesh3D,
+    structural_ids: np.ndarray,
+    *,
+    z_weight: float = 1.0,
+    cross_structure_weight: float = 0.05,
 ) -> sp.csr_matrix:
     """First-order constraints with weights reduced across structural-unit boundaries."""
 
     labels = np.asarray(structural_ids, dtype=np.int32).reshape(-1)
     if labels.shape != (int(mesh.cell_count),):
-        raise ValueError(f"structural_ids must have one value per regularization cell ({labels.shape} != ({int(mesh.cell_count)},))")
+        raise ValueError(
+            f"structural_ids must have one value per regularization cell ({labels.shape} != ({int(mesh.cell_count)},))"
+        )
     if cross_structure_weight < 0.0:
         raise ValueError("cross_structure_weight must be non-negative")
     pairs, normal_z = _neighbor_pairs(mesh)
     pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
     same = labels[pairs[:, 0]] == labels[pairs[:, 1]]
-    weights = (1.0 + normal_z * (float(z_weight) - 1.0)) * np.where(same, 1.0, float(cross_structure_weight))
+    weights = (1.0 + normal_z * (float(z_weight) - 1.0)) * np.where(
+        same, 1.0, float(cross_structure_weight)
+    )
     keep = weights != 0.0
     return _difference_rows(pairs[keep], weights[keep], int(mesh.cell_count))
 
 
 def _checked(matrix: sp.csr_matrix, n_cells: int) -> sp.csr_matrix:
     if matrix.shape[1] != int(n_cells):
-        raise ValueError(f"regularization mesh cell count does not match inversion model size ({matrix.shape[1]} != {int(n_cells)})")
+        raise ValueError(
+            f"regularization mesh cell count does not match inversion model size ({matrix.shape[1]} != {int(n_cells)})"
+        )
     return matrix
 
 
 class _LinearSpatial:
-    def linearized_system(self, forward, current_model, n_cells, *, reference_roughness, scale=1.0, z_weight=1.0):
+    def linearized_system(
+        self,
+        forward,
+        current_model,
+        n_cells,
+        *,
+        reference_roughness,
+        scale=1.0,
+        z_weight=1.0,
+    ):
         matrix = float(scale) * self.matrix(forward, n_cells, z_weight=z_weight)
         roughness = matrix @ np.asarray(current_model, dtype=float).reshape(-1)
-        return matrix, float(scale) * np.asarray(reference_roughness, dtype=float).reshape(-1) - roughness
+        return matrix, float(scale) * np.asarray(
+            reference_roughness, dtype=float
+        ).reshape(-1) - roughness
 
 
 class _RobustSpatial:
     """IRLS reweighting of first-order neighbor differences."""
 
     def matrix(self, forward, n_cells: int, *, z_weight: float = 1.0) -> sp.csr_matrix:
-        return FirstOrderSpatialRegularization().matrix(forward, n_cells, z_weight=z_weight)
+        return FirstOrderSpatialRegularization().matrix(
+            forward, n_cells, z_weight=z_weight
+        )
 
-    def linearized_system(self, forward, current_model, n_cells, *, reference_roughness, scale=1.0, z_weight=1.0):
+    def linearized_system(
+        self,
+        forward,
+        current_model,
+        n_cells,
+        *,
+        reference_roughness,
+        scale=1.0,
+        z_weight=1.0,
+    ):
         base = self.matrix(forward, n_cells, z_weight=z_weight)
         current = base @ np.asarray(current_model, dtype=float).reshape(-1)
         reference = np.asarray(reference_roughness, dtype=float).reshape(-1)
         weight = self._irls(np.asarray(current - reference, dtype=float))
-        return (sp.diags(float(scale) * weight, format="csr") @ base).tocsr(), float(scale) * weight * (reference - current)
+        return (sp.diags(float(scale) * weight, format="csr") @ base).tocsr(), float(
+            scale
+        ) * weight * (reference - current)
 
 
 @dataclass(frozen=True)
@@ -174,7 +232,12 @@ class FirstOrderSpatialRegularization(_LinearSpatial):
     name: str = "first_order"
 
     def matrix(self, forward, n_cells: int, *, z_weight: float = 1.0) -> sp.csr_matrix:
-        return _checked(first_order_constraint_matrix(regularization_mesh(forward), z_weight=z_weight), n_cells)
+        return _checked(
+            first_order_constraint_matrix(
+                regularization_mesh(forward), z_weight=z_weight
+            ),
+            n_cells,
+        )
 
 
 @dataclass(frozen=True)
@@ -195,7 +258,9 @@ class StructuralPriorSpatialRegularization(_LinearSpatial):
             regularization_mesh(forward),
             np.asarray(ids, dtype=np.int32),
             z_weight=z_weight,
-            cross_structure_weight=float(getattr(forward, "structural_cross_weight", 0.05)),
+            cross_structure_weight=float(
+                getattr(forward, "structural_cross_weight", 0.05)
+            ),
         )
         return _checked(matrix, n_cells)
 
@@ -233,7 +298,11 @@ class FirstOrderSpatialHuberRegularization(_RobustSpatial):
 def _time_operator(stencil: np.ndarray, n_cells: int, scale: float) -> sp.csr_matrix:
     """Apply a ``(rows, n_times)`` stencil to every cell of a time-major model vector."""
 
-    return sp.kron(sp.csr_matrix(stencil * float(scale)), sp.eye(int(n_cells), format="csr"), format="csr")
+    return sp.kron(
+        sp.csr_matrix(stencil * float(scale)),
+        sp.eye(int(n_cells), format="csr"),
+        format="csr",
+    )
 
 
 def _first_difference(n_times: int) -> np.ndarray:
@@ -243,20 +312,30 @@ def _first_difference(n_times: int) -> np.ndarray:
 class _LinearTemporal:
     def linearized_system(self, current_model, n_cells, n_times, *, scale=1.0):
         matrix = self.matrix(n_cells, n_times, scale=scale)
-        return matrix, -np.asarray(matrix @ np.asarray(current_model, dtype=float).reshape(-1), dtype=float)
+        return matrix, -np.asarray(
+            matrix @ np.asarray(current_model, dtype=float).reshape(-1), dtype=float
+        )
 
 
 class _ReweightedTemporal:
     """Row reweighting of first-order temporal differences."""
 
-    def matrix(self, n_cells: int, n_times: int, *, scale: float = 1.0) -> sp.csr_matrix:
+    def matrix(
+        self, n_cells: int, n_times: int, *, scale: float = 1.0
+    ) -> sp.csr_matrix:
         return FirstOrderTemporalRegularization().matrix(n_cells, n_times, scale=scale)
 
-    def linearized_system(self, current_model, n_cells, n_times, *, scale=1.0, **options):
+    def linearized_system(
+        self, current_model, n_cells, n_times, *, scale=1.0, **options
+    ):
         base = self.matrix(n_cells, n_times, scale=1.0)
-        change = np.asarray(base @ np.asarray(current_model, dtype=float).reshape(-1), dtype=float)
+        change = np.asarray(
+            base @ np.asarray(current_model, dtype=float).reshape(-1), dtype=float
+        )
         weight = self._row_weights(change, **options)
-        return (sp.diags(float(scale) * weight, format="csr") @ base).tocsr(), -float(scale) * weight * change
+        return (sp.diags(float(scale) * weight, format="csr") @ base).tocsr(), -float(
+            scale
+        ) * weight * change
 
 
 @dataclass(frozen=True)
@@ -265,7 +344,9 @@ class FirstOrderTemporalRegularization(_LinearTemporal):
 
     name: str = "first_order_l2"
 
-    def matrix(self, n_cells: int, n_times: int, *, scale: float = 1.0) -> sp.csr_matrix:
+    def matrix(
+        self, n_cells: int, n_times: int, *, scale: float = 1.0
+    ) -> sp.csr_matrix:
         return _time_operator(_first_difference(int(n_times)), n_cells, scale)
 
 
@@ -275,7 +356,9 @@ class SecondOrderTemporalRegularization(_LinearTemporal):
 
     name: str = "second_order_l2"
 
-    def matrix(self, n_cells: int, n_times: int, *, scale: float = 1.0) -> sp.csr_matrix:
+    def matrix(
+        self, n_cells: int, n_times: int, *, scale: float = 1.0
+    ) -> sp.csr_matrix:
         n_times = int(n_times)
         stencil = np.zeros((max(n_times - 2, 0), n_times))
         for row in range(stencil.shape[0]):
@@ -289,7 +372,9 @@ class BaselineReferenceTemporalRegularization(_LinearTemporal):
 
     name: str = "baseline_reference"
 
-    def matrix(self, n_cells: int, n_times: int, *, scale: float = 1.0) -> sp.csr_matrix:
+    def matrix(
+        self, n_cells: int, n_times: int, *, scale: float = 1.0
+    ) -> sp.csr_matrix:
         n_times = int(n_times)
         stencil = np.eye(n_times)[1:]
         stencil[:, 0] = -1.0
@@ -327,9 +412,16 @@ class ActiveTimeConstraintRegularization(_ReweightedTemporal):
     minimum_weight: float = 0.05
     name: str = "active_time_constraint"
 
-    def _row_weights(self, change, threshold: float | None = None, minimum_weight: float | None = None):
+    def _row_weights(
+        self,
+        change,
+        threshold: float | None = None,
+        minimum_weight: float | None = None,
+    ):
         threshold = self.threshold if threshold is None else float(threshold)
-        minimum = self.minimum_weight if minimum_weight is None else float(minimum_weight)
+        minimum = (
+            self.minimum_weight if minimum_weight is None else float(minimum_weight)
+        )
         if threshold <= 0.0:
             raise ValueError("active time threshold must be positive")
         if not 0.0 <= minimum <= 1.0:
@@ -385,16 +477,32 @@ def _build(name, registry: dict, choices: tuple[str, ...], label: str):
     try:
         return registry[str(name).strip().lower().replace("-", "_")]
     except KeyError as exc:
-        raise ValueError(f"unknown {label}={name!r}; available choices: {', '.join(choices)}") from exc
+        raise ValueError(
+            f"unknown {label}={name!r}; available choices: {', '.join(choices)}"
+        ) from exc
 
 
-def build_spatial_regularization(name: str | SpatialRegularization) -> SpatialRegularization:
+def build_spatial_regularization(
+    name: str | SpatialRegularization,
+) -> SpatialRegularization:
     """Resolve a spatial regularization object from a registered name."""
 
-    return _build(name, _SPATIAL_REGULARIZATIONS, available_spatial_regularizations(), "spatial_regularization")
+    return _build(
+        name,
+        _SPATIAL_REGULARIZATIONS,
+        available_spatial_regularizations(),
+        "spatial_regularization",
+    )
 
 
-def build_temporal_regularization(name: str | TemporalRegularization) -> TemporalRegularization:
+def build_temporal_regularization(
+    name: str | TemporalRegularization,
+) -> TemporalRegularization:
     """Resolve a temporal regularization object from a registered name."""
 
-    return _build(name, _TEMPORAL_REGULARIZATIONS, available_temporal_regularizations(), "temporal_regularization_type")
+    return _build(
+        name,
+        _TEMPORAL_REGULARIZATIONS,
+        available_temporal_regularizations(),
+        "temporal_regularization_type",
+    )

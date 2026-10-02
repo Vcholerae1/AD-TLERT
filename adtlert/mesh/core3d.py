@@ -17,13 +17,17 @@ _TETRA_FACES = ((1, 2, 3), (0, 3, 2), (0, 1, 3), (0, 2, 1))
 
 
 def _edge_matrices(cell_nodes: np.ndarray) -> np.ndarray:
-    return np.stack([cell_nodes[:, index] - cell_nodes[:, 0] for index in (1, 2, 3)], axis=-1)
+    return np.stack(
+        [cell_nodes[:, index] - cell_nodes[:, 0] for index in (1, 2, 3)], axis=-1
+    )
 
 
 def tetrahedron_volumes(nodes, cells) -> Tensor:
     """Return absolute volumes of four-node tetrahedra."""
 
-    cell_nodes = np.asarray(nodes, dtype=NP_FLOAT_DTYPE)[np.asarray(cells, dtype=np.int32)]
+    cell_nodes = np.asarray(nodes, dtype=NP_FLOAT_DTYPE)[
+        np.asarray(cells, dtype=np.int32)
+    ]
     return _float(np.abs(np.linalg.det(_edge_matrices(cell_nodes))) / 6.0)
 
 
@@ -31,24 +35,35 @@ def _boundary_topology(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Sorted boundary faces and their owning cells."""
 
     faces = np.sort(cells[:, _TETRA_FACES], axis=-1).reshape(-1, 3)
-    unique, first, counts = np.unique(faces, axis=0, return_index=True, return_counts=True)
+    unique, first, counts = np.unique(
+        faces, axis=0, return_index=True, return_counts=True
+    )
     boundary = counts == 1
     return unique[boundary].astype(np.int32), (first[boundary] // 4).astype(np.int32)
 
 
-def _boundary_geometry(nodes: np.ndarray, cells: np.ndarray, faces: np.ndarray, face_cells: np.ndarray):
+def _boundary_geometry(
+    nodes: np.ndarray, cells: np.ndarray, faces: np.ndarray, face_cells: np.ndarray
+):
     """Centers, areas, and outward unit normals of boundary faces."""
 
     face_nodes = nodes[faces]
     centers = np.mean(face_nodes, axis=1)
-    cross = np.cross(face_nodes[:, 1] - face_nodes[:, 0], face_nodes[:, 2] - face_nodes[:, 0])
+    cross = np.cross(
+        face_nodes[:, 1] - face_nodes[:, 0], face_nodes[:, 2] - face_nodes[:, 0]
+    )
     norm = np.linalg.norm(cross, axis=1)
     normals = cross / norm[:, None]
-    outward = np.sum(normals * (centers - np.mean(nodes[cells[face_cells]], axis=1)), axis=1) >= 0.0
+    outward = (
+        np.sum(normals * (centers - np.mean(nodes[cells[face_cells]], axis=1)), axis=1)
+        >= 0.0
+    )
     return centers, 0.5 * norm, normals * np.where(outward, 1.0, -1.0)[:, None]
 
 
-def locate_points_in_tetrahedra(nodes, cells, points, tol: float = 1.0e-8) -> tuple[Tensor, Tensor]:
+def locate_points_in_tetrahedra(
+    nodes, cells, points, tol: float = 1.0e-8
+) -> tuple[Tensor, Tensor]:
     """Containing tetrahedron ids and barycentric weights of points."""
 
     nodes, cells = np.asarray(nodes, dtype=float), np.asarray(cells, dtype=np.int32)
@@ -65,16 +80,25 @@ def locate_points_in_tetrahedra(nodes, cells, points, tol: float = 1.0e-8) -> tu
         if np.linalg.norm(nodes[nearest] - point) <= tol:
             candidates = np.flatnonzero(np.any(cells == nearest, axis=1))
         else:
-            candidates = np.flatnonzero(np.all((point >= lower) & (point <= upper), axis=1))
+            candidates = np.flatnonzero(
+                np.all((point >= lower) & (point <= upper), axis=1)
+            )
         for cell_id in candidates:
             local = inverse[cell_id] @ (point - origins[cell_id])
-            barycentric = np.asarray((1.0 - np.sum(local), *local), dtype=NP_FLOAT_DTYPE)
+            barycentric = np.asarray(
+                (1.0 - np.sum(local), *local), dtype=NP_FLOAT_DTYPE
+            )
             if np.all(barycentric >= -tol) and np.all(barycentric <= 1.0 + tol):
                 barycentric[np.abs(barycentric) <= tol] = 0.0
-                cell_ids[point_id], weights[point_id] = cell_id, barycentric / np.sum(barycentric)
+                cell_ids[point_id], weights[point_id] = (
+                    cell_id,
+                    barycentric / np.sum(barycentric),
+                )
                 break
     if np.any(cell_ids < 0):
-        raise ValueError(f"points lie outside the tetrahedral mesh: indices={np.flatnonzero(cell_ids < 0).tolist()}")
+        raise ValueError(
+            f"points lie outside the tetrahedral mesh: indices={np.flatnonzero(cell_ids < 0).tolist()}"
+        )
     return _int(cell_ids), _float(weights)
 
 
@@ -119,14 +143,20 @@ class Mesh3D:
             raise ValueError("cells must define non-degenerate tetrahedra")
         faces, face_cells = _boundary_topology(cells)
         centers, areas, normals = _boundary_geometry(nodes, cells, faces, face_cells)
-        if surface_face_mask is None:  # height-field terrain: exterior faces whose outward normal points up
+        if (
+            surface_face_mask is None
+        ):  # height-field terrain: exterior faces whose outward normal points up
             surface_mask = normals[:, 2] > 1.0e-8
         else:
             surface_mask = np.asarray(surface_face_mask, dtype=bool).reshape(-1)
             if surface_mask.shape != (faces.shape[0],):
-                raise ValueError(f"surface_face_mask must have one entry per boundary face ({surface_mask.shape} != ({faces.shape[0]},))")
+                raise ValueError(
+                    f"surface_face_mask must have one entry per boundary face ({surface_mask.shape} != ({faces.shape[0]},))"
+                )
         if not np.any(surface_mask):
-            raise ValueError("could not identify any upward-facing terrain surface faces")
+            raise ValueError(
+                "could not identify any upward-facing terrain surface faces"
+            )
         surface_nodes = np.unique(faces[surface_mask])
         surface_tol = max(1.0e-8, max(float(np.ptp(nodes[:, 2])), 1.0) * 1.0e-8)
         return cls(
@@ -138,8 +168,12 @@ class Mesh3D:
             boundary_face_areas=_float(areas),
             boundary_face_normals=_float(normals),
             surface_face_mask=torch.as_tensor(surface_mask),
-            surface_reference_level=torch.tensor(float(np.max(nodes[:, 2])), dtype=FLOAT_DTYPE),
-            flat_surface=torch.tensor(bool(np.ptp(nodes[surface_nodes, 2]) <= surface_tol)),
+            surface_reference_level=torch.tensor(
+                float(np.max(nodes[:, 2])), dtype=FLOAT_DTYPE
+            ),
+            flat_surface=torch.tensor(
+                bool(np.ptp(nodes[surface_nodes, 2]) <= surface_tol)
+            ),
             cell_volumes=_float(volumes),
         )
 
@@ -177,8 +211,22 @@ class Mesh3D:
 
         points, midpoint, _ = edge_midpoint_builder(self.nodes)
         cells = [
-            [n0, n1, n2, n3, midpoint(n0, n1), midpoint(n1, n2), midpoint(n2, n0), midpoint(n0, n3), midpoint(n1, n3), midpoint(n2, n3)]
+            [
+                n0,
+                n1,
+                n2,
+                n3,
+                midpoint(n0, n1),
+                midpoint(n1, n2),
+                midpoint(n2, n0),
+                midpoint(n0, n3),
+                midpoint(n1, n3),
+                midpoint(n2, n3),
+            ]
             for n0, n1, n2, n3 in self.cells.tolist()
         ]
-        faces = [[n0, n1, n2, midpoint(n0, n1), midpoint(n1, n2), midpoint(n2, n0)] for n0, n1, n2 in self.boundary_faces.tolist()]
+        faces = [
+            [n0, n1, n2, midpoint(n0, n1), midpoint(n1, n2), midpoint(n2, n0)]
+            for n0, n1, n2 in self.boundary_faces.tolist()
+        ]
         return _float(points), _int(cells), _int(faces)

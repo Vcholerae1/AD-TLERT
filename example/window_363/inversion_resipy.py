@@ -129,7 +129,11 @@ def main(argv: list[str] | None = None) -> int:
         case_dir.mkdir(parents=True, exist_ok=True)
         command = [
             sys.executable,
-            str(Path(__file__).resolve().parents[1] / "single_time" / "inversion_resipy.py"),
+            str(
+                Path(__file__).resolve().parents[1]
+                / "single_time"
+                / "inversion_resipy.py"
+            ),
             "--project-root",
             str(root),
             "--forward-dir",
@@ -162,9 +166,7 @@ def main(argv: list[str] | None = None) -> int:
             f"[{ordinal + 1}/{len(starts)}] running: {window_steps}",
             flush=True,
         )
-        with (output_dir / f"w{ordinal:03d}.log").open(
-            "w", encoding="utf-8"
-        ) as log:
+        with (output_dir / f"w{ordinal:03d}.log").open("w", encoding="utf-8") as log:
             subprocess.run(
                 command,
                 cwd=root,

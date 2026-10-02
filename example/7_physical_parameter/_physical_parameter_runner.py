@@ -63,9 +63,13 @@ def _grid2d_to_cells(
     layer_thickness = np.asarray(geometry["layer_thickness"], dtype=float).ravel()
     expected_shape = (layer_thickness.size, x_nodes.size - 1)
     if grid.shape != expected_shape:
-        raise ValueError(f"2D grid shape {grid.shape} does not match expected {expected_shape}")
+        raise ValueError(
+            f"2D grid shape {grid.shape} does not match expected {expected_shape}"
+        )
 
-    centers = np.asarray(nodes, dtype=float)[np.asarray(cells, dtype=np.int32)].mean(axis=1)
+    centers = np.asarray(nodes, dtype=float)[np.asarray(cells, dtype=np.int32)].mean(
+        axis=1
+    )
     x_center = centers[:, 0]
     z_center = centers[:, 1]
 
@@ -73,7 +77,9 @@ def _grid2d_to_cells(
     column = np.clip(column, 0, x_nodes.size - 2)
     surface_z = np.interp(x_center, x_nodes, z_top)
     depth = np.maximum(surface_z - z_center, 0.0)
-    layer_top_to_bottom = np.searchsorted(np.cumsum(layer_thickness), depth, side="right")
+    layer_top_to_bottom = np.searchsorted(
+        np.cumsum(layer_thickness), depth, side="right"
+    )
     layer_top_to_bottom = np.clip(layer_top_to_bottom, 0, layer_thickness.size - 1)
 
     grid_top_to_bottom = grid[::-1, :]
@@ -96,9 +102,13 @@ def _load_petrophysical_parameters_on_mesh(
         "n": parameter_dir / f"n2d_y{y_index}_base_{preset}.npy",
         "phi": parameter_dir / f"phi2d_y{y_index}_base_{preset}.npy",
     }
-    missing_required = [str(files[name]) for name in ("rho_sat", "n", "phi") if not files[name].exists()]
+    missing_required = [
+        str(files[name]) for name in ("rho_sat", "n", "phi") if not files[name].exists()
+    ]
     if missing_required:
-        raise FileNotFoundError(f"Missing petrophysical parameter files: {missing_required}")
+        raise FileNotFoundError(
+            f"Missing petrophysical parameter files: {missing_required}"
+        )
 
     mapped: dict[str, np.ndarray] = {}
     for name, path in files.items():
@@ -128,7 +138,12 @@ def convert_resistivity_result_to_water_content(
         nodes = np.asarray(mesh_data["nodes"], dtype=float)
         cells = np.asarray(mesh_data["cells"], dtype=np.int32)
 
-    geometry_path = project_root / "result" / "1_timelapsedERT_forward_adtlert" / "forward_geometry.npz"
+    geometry_path = (
+        project_root
+        / "result"
+        / "1_timelapsedERT_forward_adtlert"
+        / "forward_geometry.npz"
+    )
     geometry = _load_geometry(geometry_path)
     params = _load_petrophysical_parameters_on_mesh(
         project_root=project_root,
@@ -141,7 +156,9 @@ def convert_resistivity_result_to_water_content(
 
     rho_models = np.asarray(np.load(final_models_path), dtype=float)
     if rho_models.ndim != 2:
-        raise ValueError(f"Expected 2D final_models array, got shape {rho_models.shape}")
+        raise ValueError(
+            f"Expected 2D final_models array, got shape {rho_models.shape}"
+        )
 
     rho_safe = np.clip(rho_models, np.finfo(float).tiny, None)
     log_rho = np.log(rho_safe)
@@ -164,19 +181,29 @@ def convert_resistivity_result_to_water_content(
     water_content = saturation * phi
 
     np.save(output_dir / "final_saturation_from_resistivity_models.npy", saturation)
-    np.save(output_dir / "final_water_content_from_resistivity_models.npy", water_content)
+    np.save(
+        output_dir / "final_water_content_from_resistivity_models.npy", water_content
+    )
 
     steps_path = output_dir / "steps.npy"
     if steps_path.exists():
         steps = np.asarray(np.load(steps_path), dtype=int).ravel()
         if steps.size == water_content.shape[1]:
             for col, step in enumerate(steps):
-                np.save(output_dir / f"inverted_water_content_from_resistivity_t{int(step):05d}.npy", water_content[:, col])
+                np.save(
+                    output_dir
+                    / f"inverted_water_content_from_resistivity_t{int(step):05d}.npy",
+                    water_content[:, col],
+                )
 
     summary = {
         "source_final_models": str(final_models_path),
-        "output_saturation": str(output_dir / "final_saturation_from_resistivity_models.npy"),
-        "output_water_content": str(output_dir / "final_water_content_from_resistivity_models.npy"),
+        "output_saturation": str(
+            output_dir / "final_saturation_from_resistivity_models.npy"
+        ),
+        "output_water_content": str(
+            output_dir / "final_water_content_from_resistivity_models.npy"
+        ),
         "y_index": int(y_index),
         "preset": str(preset),
         "saturation_floor": float(saturation_floor),
@@ -225,7 +252,9 @@ def _run_inversion_case(
     return int(code), output_dir
 
 
-def run_resistivity_then_convert_case(*, extra_cli_args: list[str] | None = None) -> int:
+def run_resistivity_then_convert_case(
+    *, extra_cli_args: list[str] | None = None
+) -> int:
     code, output_dir = _run_inversion_case(
         output_name="resistivity_then_convert",
         extra_case_args=[],
@@ -265,7 +294,12 @@ def run_ad_saturation_case(*, extra_cli_args: list[str] | None = None) -> int:
         with np.load(mesh_path) as mesh_data:
             nodes = np.asarray(mesh_data["nodes"], dtype=float)
             cells = np.asarray(mesh_data["cells"], dtype=np.int32)
-        geometry_path = _project_root() / "result" / "1_timelapsedERT_forward_adtlert" / "forward_geometry.npz"
+        geometry_path = (
+            _project_root()
+            / "result"
+            / "1_timelapsedERT_forward_adtlert"
+            / "forward_geometry.npz"
+        )
         geometry = _load_geometry(geometry_path)
         params = _load_petrophysical_parameters_on_mesh(
             project_root=_project_root(),

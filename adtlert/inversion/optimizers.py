@@ -32,9 +32,15 @@ _LINEARIZED_OPTIMIZERS = {
     optimizer.name: optimizer
     for optimizer in (
         LinearizedOptimizer("lsqr", "SciPy LSQR on the assembled linearized system."),
-        LinearizedOptimizer("gpu_cgls", "CuPy CGLS on the assembled linearized system."),
-        LinearizedOptimizer("normal_cg", "SciPy conjugate-gradient solve on normal equations."),
-        LinearizedOptimizer("pyhydro_cgls", "PyHydroGeophysX-style CGLS on normal equations."),
+        LinearizedOptimizer(
+            "gpu_cgls", "CuPy CGLS on the assembled linearized system."
+        ),
+        LinearizedOptimizer(
+            "normal_cg", "SciPy conjugate-gradient solve on normal equations."
+        ),
+        LinearizedOptimizer(
+            "pyhydro_cgls", "PyHydroGeophysX-style CGLS on normal equations."
+        ),
     )
 }
 
@@ -47,7 +53,9 @@ _OPTIMIZATION_ALGORITHMS = {
             uses_linearized_solver=True,
         ),
         OptimizationAlgorithm(
-            "levenberg_marquardt", "Levenberg-Marquardt damped Gauss-Newton update.", uses_linearized_solver=True
+            "levenberg_marquardt",
+            "Levenberg-Marquardt damped Gauss-Newton update.",
+            uses_linearized_solver=True,
         ),
         OptimizationAlgorithm(
             "lbfgs",
@@ -55,13 +63,19 @@ _OPTIMIZATION_ALGORITHMS = {
             gradient_based=True,
         ),
         OptimizationAlgorithm(
-            "lbfgs_b", "Projected limited-memory BFGS using matrix-free normal VJP gradients.", gradient_based=True
+            "lbfgs_b",
+            "Projected limited-memory BFGS using matrix-free normal VJP gradients.",
+            gradient_based=True,
         ),
         OptimizationAlgorithm(
-            "nonlinear_cg", "Nonlinear conjugate-gradient descent using matrix-free normal VJP gradients.", gradient_based=True
+            "nonlinear_cg",
+            "Nonlinear conjugate-gradient descent using matrix-free normal VJP gradients.",
+            gradient_based=True,
         ),
         OptimizationAlgorithm(
-            "adam", "Adam first-order optimizer using ADTLERT matrix-free normal VJP gradients.", gradient_based=True
+            "adam",
+            "Adam first-order optimizer using ADTLERT matrix-free normal VJP gradients.",
+            gradient_based=True,
         ),
     )
 }
@@ -73,7 +87,9 @@ def _lookup(registry: dict, name, kind: type, label: str):
     try:
         return registry[str(name).strip().lower().replace("-", "_")]
     except KeyError as exc:
-        raise ValueError(f"unknown {label}={name!r}; available choices: {', '.join(sorted(registry))}") from exc
+        raise ValueError(
+            f"unknown {label}={name!r}; available choices: {', '.join(sorted(registry))}"
+        ) from exc
 
 
 def available_linearized_optimizers() -> tuple[str, ...]:
@@ -91,10 +107,14 @@ def available_optimization_algorithms() -> tuple[str, ...]:
 def build_linearized_optimizer(name: str | LinearizedOptimizer) -> LinearizedOptimizer:
     """Resolve a linearized optimizer from a registered name."""
 
-    return _lookup(_LINEARIZED_OPTIMIZERS, name, LinearizedOptimizer, "linearized_solver")
+    return _lookup(
+        _LINEARIZED_OPTIMIZERS, name, LinearizedOptimizer, "linearized_solver"
+    )
 
 
-def build_optimization_algorithm(name: str | OptimizationAlgorithm) -> OptimizationAlgorithm:
+def build_optimization_algorithm(
+    name: str | OptimizationAlgorithm,
+) -> OptimizationAlgorithm:
     """Resolve an outer optimization algorithm from a registered name."""
 
     return _lookup(_OPTIMIZATION_ALGORITHMS, name, OptimizationAlgorithm, "optimizer")
@@ -117,7 +137,9 @@ def limit_step(delta: np.ndarray, max_step: float | None) -> np.ndarray:
 def linearized_gradient(matrix: sp.spmatrix, rhs: np.ndarray) -> np.ndarray:
     """Gradient of ``||A dm - b||^2 / 2`` at ``dm = 0``."""
 
-    return -np.asarray(matrix.T @ np.asarray(rhs, dtype=float).reshape(-1), dtype=float).reshape(-1)
+    return -np.asarray(
+        matrix.T @ np.asarray(rhs, dtype=float).reshape(-1), dtype=float
+    ).reshape(-1)
 
 
 def _descent(direction: np.ndarray, gradient: np.ndarray) -> np.ndarray:
@@ -128,7 +150,9 @@ def _descent(direction: np.ndarray, gradient: np.ndarray) -> np.ndarray:
     return direction
 
 
-def _lbfgs_direction(gradient: np.ndarray, history: list[tuple[np.ndarray, np.ndarray, float]]) -> np.ndarray:
+def _lbfgs_direction(
+    gradient: np.ndarray, history: list[tuple[np.ndarray, np.ndarray, float]]
+) -> np.ndarray:
     """L-BFGS two-loop recursion over stored ``(s, y, 1 / y.s)`` pairs."""
 
     if not history:
@@ -146,7 +170,9 @@ def _lbfgs_direction(gradient: np.ndarray, history: list[tuple[np.ndarray, np.nd
     return -r
 
 
-def first_order_step(current: np.ndarray, gradient: np.ndarray, state: dict[str, Any], config) -> np.ndarray:
+def first_order_step(
+    current: np.ndarray, gradient: np.ndarray, state: dict[str, Any], config
+) -> np.ndarray:
     """Model increment of a first-order/quasi-Newton optimizer from the current gradient."""
 
     algorithm = build_optimization_algorithm(config.optimization_algorithm).name
@@ -158,24 +184,49 @@ def first_order_step(current: np.ndarray, gradient: np.ndarray, state: dict[str,
         raise ValueError("optimizer gradient contains non-finite values")
     if not np.any(grad):
         return np.zeros_like(grad)
-    max_step = config.max_log_step if config.max_log_step is not None else config.optimizer_max_step
+    max_step = (
+        config.max_log_step
+        if config.max_log_step is not None
+        else config.optimizer_max_step
+    )
 
     if algorithm == "nonlinear_cg":  # Polak-Ribiere+
-        previous_grad, previous_dir = state.get("nonlinear_cg_gradient"), state.get("nonlinear_cg_direction")
+        previous_grad, previous_dir = (
+            state.get("nonlinear_cg_gradient"),
+            state.get("nonlinear_cg_direction"),
+        )
         direction = -grad
         if previous_grad is not None and previous_dir is not None:
-            beta = max(0.0, float(np.dot(grad, grad - previous_grad) / max(float(np.dot(previous_grad, previous_grad)), np.finfo(float).eps)))
+            beta = max(
+                0.0,
+                float(
+                    np.dot(grad, grad - previous_grad)
+                    / max(
+                        float(np.dot(previous_grad, previous_grad)), np.finfo(float).eps
+                    )
+                ),
+            )
             direction = -grad + beta * previous_dir
         direction = _descent(direction, grad)
-        state["nonlinear_cg_gradient"], state["nonlinear_cg_direction"] = grad.copy(), direction.copy()
+        state["nonlinear_cg_gradient"], state["nonlinear_cg_direction"] = (
+            grad.copy(),
+            direction.copy(),
+        )
         return limit_step(direction, max_step)
 
     if algorithm in ("lbfgs", "lbfgs_b"):
         history = state.setdefault("lbfgs_history", [])
         if state.get("lbfgs_state") is not None:
-            s_vec, y_vec = current - state["lbfgs_state"], grad - state["lbfgs_gradient"]
+            s_vec, y_vec = (
+                current - state["lbfgs_state"],
+                grad - state["lbfgs_gradient"],
+            )
             ys = float(np.dot(y_vec, s_vec))
-            if ys > 1.0e-12 and np.all(np.isfinite(s_vec)) and np.all(np.isfinite(y_vec)):
+            if (
+                ys > 1.0e-12
+                and np.all(np.isfinite(s_vec))
+                and np.all(np.isfinite(y_vec))
+            ):
                 history.append((s_vec.copy(), y_vec.copy(), 1.0 / ys))
                 del history[: -int(config.lbfgs_history)]
         direction = _descent(_lbfgs_direction(grad, history), grad)
@@ -186,24 +237,41 @@ def first_order_step(current: np.ndarray, gradient: np.ndarray, state: dict[str,
         beta1, beta2 = float(config.adam_beta1), float(config.adam_beta2)
         step = int(state.get("adam_step", 0)) + 1
         m = beta1 * state.get("adam_m", np.zeros_like(grad)) + (1.0 - beta1) * grad
-        v = beta2 * state.get("adam_v", np.zeros_like(grad)) + (1.0 - beta2) * (grad * grad)
+        v = beta2 * state.get("adam_v", np.zeros_like(grad)) + (1.0 - beta2) * (
+            grad * grad
+        )
         state.update(adam_step=step, adam_m=m, adam_v=v)
-        direction = -(m / (1.0 - beta1**step)) / (np.sqrt(v / (1.0 - beta2**step)) + float(config.adam_epsilon))
+        direction = -(m / (1.0 - beta1**step)) / (
+            np.sqrt(v / (1.0 - beta2**step)) + float(config.adam_epsilon)
+        )
         return limit_step(direction, max_step)
 
-    raise ValueError(f"optimizer={config.optimization_algorithm!r} is not a first-order optimizer")
+    raise ValueError(
+        f"optimizer={config.optimization_algorithm!r} is not a first-order optimizer"
+    )
 
 
-def linearized_step(matrix: sp.spmatrix, rhs: np.ndarray, current: np.ndarray, state: dict[str, Any], config) -> np.ndarray:
+def linearized_step(
+    matrix: sp.spmatrix,
+    rhs: np.ndarray,
+    current: np.ndarray,
+    state: dict[str, Any],
+    config,
+) -> np.ndarray:
     """Model increment for the stacked linearized system ``A dm ~= b``."""
 
     algorithm = build_optimization_algorithm(config.optimization_algorithm)
     if not algorithm.uses_linearized_solver:
-        return first_order_step(current, linearized_gradient(matrix, rhs), state, config)
+        return first_order_step(
+            current, linearized_gradient(matrix, rhs), state, config
+        )
     matrix, rhs = matrix.tocsr(), np.asarray(rhs, dtype=float).reshape(-1)
     if algorithm.name == "levenberg_marquardt" and config.lm_damping > 0.0:
         n_parameters = int(np.asarray(current).size)
-        matrix = sp.vstack((matrix, np.sqrt(config.lm_damping) * sp.eye(n_parameters, format="csr")), format="csr")
+        matrix = sp.vstack(
+            (matrix, np.sqrt(config.lm_damping) * sp.eye(n_parameters, format="csr")),
+            format="csr",
+        )
         rhs = np.concatenate((rhs, np.zeros(n_parameters)))
     return limit_step(solve_linearized(matrix, rhs, config), config.max_log_step)
 
@@ -213,26 +281,48 @@ def solve_linearized(matrix: sp.spmatrix, rhs: np.ndarray, config) -> np.ndarray
 
     solver = config.linearized_solver
     if solver == "gpu_cgls":
-        solution = _cupy_cgls(matrix, rhs, max_iterations=config.cgls_max_iterations, tolerance=config.cgls_tolerance)
+        solution = _cupy_cgls(
+            matrix,
+            rhs,
+            max_iterations=config.cgls_max_iterations,
+            tolerance=config.cgls_tolerance,
+        )
     elif solver == "pyhydro_cgls":
         normal_rhs = np.asarray(matrix.T @ rhs, dtype=float).reshape(-1, 1)
-        solution = _pyhydro_cgls((matrix.T @ matrix).tocsr(), normal_rhs, config.cgls_max_iterations, config.cgls_tolerance)
+        solution = _pyhydro_cgls(
+            (matrix.T @ matrix).tocsr(),
+            normal_rhs,
+            config.cgls_max_iterations,
+            config.cgls_tolerance,
+        )
         solution = solution.ravel()
     elif solver == "normal_cg":
         normal_rhs = np.asarray(matrix.T @ rhs, dtype=float).ravel()
         solution, info = cg(
-            (matrix.T @ matrix).tocsr(), normal_rhs, rtol=config.cgls_tolerance, atol=0.0, maxiter=config.cgls_max_iterations
+            (matrix.T @ matrix).tocsr(),
+            normal_rhs,
+            rtol=config.cgls_tolerance,
+            atol=0.0,
+            maxiter=config.cgls_max_iterations,
         )
         if info < 0:
             raise ValueError(f"normal_cg failed with illegal input/info={info}")
     else:
-        solution = lsqr(matrix, rhs, atol=config.lsqr_atol, btol=config.lsqr_btol, iter_lim=config.lsqr_iter_limit)[0]
+        solution = lsqr(
+            matrix,
+            rhs,
+            atol=config.lsqr_atol,
+            btol=config.lsqr_btol,
+            iter_lim=config.lsqr_iter_limit,
+        )[0]
     if not np.all(np.isfinite(solution)):
         raise ValueError("linearized inversion update contains non-finite values")
     return np.asarray(solution, dtype=float)
 
 
-def _cupy_cgls(matrix: sp.spmatrix, rhs: np.ndarray, *, max_iterations: int, tolerance: float) -> np.ndarray:
+def _cupy_cgls(
+    matrix: sp.spmatrix, rhs: np.ndarray, *, max_iterations: int, tolerance: float
+) -> np.ndarray:
     """CGLS for ``min ||A x - b||`` with CuPy sparse matvecs."""
 
     try:
@@ -242,9 +332,17 @@ def _cupy_cgls(matrix: sp.spmatrix, rhs: np.ndarray, *, max_iterations: int, tol
         raise ImportError("linearized_solver='gpu_cgls' requires CuPy") from exc
 
     cpu = matrix.tocsr()
-    dtype = np.float64 if cpu.dtype == np.float64 or np.asarray(rhs).dtype == np.float64 else np.float32
+    dtype = (
+        np.float64
+        if cpu.dtype == np.float64 or np.asarray(rhs).dtype == np.float64
+        else np.float32
+    )
     system = cupy_sparse.csr_matrix(
-        (cp.asarray(cpu.data, dtype=dtype), cp.asarray(cpu.indices, dtype=cp.int32), cp.asarray(cpu.indptr, dtype=cp.int32)),
+        (
+            cp.asarray(cpu.data, dtype=dtype),
+            cp.asarray(cpu.indices, dtype=cp.int32),
+            cp.asarray(cpu.indptr, dtype=cp.int32),
+        ),
         shape=cpu.shape,
     )
     r = cp.asarray(np.asarray(rhs, dtype=dtype).ravel())
@@ -272,7 +370,9 @@ def _cupy_cgls(matrix: sp.spmatrix, rhs: np.ndarray, *, max_iterations: int, tol
     return np.asarray(cp.asnumpy(x), dtype=float)
 
 
-def _pyhydro_cgls(matrix, rhs: np.ndarray, max_iterations: int, tolerance: float) -> np.ndarray:
+def _pyhydro_cgls(
+    matrix, rhs: np.ndarray, max_iterations: int, tolerance: float
+) -> np.ndarray:
     """PyHydroGeophysX's CGLS routine (stops on the relative residual ``||r||^2 / ||b||^2``)."""
 
     b = np.asarray(rhs, dtype=float).reshape(-1, 1)

@@ -19,7 +19,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import torch
 import numpy as np
 
-from example.shared import grid2d_to_mesh_cells, load_petrophysical_parameters, resolve, write_json
+from example.shared import (
+    grid2d_to_mesh_cells,
+    load_petrophysical_parameters,
+    resolve,
+    write_json,
+)
 from adtlert.inversion import (
     InversionConfig,
     ParameterizedERTForward2p5D,
@@ -87,7 +92,9 @@ def _load_geometry(path: Path) -> dict[str, np.ndarray]:
         return {name: np.asarray(data[name], dtype=float).ravel() for name in required}
 
 
-def _structural_prior_cell_ids(path: Path, mesh, geometry: dict[str, np.ndarray]) -> np.ndarray:
+def _structural_prior_cell_ids(
+    path: Path, mesh, geometry: dict[str, np.ndarray]
+) -> np.ndarray:
     """Map a terrain-following 2D structural-unit grid onto inversion mesh cells."""
 
     class_grid = np.asarray(np.load(path), dtype=np.int32)
@@ -112,13 +119,21 @@ def _load_terrain_forward_npz(path: Path) -> TerrainForwardData:
                 np.asarray(data["n"], dtype=np.int32).ravel(),
             )
         )
-        err = np.asarray(data["err"], dtype=float).ravel() if "err" in data.files else None
+        err = (
+            np.asarray(data["err"], dtype=float).ravel()
+            if "err" in data.files
+            else None
+        )
         if measurements.shape != (rhoa.size, 4):
-            raise ValueError(f"{path}: measurement arrays must have one entry per rhoa value")
+            raise ValueError(
+                f"{path}: measurement arrays must have one entry per rhoa value"
+            )
         if elec_x.shape != elec_z.shape:
             raise ValueError(f"{path}: elec_x and elec_z must have the same shape")
         if np.any(measurements < 0) or np.any(measurements >= elec_x.size):
-            raise ValueError(f"{path}: measurements reference electrodes outside elec_x/elec_z")
+            raise ValueError(
+                f"{path}: measurements reference electrodes outside elec_x/elec_z"
+            )
         if err is not None and err.shape != rhoa.shape:
             raise ValueError(f"{path}: err must have the same shape as rhoa")
         return TerrainForwardData(
@@ -130,7 +145,9 @@ def _load_terrain_forward_npz(path: Path) -> TerrainForwardData:
         )
 
 
-def _load_forward_file(path: Path, forward_format: str) -> tuple[TerrainForwardData, Path, str]:
+def _load_forward_file(
+    path: Path, forward_format: str
+) -> tuple[TerrainForwardData, Path, str]:
     if forward_format not in ("auto", "npz", "dat"):
         raise ValueError("forward_format must be 'auto', 'npz', or 'dat'")
 
@@ -174,11 +191,17 @@ def _load_forward_series(
             elec_z = data.elec_z
         else:
             if not np.array_equal(data.measurements, measurements):
-                raise ValueError(f"{path}: measurement layout differs from first timestep")
+                raise ValueError(
+                    f"{path}: measurement layout differs from first timestep"
+                )
             if not np.allclose(data.elec_x, elec_x, rtol=0.0, atol=1.0e-10):
-                raise ValueError(f"{path}: electrode x positions differ from first timestep")
+                raise ValueError(
+                    f"{path}: electrode x positions differ from first timestep"
+                )
             if not np.allclose(data.elec_z, elec_z, rtol=0.0, atol=1.0e-10):
-                raise ValueError(f"{path}: electrode z positions differ from first timestep")
+                raise ValueError(
+                    f"{path}: electrode z positions differ from first timestep"
+                )
 
         rhoa_rows.append(np.asarray(data.rhoa, dtype=float).ravel())
         if data.err is None:
@@ -190,7 +213,15 @@ def _load_forward_series(
         raise ValueError("no forward data loaded")
 
     err = np.vstack(err_rows) if have_err and len(err_rows) == len(rhoa_rows) else None
-    return np.vstack(rhoa_rows), measurements, elec_x, elec_z, err, loaded_paths, format_counts
+    return (
+        np.vstack(rhoa_rows),
+        measurements,
+        elec_x,
+        elec_z,
+        err,
+        loaded_paths,
+        format_counts,
+    )
 
 
 def _save_mesh_npz(
@@ -221,11 +252,17 @@ def _save_mesh_npz(
         "base_parameter_cell_ids": np.asarray(case.parameter_cell_ids, dtype=np.int32),
     }
     if forward_cell_parameter_ids is not None:
-        payload["forward_cell_parameter_ids"] = np.asarray(forward_cell_parameter_ids, dtype=np.int32)
+        payload["forward_cell_parameter_ids"] = np.asarray(
+            forward_cell_parameter_ids, dtype=np.int32
+        )
     if forward_parent_cell_ids is not None:
-        payload["forward_parent_cell_ids"] = np.asarray(forward_parent_cell_ids, dtype=np.int32)
+        payload["forward_parent_cell_ids"] = np.asarray(
+            forward_parent_cell_ids, dtype=np.int32
+        )
     if structural_prior_cell_ids is not None:
-        payload["structural_prior_cell_ids"] = np.asarray(structural_prior_cell_ids, dtype=np.int32)
+        payload["structural_prior_cell_ids"] = np.asarray(
+            structural_prior_cell_ids, dtype=np.int32
+        )
     surface_node_ids = getattr(case.mesh, "surface_node_ids", None)
     if surface_node_ids is not None:
         payload["surface_node_ids"] = np.asarray(surface_node_ids, dtype=np.int32)
@@ -237,16 +274,23 @@ def _build_forward_parameterization(
     refinement: str,
 ) -> tuple[object, np.ndarray, np.ndarray | None, np.ndarray | None]:
     if refinement == "native":
-        return case.forward_mesh, np.asarray(case.parameter_cell_ids, dtype=np.int32), None, None
+        return (
+            case.forward_mesh,
+            np.asarray(case.parameter_cell_ids, dtype=np.int32),
+            None,
+            None,
+        )
     if refinement != "h2":
         raise ValueError("forward refinement must be 'h2' or 'native'")
 
     refined_mesh, parent_cell_ids = case.forward_mesh.refine_uniform()
     parent_cell_ids = np.asarray(parent_cell_ids, dtype=np.int32).ravel()
     parent_parameter_ids = np.full(case.forward_mesh.cell_count, -1, dtype=np.int32)
-    parent_parameter_ids[np.asarray(case.parameter_cell_ids, dtype=np.int32)] = np.arange(
-        case.mesh.cell_count,
-        dtype=np.int32,
+    parent_parameter_ids[np.asarray(case.parameter_cell_ids, dtype=np.int32)] = (
+        np.arange(
+            case.mesh.cell_count,
+            dtype=np.int32,
+        )
     )
     forward_cell_parameter_ids = parent_parameter_ids[parent_cell_ids]
 
@@ -256,7 +300,9 @@ def _build_forward_parameterization(
         if parameter_cell_ids[parameter_id] < 0:
             parameter_cell_ids[parameter_id] = int(cell_id)
     if np.any(parameter_cell_ids < 0):
-        raise ValueError("H2 forward mesh parameterization left some inversion cells unmapped")
+        raise ValueError(
+            "H2 forward mesh parameterization left some inversion cells unmapped"
+        )
 
     return refined_mesh, parameter_cell_ids, forward_cell_parameter_ids, parent_cell_ids
 
@@ -364,7 +410,9 @@ def _plot_true_vs_inverted(
     ax_inv = fig.add_subplot(grid[1, 0], sharex=ax_true, sharey=ax_true)
     cax = fig.add_subplot(grid[:, 1])
 
-    ax_true.pcolormesh(x_grid, z_grid, rho_true_plot, shading="auto", cmap=cmap, norm=norm)
+    ax_true.pcolormesh(
+        x_grid, z_grid, rho_true_plot, shading="auto", cmap=cmap, norm=norm
+    )
     ax_true.set_title(f"True Model (t{mid_step:05d})")
 
     collection = PolyCollection(
@@ -401,10 +449,18 @@ def _plot_true_vs_inverted(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project-root", default=None, help="Repository root. Auto-detected by default.")
-    parser.add_argument("--forward-dir", default="result/1_timelapsedERT_forward_adtlert")
+    parser.add_argument(
+        "--project-root",
+        default=None,
+        help="Repository root. Auto-detected by default.",
+    )
+    parser.add_argument(
+        "--forward-dir", default="result/1_timelapsedERT_forward_adtlert"
+    )
     parser.add_argument("--true-model-dir", default="resistivity_models_2d")
-    parser.add_argument("--output-dir", default="result/2_timelapsedERT_inversion_adtlert")
+    parser.add_argument(
+        "--output-dir", default="result/2_timelapsedERT_inversion_adtlert"
+    )
     parser.add_argument("--y-index", type=int, default=2)
     parser.add_argument("--file-stride", type=int, default=1)
     parser.add_argument("--max-timesteps", type=int, default=None)
@@ -413,11 +469,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional comma-separated explicit timesteps; overrides stride selection.",
     )
-    parser.add_argument("--forward-format", choices=("auto", "npz", "dat"), default="auto")
-    parser.add_argument("--inversion-mode", choices=("windowed", "full"), default="windowed")
+    parser.add_argument(
+        "--forward-format", choices=("auto", "npz", "dat"), default="auto"
+    )
+    parser.add_argument(
+        "--inversion-mode", choices=("windowed", "full"), default="windowed"
+    )
     parser.add_argument("--window-size", type=int, default=3)
     parser.add_argument("--window-step", type=int, default=1)
-    parser.add_argument("--data-misfit", choices=available_data_misfits(), default="weighted_log_l2")
+    parser.add_argument(
+        "--data-misfit", choices=available_data_misfits(), default="weighted_log_l2"
+    )
     parser.add_argument("--regularization", type=float, default=50.0)
     parser.add_argument("--temporal-regularization", type=float, default=10.0)
     parser.add_argument(
@@ -425,7 +487,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=available_temporal_regularizations(),
         default="temporal_smoothness",
     )
-    parser.add_argument("--regularization-mode", choices=("model", "update"), default="model")
+    parser.add_argument(
+        "--regularization-mode", choices=("model", "update"), default="model"
+    )
     parser.add_argument(
         "--regularization-domain",
         choices=("state", "physical"),
@@ -548,17 +612,25 @@ def build_parser() -> argparse.ArgumentParser:
             "uses saved nodes/cells arrays (see build_source_position_triangle_inversion_case)."
         ),
     )
-    parser.add_argument("--forward-refinement", choices=("native", "h2"), default="native")
+    parser.add_argument(
+        "--forward-refinement", choices=("native", "h2"), default="native"
+    )
     parser.add_argument("--normal-field-cache-max-entries", type=int, default=8)
     parser.add_argument("--terrain-cache-dir", default=None)
-    parser.add_argument("--quiet", action="store_true", help="Disable progress output on stderr.")
+    parser.add_argument(
+        "--quiet", action="store_true", help="Disable progress output on stderr."
+    )
     parser.add_argument("--no-plot", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    root = Path(args.project_root).resolve() if args.project_root else Path(__file__).resolve().parents[2]
+    root = (
+        Path(args.project_root).resolve()
+        if args.project_root
+        else Path(__file__).resolve().parents[2]
+    )
     forward_dir = resolve(root, args.forward_dir)
     true_model_dir = resolve(root, args.true_model_dir)
     output_dir = resolve(root, args.output_dir)
@@ -578,7 +650,15 @@ def main(argv: list[str] | None = None) -> int:
     measurement_times = np.asarray(steps, dtype=float) / 24.0
 
     geometry = _load_geometry(forward_dir / "forward_geometry.npz")
-    observed_rhoa, measurements, elec_x, elec_z, err, data_files, forward_format_counts = _load_forward_series(
+    (
+        observed_rhoa,
+        measurements,
+        elec_x,
+        elec_z,
+        err,
+        data_files,
+        forward_format_counts,
+    ) = _load_forward_series(
         pairs,
         forward_format=args.forward_format,
     )
@@ -612,9 +692,12 @@ def main(argv: list[str] | None = None) -> int:
             f"mesh survey has {case.survey.measurement_count}"
         )
 
-    forward_mesh, parameter_cell_ids, forward_cell_parameter_ids, forward_parent_cell_ids = (
-        _build_forward_parameterization(case, args.forward_refinement)
-    )
+    (
+        forward_mesh,
+        parameter_cell_ids,
+        forward_cell_parameter_ids,
+        forward_parent_cell_ids,
+    ) = _build_forward_parameterization(case, args.forward_refinement)
     forward = ParameterizedERTForward2p5D.from_mesh_survey(
         forward_mesh,
         case.survey,
@@ -622,10 +705,15 @@ def main(argv: list[str] | None = None) -> int:
         regularization_mesh=case.mesh,
         forward_cell_parameter_ids=forward_cell_parameter_ids,
         normal_field_cache_max_entries=args.normal_field_cache_max_entries,
-        terrain_cache_dir=None if args.terrain_cache_dir is None else resolve(root, args.terrain_cache_dir),
+        terrain_cache_dir=None
+        if args.terrain_cache_dir is None
+        else resolve(root, args.terrain_cache_dir),
     )
     default_structural_prior = (
-        true_model_dir.parent / "parflow_models" / "petrophysical_models_2d" / f"class2d_y{args.y_index}.npy"
+        true_model_dir.parent
+        / "parflow_models"
+        / "petrophysical_models_2d"
+        / f"class2d_y{args.y_index}.npy"
     )
     structural_prior_file = (
         resolve(root, args.structural_prior_file)
@@ -634,7 +722,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     structural_prior_cell_ids = None
     if structural_prior_file.exists():
-        structural_prior_cell_ids = _structural_prior_cell_ids(structural_prior_file, case.mesh, geometry)
+        structural_prior_cell_ids = _structural_prior_cell_ids(
+            structural_prior_file, case.mesh, geometry
+        )
         forward.structural_prior_cell_ids = structural_prior_cell_ids
         forward.structural_cross_weight = float(args.structural_cross_weight)
     elif str(args.spatial_regularization).replace("-", "_") in {
@@ -703,11 +793,15 @@ def main(argv: list[str] | None = None) -> int:
     run_start = time.perf_counter()
     try:
         if args.inversion_mode == "full":
-            result = TimeLapseERTInversion(
-                forward=forward,
-                observed_data=observed_rhoa,
-                config=config,
-            ).setup().run(initial_model)
+            result = (
+                TimeLapseERTInversion(
+                    forward=forward,
+                    observed_data=observed_rhoa,
+                    config=config,
+                )
+                .setup()
+                .run(initial_model)
+            )
             run_meta = {
                 "inversion_mode": "full",
                 "n_windows": 1,
@@ -715,13 +809,17 @@ def main(argv: list[str] | None = None) -> int:
                 "window_step": None,
             }
         else:
-            result = WindowedTimeLapseERTInversion(
-                forward=forward,
-                observed_data=observed_rhoa,
-                config=config,
-                window_size=args.window_size,
-                window_step=args.window_step,
-            ).setup().run(initial_model)
+            result = (
+                WindowedTimeLapseERTInversion(
+                    forward=forward,
+                    observed_data=observed_rhoa,
+                    config=config,
+                    window_size=args.window_size,
+                    window_step=args.window_step,
+                )
+                .setup()
+                .run(initial_model)
+            )
             run_meta = {
                 "inversion_mode": "windowed",
                 "n_windows": len(result.window_reports),
@@ -740,13 +838,36 @@ def main(argv: list[str] | None = None) -> int:
     coverage_mask = coverage < coverage_threshold
 
     np.save(output_dir / "final_models.npy", final_models)
-    np.save(output_dir / "final_log_models.npy", np.asarray(result.final_log_models, dtype=float))
-    np.save(output_dir / "predicted_rhoa.npy", np.asarray(result.predicted_data, dtype=float))
-    final_parameter_models = None if result.final_parameter_models is None else np.asarray(result.final_parameter_models, dtype=float)
-    if final_parameter_models is not None and result.final_parameter_name != "resistivity":
-        np.save(output_dir / f"final_{result.final_parameter_name}_models.npy", final_parameter_models)
-        if result.final_parameter_name == "saturation" and petrophysical_parameters is not None and "phi" in petrophysical_parameters:
-            water_content = final_parameter_models * np.asarray(petrophysical_parameters["phi"], dtype=float)[:, None]
+    np.save(
+        output_dir / "final_log_models.npy",
+        np.asarray(result.final_log_models, dtype=float),
+    )
+    np.save(
+        output_dir / "predicted_rhoa.npy",
+        np.asarray(result.predicted_data, dtype=float),
+    )
+    final_parameter_models = (
+        None
+        if result.final_parameter_models is None
+        else np.asarray(result.final_parameter_models, dtype=float)
+    )
+    if (
+        final_parameter_models is not None
+        and result.final_parameter_name != "resistivity"
+    ):
+        np.save(
+            output_dir / f"final_{result.final_parameter_name}_models.npy",
+            final_parameter_models,
+        )
+        if (
+            result.final_parameter_name == "saturation"
+            and petrophysical_parameters is not None
+            and "phi" in petrophysical_parameters
+        ):
+            water_content = (
+                final_parameter_models
+                * np.asarray(petrophysical_parameters["phi"], dtype=float)[:, None]
+            )
             np.save(output_dir / "final_water_content_models.npy", water_content)
     np.save(output_dir / "steps.npy", steps)
     np.save(output_dir / "measurement_times_days.npy", measurement_times)
@@ -769,8 +890,15 @@ def main(argv: list[str] | None = None) -> int:
         masked = model.copy()
         masked[coverage_mask] = np.nan
         np.save(output_dir / f"inverted_model_masked_nan_t{int(step):05d}.npy", masked)
-        if final_parameter_models is not None and result.final_parameter_name != "resistivity":
-            np.save(output_dir / f"inverted_{result.final_parameter_name}_t{int(step):05d}.npy", final_parameter_models[:, column])
+        if (
+            final_parameter_models is not None
+            and result.final_parameter_name != "resistivity"
+        ):
+            np.save(
+                output_dir
+                / f"inverted_{result.final_parameter_name}_t{int(step):05d}.npy",
+                final_parameter_models[:, column],
+            )
 
     with (output_dir / "used_data_files.txt").open("w", encoding="utf-8") as stream:
         for path in data_files:
@@ -785,7 +913,9 @@ def main(argv: list[str] | None = None) -> int:
         _plot_chi2(chi2_plot, chi2_all, windowed=args.inversion_mode == "windowed")
         plot_files["chi2"] = str(chi2_plot)
 
-        mid_plot = output_dir / f"true_vs_inverted_mid_t{int(steps[len(steps) // 2]):05d}.png"
+        mid_plot = (
+            output_dir / f"true_vs_inverted_mid_t{int(steps[len(steps) // 2]):05d}.png"
+        )
         _plot_true_vs_inverted(
             mid_plot,
             mesh=case.mesh,
@@ -811,7 +941,9 @@ def main(argv: list[str] | None = None) -> int:
         "forward_mesh_nodes": int(forward_mesh.node_count),
         "forward_refinement": str(args.forward_refinement),
         "forward_format": str(args.forward_format),
-        "forward_format_counts": {key: int(value) for key, value in sorted(forward_format_counts.items())},
+        "forward_format_counts": {
+            key: int(value) for key, value in sorted(forward_format_counts.items())
+        },
         "lambda_val": float(args.regularization),
         "alpha": float(args.temporal_regularization),
         "regularization_domain": str(args.regularization_domain),
@@ -824,14 +956,19 @@ def main(argv: list[str] | None = None) -> int:
         "petrophysical_parameter_dir": str(petrophysical_parameter_dir),
         "petrophysical_preset": str(args.petrophysical_preset),
         "saturation_floor": float(args.saturation_floor),
-        "saved_parameter_models": bool(final_parameter_models is not None and result.final_parameter_name != "resistivity"),
+        "saved_parameter_models": bool(
+            final_parameter_models is not None
+            and result.final_parameter_name != "resistivity"
+        ),
         "saved_water_content_models": bool(
             final_parameter_models is not None
             and result.final_parameter_name == "saturation"
             and petrophysical_parameters is not None
             and "phi" in petrophysical_parameters
         ),
-        "structural_prior_file": str(structural_prior_file) if structural_prior_cell_ids is not None else None,
+        "structural_prior_file": str(structural_prior_file)
+        if structural_prior_cell_ids is not None
+        else None,
         "structural_cross_weight": float(args.structural_cross_weight),
         "active_time_threshold": float(args.active_time_threshold),
         "active_time_minimum_weight": float(args.active_time_minimum_weight),
@@ -861,21 +998,27 @@ def main(argv: list[str] | None = None) -> int:
         "coverage_percentile": float(args.coverage_percentile),
         "coverage_source": (
             "adtlert_pygimli_style_sumabs_area"
-            if str(args.optimizer).replace("-", "_") in {"gauss_newton_cgls", "levenberg_marquardt"}
+            if str(args.optimizer).replace("-", "_")
+            in {"gauss_newton_cgls", "levenberg_marquardt"}
             else "adtlert_normal_vjp_residual_weighted_area"
         ),
         "sensitivity_mode": (
             "explicit_full_jacobian"
-            if str(args.optimizer).replace("-", "_") in {"gauss_newton_cgls", "levenberg_marquardt"}
+            if str(args.optimizer).replace("-", "_")
+            in {"gauss_newton_cgls", "levenberg_marquardt"}
             else "normal_vjp_matrix_free"
         ),
         "coverage_threshold": coverage_threshold,
         "output_dir": str(output_dir),
         "forward_dir": str(forward_dir),
         "mesh_file": str(output_dir / "timelapse_inversion_mesh.npz"),
-        "input_mesh_file": None if args.mesh_file is None else str(resolve(root, args.mesh_file)),
+        "input_mesh_file": None
+        if args.mesh_file is None
+        else str(resolve(root, args.mesh_file)),
         "inversion_mesh_quality": float(args.inversion_mesh_quality),
-        "inversion_mesh_smoothing_iterations": int(args.inversion_mesh_smoothing_iterations),
+        "inversion_mesh_smoothing_iterations": int(
+            args.inversion_mesh_smoothing_iterations
+        ),
         "torch_enable_float64": torch.get_default_dtype() == torch.float64,
         "elapsed_sec": float(elapsed_sec),
         "elapsed_min": float(elapsed_sec / 60.0),

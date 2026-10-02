@@ -72,7 +72,8 @@ class InversionProgressPrinter:
         elif event == "timelapse_time_start":
             self._status(
                 self._time_step_message(payload),
-                log_when_not_tty=self._window_index is None and self._is_time_milestone(payload),
+                log_when_not_tty=self._window_index is None
+                and self._is_time_milestone(payload),
             )
         elif event == "timelapse_iteration_done":
             self._status(
@@ -118,7 +119,9 @@ class InversionProgressPrinter:
             )
             self._window_index = None
         elif event == "windowed_prediction_start":
-            self._status("Windowed inversion: building final predicted responses", force=True)
+            self._status(
+                "Windowed inversion: building final predicted responses", force=True
+            )
         elif event == "windowed_prediction_step":
             time_number = int(payload["time_number"])
             n_times = int(payload["n_times"])
@@ -204,7 +207,9 @@ class InversionProgressPrinter:
         self._clear_status()
         print(message, file=self.stream, flush=True)
 
-    def _status(self, message: str, *, force: bool = False, log_when_not_tty: bool = False) -> None:
+    def _status(
+        self, message: str, *, force: bool = False, log_when_not_tty: bool = False
+    ) -> None:
         if not self.enabled:
             return
         if not self._is_tty:

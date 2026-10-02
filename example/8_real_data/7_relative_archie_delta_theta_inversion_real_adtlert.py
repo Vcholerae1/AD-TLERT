@@ -63,12 +63,18 @@ def _cell_geometry(case) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray
     cells = np.asarray(case.mesh.cells, dtype=np.int32)
     centers = nodes[cells].mean(axis=1)
     cell_x = centers[:, 0]
-    surface_at_center = np.interp(cell_x, np.asarray(case.x_nodes, dtype=float), np.asarray(case.z_top, dtype=float))
+    surface_at_center = np.interp(
+        cell_x,
+        np.asarray(case.x_nodes, dtype=float),
+        np.asarray(case.z_top, dtype=float),
+    )
     cell_depth = np.maximum(surface_at_center - centers[:, 1], 0.0)
     return nodes, cells, cell_x, cell_depth
 
 
-def _load_projected_tmc_tables(sensor_reference_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _load_projected_tmc_tables(
+    sensor_reference_dir: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     locations_file = sensor_reference_dir / "real_sensor_locations_projected.csv"
     timeseries_file = sensor_reference_dir / "real_sensor_timeseries_at_ert_times.csv"
     if not locations_file.exists() or not timeseries_file.exists():
@@ -93,12 +99,18 @@ def _sensor_row_weights(
 ) -> tuple[np.ndarray, np.ndarray]:
     rx = max(float(horizontal_radius), 1.0e-6)
     rz = max(float(vertical_radius), 1.0e-6)
-    selected = (np.abs(cell_x - float(sensor_x)) <= rx) & (np.abs(cell_depth - float(sensor_depth)) <= rz)
+    selected = (np.abs(cell_x - float(sensor_x)) <= rx) & (
+        np.abs(cell_depth - float(sensor_depth)) <= rz
+    )
     ids = np.flatnonzero(selected)
     min_count = max(int(min_cells), 1)
     if ids.size < min_count:
-        scaled_dist2 = ((cell_x - float(sensor_x)) / rx) ** 2 + ((cell_depth - float(sensor_depth)) / rz) ** 2
-        ids = np.argpartition(scaled_dist2, min(min_count, scaled_dist2.size) - 1)[: min(min_count, scaled_dist2.size)]
+        scaled_dist2 = ((cell_x - float(sensor_x)) / rx) ** 2 + (
+            (cell_depth - float(sensor_depth)) / rz
+        ) ** 2
+        ids = np.argpartition(scaled_dist2, min(min_count, scaled_dist2.size) - 1)[
+            : min(min_count, scaled_dist2.size)
+        ]
     dx = (cell_x[ids] - float(sensor_x)) / rx
     dz = (cell_depth[ids] - float(sensor_depth)) / rz
     weights = np.exp(-0.5 * (dx**2 + dz**2))
@@ -138,7 +150,10 @@ def _build_sensor_constraint_from_tmc(
             continue
         station_x = float(loc["profile_x_m"].iloc[0])
         station_table = (
-            sensor_ts.loc[sensor_ts["station"].eq(station), ["DateTime", *[f"MC_{depth:.1f}m" for depth in sensor_depths]]]
+            sensor_ts.loc[
+                sensor_ts["station"].eq(station),
+                ["DateTime", *[f"MC_{depth:.1f}m" for depth in sensor_depths]],
+            ]
             .set_index("DateTime")
             .reindex(ert_times)
         )
@@ -198,7 +213,9 @@ def _build_sensor_constraint_from_tmc(
     observed_targets = np.vstack(targets_rows).astype(float, copy=False)
     targets = observed_targets.copy()
     if target_mode == "delta_from_model_baseline":
-        theta0_support = np.asarray(operator @ np.asarray(theta0_model, dtype=float), dtype=float).reshape(-1)
+        theta0_support = np.asarray(
+            operator @ np.asarray(theta0_model, dtype=float), dtype=float
+        ).reshape(-1)
         sensor_delta = observed_targets - observed_targets[:, [0]]
         targets = theta0_support[:, None] + sensor_delta
         targets = np.clip(targets, float(theta_min), float(theta_max))
@@ -208,10 +225,14 @@ def _build_sensor_constraint_from_tmc(
     elif target_mode == "absolute":
         metadata = pd.DataFrame(metadata_rows)
         metadata["theta0_sensor"] = observed_targets[:, 0]
-        metadata["theta0_model_support"] = np.asarray(operator @ np.asarray(theta0_model, dtype=float), dtype=float).reshape(-1)
+        metadata["theta0_model_support"] = np.asarray(
+            operator @ np.asarray(theta0_model, dtype=float), dtype=float
+        ).reshape(-1)
     else:
         raise ValueError(f"Unknown sensor constraint target mode: {target_mode!r}")
-    weights = np.full((n_rows, n_times), 1.0 / max(float(sensor_sigma), 1.0e-6) ** 2, dtype=float)
+    weights = np.full(
+        (n_rows, n_times), 1.0 / max(float(sensor_sigma), 1.0e-6) ** 2, dtype=float
+    )
     weights[~np.isfinite(observed_targets)] = 0.0
     metadata["target_mode"] = str(target_mode)
     metadata["row_index"] = np.arange(n_rows, dtype=int)
@@ -229,7 +250,9 @@ def _evaluate_sensor_constraint_fit(
     measurement_times_days: np.ndarray,
     timestamp_labels: list[str],
 ) -> tuple[pd.DataFrame, dict[str, float]]:
-    theta_series = np.asarray(sensor_operator @ np.asarray(final_theta, dtype=float), dtype=float)
+    theta_series = np.asarray(
+        sensor_operator @ np.asarray(final_theta, dtype=float), dtype=float
+    )
     target_series = (
         np.asarray(sensor_observed_targets, dtype=float)
         if sensor_observed_targets is not None
@@ -253,7 +276,11 @@ def _evaluate_sensor_constraint_fit(
         model_valid = model_delta[valid]
         target_valid = target_delta[valid]
         corr = float("nan")
-        if model_valid.size > 2 and np.nanstd(model_valid) > 0 and np.nanstd(target_valid) > 0:
+        if (
+            model_valid.size > 2
+            and np.nanstd(model_valid) > 0
+            and np.nanstd(target_valid) > 0
+        ):
             corr = float(np.corrcoef(target_valid, model_valid)[0, 1])
         metrics = {
             "n_points": int(residual.size),
@@ -278,9 +305,13 @@ def _evaluate_sensor_constraint_fit(
                     "time_index": int(time_idx),
                     "day_since_baseline": float(measurement_times_days[time_idx]),
                     "timestamp": str(timestamp_labels[time_idx]),
-                    "theta_sensor": float(target_series[row_idx, time_idx]) if np.isfinite(target_series[row_idx, time_idx]) else np.nan,
+                    "theta_sensor": float(target_series[row_idx, time_idx])
+                    if np.isfinite(target_series[row_idx, time_idx])
+                    else np.nan,
                     "theta_ert": float(theta_series[row_idx, time_idx]),
-                    "delta_theta_sensor": float(target_delta[row_idx, time_idx]) if np.isfinite(target_delta[row_idx, time_idx]) else np.nan,
+                    "delta_theta_sensor": float(target_delta[row_idx, time_idx])
+                    if np.isfinite(target_delta[row_idx, time_idx])
+                    else np.nan,
                     "delta_theta_ert": float(model_delta[row_idx, time_idx]),
                 }
             )
@@ -309,10 +340,16 @@ def _build_theta0_from_tmc(
         loc = sensor_locations.loc[sensor_locations["ID"].eq(station)]
         if loc.empty:
             continue
-        row0 = sensor_ts.loc[(sensor_ts["station"].eq(station)) & (sensor_ts["DateTime"].eq(baseline_time))]
+        row0 = sensor_ts.loc[
+            (sensor_ts["station"].eq(station))
+            & (sensor_ts["DateTime"].eq(baseline_time))
+        ]
         if row0.empty:
             continue
-        values = np.asarray([float(row0[f"MC_{depth:.1f}m"].iloc[0]) for depth in sensor_depths], dtype=float)
+        values = np.asarray(
+            [float(row0[f"MC_{depth:.1f}m"].iloc[0]) for depth in sensor_depths],
+            dtype=float,
+        )
         # Zero/negative MC values in this data set indicate sensor dropouts.
         if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
             continue
@@ -331,14 +368,25 @@ def _build_theta0_from_tmc(
 
     theta_depths = np.r_[sensor_depths, float(deep_anchor_depth_m)]
     station_profiles = np.column_stack(
-        [station_profiles, np.full(station_profiles.shape[0], float(deep_theta_background), dtype=float)]
+        [
+            station_profiles,
+            np.full(
+                station_profiles.shape[0], float(deep_theta_background), dtype=float
+            ),
+        ]
     )
 
     _, _, cell_x, cell_depth = _cell_geometry(case)
     clipped_depth = np.minimum(cell_depth, float(deep_anchor_depth_m))
     station_cell_theta = np.vstack(
         [
-            np.interp(clipped_depth, theta_depths, profile, left=profile[0], right=float(deep_theta_background))
+            np.interp(
+                clipped_depth,
+                theta_depths,
+                profile,
+                left=profile[0],
+                right=float(deep_theta_background),
+            )
             for profile in station_profiles
         ]
     )
@@ -359,17 +407,23 @@ def _load_baseline_resistivity(path: Path, *, column: int, n_cells: int) -> np.n
     values = np.asarray(np.load(path), dtype=float)
     if values.ndim == 2:
         if not (0 <= int(column) < values.shape[1]):
-            raise ValueError(f"baseline column {column} outside file with shape {values.shape}")
+            raise ValueError(
+                f"baseline column {column} outside file with shape {values.shape}"
+            )
         values = values[:, int(column)]
     values = np.asarray(values, dtype=float).reshape(-1)
     if values.shape != (int(n_cells),):
-        raise ValueError(f"baseline rho0 has shape {values.shape}; expected ({int(n_cells)},). Use a matching mesh.")
+        raise ValueError(
+            f"baseline rho0 has shape {values.shape}; expected ({int(n_cells)},). Use a matching mesh."
+        )
     if np.any(values <= 0.0) or not np.all(np.isfinite(values)):
         raise ValueError("baseline rho0 must be positive and finite")
     return values
 
 
-def _load_temperature_correction_factor(path: Path, *, n_cells: int, n_times: int) -> np.ndarray:
+def _load_temperature_correction_factor(
+    path: Path, *, n_cells: int, n_times: int
+) -> np.ndarray:
     values = np.asarray(np.load(path), dtype=float)
     if values.shape != (int(n_cells), int(n_times)):
         raise ValueError(
@@ -404,7 +458,9 @@ def _plot_delta_theta_models(
         models = models[:, None]
 
     n_panels = models.shape[1]
-    fig, axes = plt.subplots(1, n_panels, figsize=(4.1 * n_panels, 3.4), sharex=True, sharey=True)
+    fig, axes = plt.subplots(
+        1, n_panels, figsize=(4.1 * n_panels, 3.4), sharex=True, sharey=True
+    )
     axes = np.atleast_1d(axes)
     norm = TwoSlopeNorm(vmin=float(clim[0]), vcenter=0.0, vmax=float(clim[1]))
     last = None
@@ -413,7 +469,13 @@ def _plot_delta_theta_models(
         visible = np.isfinite(values)
         if coverage_mask is not None:
             visible &= ~np.asarray(coverage_mask, dtype=bool).ravel()
-        last = PolyCollection(nodes[cells][visible], array=values[visible], cmap="BrBG", norm=norm, edgecolors="none")
+        last = PolyCollection(
+            nodes[cells][visible],
+            array=values[visible],
+            cmap="BrBG",
+            norm=norm,
+            edgecolors="none",
+        )
         ax.add_collection(last)
         ax.plot(case.elec_x, case.elec_z, color="black", lw=1.2)
         ax.set_xlim(float(np.min(case.elec_x)), float(np.max(case.elec_x)))
@@ -440,7 +502,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", default=None)
     parser.add_argument("--input-dir", default="ProcessedData")
-    parser.add_argument("--output-dir", default="result/8_real_data/7_relative_archie_delta_theta_inversion_real_adtlert")
+    parser.add_argument(
+        "--output-dir",
+        default="result/8_real_data/7_relative_archie_delta_theta_inversion_real_adtlert",
+    )
     parser.add_argument(
         "--sensor-reference-dir",
         default="result/8_real_data/2_timelapse_inversion_real_adtlert",
@@ -475,7 +540,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end-date", default="2022-05-12")
     parser.add_argument("--file-stride", type=int, default=8)
     parser.add_argument("--max-timesteps", type=int, default=None)
-    parser.add_argument("--inversion-mode", choices=("windowed", "full"), default="windowed")
+    parser.add_argument(
+        "--inversion-mode", choices=("windowed", "full"), default="windowed"
+    )
     parser.add_argument("--window-size", type=int, default=3)
     parser.add_argument("--window-step", type=int, default=1)
     parser.add_argument("--depth", type=float, default=90.0)
@@ -485,10 +552,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-error", type=float, default=None)
     parser.add_argument("--relative-error", type=float, default=0.05)
     parser.add_argument("--minimum-log-std", type=float, default=1.0e-3)
-    parser.add_argument("--data-misfit", choices=available_data_misfits(), default="weighted_log_l2")
+    parser.add_argument(
+        "--data-misfit", choices=available_data_misfits(), default="weighted_log_l2"
+    )
     parser.add_argument("--regularization", type=float, default=50.0)
     parser.add_argument("--temporal-regularization", type=float, default=10.0)
-    parser.add_argument("--temporal-regularization-type", choices=available_temporal_regularizations(), default="temporal_smoothness")
+    parser.add_argument(
+        "--temporal-regularization-type",
+        choices=available_temporal_regularizations(),
+        default="temporal_smoothness",
+    )
     parser.add_argument(
         "--freeze-baseline-theta",
         action=argparse.BooleanOptionalAction,
@@ -498,27 +571,50 @@ def build_parser() -> argparse.ArgumentParser:
             "In windowed mode this applies only to windows starting at global t0."
         ),
     )
-    parser.add_argument("--regularization-mode", choices=("model", "update"), default="model")
-    parser.add_argument("--regularization-domain", choices=("state", "physical"), default="physical")
+    parser.add_argument(
+        "--regularization-mode", choices=("model", "update"), default="model"
+    )
+    parser.add_argument(
+        "--regularization-domain", choices=("state", "physical"), default="physical"
+    )
     parser.add_argument(
         "--physical-regularization-quantity",
         choices=("parameter", "theta", "water_content"),
         default="parameter",
         help="For this transform, parameter and theta/water_content are the same physical quantity.",
     )
-    parser.add_argument("--spatial-regularization", choices=available_spatial_regularizations(), default="first_order_smoothness")
+    parser.add_argument(
+        "--spatial-regularization",
+        choices=available_spatial_regularizations(),
+        default="first_order_smoothness",
+    )
     parser.add_argument("--z-weight", type=float, default=1.0)
-    parser.add_argument("--optimizer", choices=available_optimization_algorithms(), default="gauss_newton_cgls")
-    parser.add_argument("--linearized-solver", choices=available_linearized_optimizers(), default="gpu_cgls")
+    parser.add_argument(
+        "--optimizer",
+        choices=available_optimization_algorithms(),
+        default="gauss_newton_cgls",
+    )
+    parser.add_argument(
+        "--linearized-solver",
+        choices=available_linearized_optimizers(),
+        default="gpu_cgls",
+    )
     parser.add_argument("--terrain-cache-dir", default=None)
     parser.add_argument("--lm-damping", type=float, default=1.0e-2)
     parser.add_argument("--cgls-tolerance", type=float, default=1.0e-8)
     parser.add_argument("--cgls-max-iterations", type=int, default=2000)
     parser.add_argument("--max-iterations", type=int, default=5)
-    parser.add_argument("--max-state-step", type=float, default=1.0, help="Maximum optimizer-state step per iteration.")
+    parser.add_argument(
+        "--max-state-step",
+        type=float,
+        default=1.0,
+        help="Maximum optimizer-state step per iteration.",
+    )
     parser.add_argument("--target-chi2", type=float, default=None)
     parser.add_argument("--step-tolerance", type=float, default=1.0e-4)
-    parser.add_argument("--line-search", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--line-search", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--inversion-mesh-quality", type=float, default=34.0)
     parser.add_argument("--inversion-mesh-smoothing-iterations", type=int, default=10)
     parser.add_argument("--coverage-percentile", type=float, default=20.0)
@@ -579,7 +675,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    root = Path(args.project_root).resolve() if args.project_root else find_project_root(Path(__file__))
+    root = (
+        Path(args.project_root).resolve()
+        if args.project_root
+        else find_project_root(Path(__file__))
+    )
     input_dir = resolve_path(root, args.input_dir)
     output_dir = resolve_path(root, args.output_dir)
     sensor_reference_dir = resolve_path(root, args.sensor_reference_dir)
@@ -590,7 +690,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.temperature_correction_factor_file is None
         else resolve_path(root, args.temperature_correction_factor_file)
     )
-    terrain_cache_dir = None if args.terrain_cache_dir is None else resolve_path(root, args.terrain_cache_dir)
+    terrain_cache_dir = (
+        None
+        if args.terrain_cache_dir is None
+        else resolve_path(root, args.terrain_cache_dir)
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     paths = discover_processed_files(
@@ -601,12 +705,16 @@ def main(argv: list[str] | None = None) -> int:
         max_timesteps=args.max_timesteps,
     )
     if len(paths) < 2:
-        raise ValueError(f"Need at least two real ERT files after filtering in {input_dir}.")
+        raise ValueError(
+            f"Need at least two real ERT files after filtering in {input_dir}."
+        )
 
     first = read_processed_ert(paths[0])
     raw_records = [first]
     for path in paths[1:]:
-        current = read_processed_ert(path, elevation_reference=first.elevation_reference)
+        current = read_processed_ert(
+            path, elevation_reference=first.elevation_reference
+        )
         check_same_layout(first, current)
         raw_records.append(current)
 
@@ -615,11 +723,17 @@ def main(argv: list[str] | None = None) -> int:
         common_mask &= quality_mask(record, max_error=args.max_error)
     common_mask = apply_data_stride(common_mask, args.data_stride)
     if int(common_mask.sum()) < 4:
-        raise ValueError("Need at least four common valid measurements after filtering.")
+        raise ValueError(
+            "Need at least four common valid measurements after filtering."
+        )
 
     records = [record.with_measurement_mask(common_mask) for record in raw_records]
     observed_rhoa = np.vstack([record.rhoa for record in records])
-    err_matrix = None if any(record.err is None for record in records) else np.vstack([record.err for record in records])
+    err_matrix = (
+        None
+        if any(record.err is None for record in records)
+        else np.vstack([record.err for record in records])
+    )
     data_std = data_std_from_err(
         err_matrix,
         shape=observed_rhoa.shape,
@@ -630,9 +744,15 @@ def main(argv: list[str] | None = None) -> int:
     if all(timestamp is not None for timestamp in timestamps):
         start_time = timestamps[0]
         measurement_times_days = np.asarray(
-            [(timestamp - start_time).total_seconds() / 86400.0 for timestamp in timestamps], dtype=float
+            [
+                (timestamp - start_time).total_seconds() / 86400.0
+                for timestamp in timestamps
+            ],
+            dtype=float,
         )
-        timestamp_labels = [timestamp.strftime("%Y-%m-%d %H:%M") for timestamp in timestamps]
+        timestamp_labels = [
+            timestamp.strftime("%Y-%m-%d %H:%M") for timestamp in timestamps
+        ]
         ert_times = pd.DatetimeIndex(timestamps)
     else:
         measurement_times_days = np.arange(len(records), dtype=float)
@@ -694,7 +814,10 @@ def main(argv: list[str] | None = None) -> int:
             target_mode=str(args.sensor_constraint_target_mode),
         )
     if args.use_temperature_correction:
-        if temperature_correction_factor_file is None or not temperature_correction_factor_file.exists():
+        if (
+            temperature_correction_factor_file is None
+            or not temperature_correction_factor_file.exists()
+        ):
             raise FileNotFoundError(
                 "Missing temperature correction factor. Run "
                 "examples/8_real_data/5_temperature_correction_real_resistivity.ipynb first, "
@@ -706,7 +829,9 @@ def main(argv: list[str] | None = None) -> int:
             n_times=len(records),
         )
     else:
-        temperature_correction_factor = np.ones((case.mesh.cell_count, len(records)), dtype=float)
+        temperature_correction_factor = np.ones(
+            (case.mesh.cell_count, len(records)), dtype=float
+        )
 
     forward = build_parameterized_forward(
         case,
@@ -760,20 +885,33 @@ def main(argv: list[str] | None = None) -> int:
     run_start = time.perf_counter()
     try:
         if args.inversion_mode == "full":
-            result = TimeLapseERTInversion(
-                forward=forward,
-                observed_data=observed_rhoa,
-                config=config,
-            ).setup().run(initial_model)
-            run_meta = {"inversion_mode": "full", "n_windows": 1, "window_size": None, "window_step": None}
+            result = (
+                TimeLapseERTInversion(
+                    forward=forward,
+                    observed_data=observed_rhoa,
+                    config=config,
+                )
+                .setup()
+                .run(initial_model)
+            )
+            run_meta = {
+                "inversion_mode": "full",
+                "n_windows": 1,
+                "window_size": None,
+                "window_step": None,
+            }
         else:
-            result = WindowedTimeLapseERTInversion(
-                forward=forward,
-                observed_data=observed_rhoa,
-                config=config,
-                window_size=args.window_size,
-                window_step=args.window_step,
-            ).setup().run(initial_model)
+            result = (
+                WindowedTimeLapseERTInversion(
+                    forward=forward,
+                    observed_data=observed_rhoa,
+                    config=config,
+                    window_size=args.window_size,
+                    window_step=args.window_step,
+                )
+                .setup()
+                .run(initial_model)
+            )
             run_meta = {
                 "inversion_mode": "windowed",
                 "n_windows": int(len(result.window_reports)),
@@ -788,7 +926,9 @@ def main(argv: list[str] | None = None) -> int:
     final_models = np.asarray(result.final_models, dtype=float)
     final_theta = np.asarray(result.final_parameter_models, dtype=float)
     if result.final_parameter_name != "water_content":
-        raise RuntimeError(f"Expected water_content parameter output, got {result.final_parameter_name!r}")
+        raise RuntimeError(
+            f"Expected water_content parameter output, got {result.final_parameter_name!r}"
+        )
     # Time-lapse change should be zero at the reference survey.  We therefore
     # report Delta theta relative to the inverted first-time water-content model,
     # while also saving the offset from the prescribed TMC-interpolated theta0.
@@ -802,15 +942,30 @@ def main(argv: list[str] | None = None) -> int:
     np.save(output_dir / "rho0_baseline_resistivity.npy", rho0)
     np.save(output_dir / "theta0_sensor_interpolated.npy", theta0)
     if args.use_temperature_correction:
-        np.save(output_dir / "temperature_correction_factor.npy", temperature_correction_factor)
+        np.save(
+            output_dir / "temperature_correction_factor.npy",
+            temperature_correction_factor,
+        )
     np.save(output_dir / "final_models.npy", final_models)
     if args.use_temperature_correction:
-        np.save(output_dir / "final_models_reference_temperature.npy", final_models * temperature_correction_factor)
-    np.save(output_dir / "final_log_models.npy", np.asarray(result.final_log_models, dtype=float))
+        np.save(
+            output_dir / "final_models_reference_temperature.npy",
+            final_models * temperature_correction_factor,
+        )
+    np.save(
+        output_dir / "final_log_models.npy",
+        np.asarray(result.final_log_models, dtype=float),
+    )
     np.save(output_dir / "final_water_content_models.npy", final_theta)
     np.save(output_dir / "final_delta_theta_models.npy", final_delta_theta)
-    np.save(output_dir / "final_water_content_offset_from_theta0_models.npy", final_delta_theta_from_theta0)
-    np.save(output_dir / "predicted_rhoa.npy", np.asarray(result.predicted_data, dtype=float))
+    np.save(
+        output_dir / "final_water_content_offset_from_theta0_models.npy",
+        final_delta_theta_from_theta0,
+    )
+    np.save(
+        output_dir / "predicted_rhoa.npy",
+        np.asarray(result.predicted_data, dtype=float),
+    )
     np.save(output_dir / "observed_rhoa.npy", observed_rhoa)
     np.save(output_dir / "data_std.npy", np.asarray(data_std, dtype=float))
     np.save(output_dir / "steps.npy", steps)
@@ -831,16 +986,30 @@ def main(argv: list[str] | None = None) -> int:
         common_measurement_mask=common_mask.astype(np.uint8),
     )
     sensor_metrics: dict[str, float] = {}
-    if sensor_constraint_operator is not None and sensor_constraint_targets is not None and sensor_constraint_metadata is not None:
-        sp.save_npz(output_dir / "sensor_constraint_operator.npz", sensor_constraint_operator)
-        np.save(output_dir / "sensor_constraint_targets.npy", np.asarray(sensor_constraint_targets, dtype=float))
+    if (
+        sensor_constraint_operator is not None
+        and sensor_constraint_targets is not None
+        and sensor_constraint_metadata is not None
+    ):
+        sp.save_npz(
+            output_dir / "sensor_constraint_operator.npz", sensor_constraint_operator
+        )
+        np.save(
+            output_dir / "sensor_constraint_targets.npy",
+            np.asarray(sensor_constraint_targets, dtype=float),
+        )
         if sensor_constraint_observed_targets is not None:
             np.save(
                 output_dir / "sensor_constraint_observed_targets.npy",
                 np.asarray(sensor_constraint_observed_targets, dtype=float),
             )
-        np.save(output_dir / "sensor_constraint_weights.npy", np.asarray(sensor_constraint_weights, dtype=float))
-        sensor_constraint_metadata.to_csv(output_dir / "sensor_constraint_metadata.csv", index=False)
+        np.save(
+            output_dir / "sensor_constraint_weights.npy",
+            np.asarray(sensor_constraint_weights, dtype=float),
+        )
+        sensor_constraint_metadata.to_csv(
+            output_dir / "sensor_constraint_metadata.csv", index=False
+        )
         comparison, sensor_metrics = _evaluate_sensor_constraint_fit(
             final_theta=final_theta,
             sensor_operator=sensor_constraint_operator,
@@ -854,15 +1023,31 @@ def main(argv: list[str] | None = None) -> int:
             measurement_times_days=measurement_times_days,
             timestamp_labels=timestamp_labels,
         )
-        comparison.to_csv(output_dir / "ad_delta_theta_sensor_comparison.csv", index=False)
-        valid = comparison.replace([np.inf, -np.inf], np.nan).dropna(subset=["delta_theta_sensor", "delta_theta_ert"])
+        comparison.to_csv(
+            output_dir / "ad_delta_theta_sensor_comparison.csv", index=False
+        )
+        valid = comparison.replace([np.inf, -np.inf], np.nan).dropna(
+            subset=["delta_theta_sensor", "delta_theta_ert"]
+        )
         if not valid.empty:
             by_row = []
-            for (row_index, station, depth_m), sub in valid.groupby(["row_index", "station", "depth_m"], sort=True):
-                residual = sub["delta_theta_ert"].to_numpy(dtype=float) - sub["delta_theta_sensor"].to_numpy(dtype=float)
+            for (row_index, station, depth_m), sub in valid.groupby(
+                ["row_index", "station", "depth_m"], sort=True
+            ):
+                residual = sub["delta_theta_ert"].to_numpy(dtype=float) - sub[
+                    "delta_theta_sensor"
+                ].to_numpy(dtype=float)
                 corr = float("nan")
-                if residual.size > 2 and np.std(sub["delta_theta_sensor"]) > 0 and np.std(sub["delta_theta_ert"]) > 0:
-                    corr = float(np.corrcoef(sub["delta_theta_sensor"], sub["delta_theta_ert"])[0, 1])
+                if (
+                    residual.size > 2
+                    and np.std(sub["delta_theta_sensor"]) > 0
+                    and np.std(sub["delta_theta_ert"]) > 0
+                ):
+                    corr = float(
+                        np.corrcoef(sub["delta_theta_sensor"], sub["delta_theta_ert"])[
+                            0, 1
+                        ]
+                    )
                 by_row.append(
                     {
                         "row_index": int(row_index),
@@ -875,22 +1060,35 @@ def main(argv: list[str] | None = None) -> int:
                         "correlation": corr,
                     }
                 )
-            pd.DataFrame(by_row).to_csv(output_dir / "ad_delta_theta_sensor_metrics_by_depth.csv", index=False)
+            pd.DataFrame(by_row).to_csv(
+                output_dir / "ad_delta_theta_sensor_metrics_by_depth.csv", index=False
+            )
         sensor_metrics_with_case = {"case": output_dir.name, **sensor_metrics}
-        write_json(output_dir / "ad_delta_theta_sensor_metrics.json", sensor_metrics_with_case)
+        write_json(
+            output_dir / "ad_delta_theta_sensor_metrics.json", sensor_metrics_with_case
+        )
 
     for column, (step, label) in enumerate(zip(steps, timestamp_labels, strict=True)):
         rho_model = final_models[:, column]
         theta_model = final_theta[:, column]
         delta_theta_model = final_delta_theta[:, column]
         np.save(output_dir / f"inverted_resistivity_t{int(step):05d}.npy", rho_model)
-        np.save(output_dir / f"inverted_water_content_t{int(step):05d}.npy", theta_model)
-        np.save(output_dir / f"inverted_delta_theta_t{int(step):05d}.npy", delta_theta_model)
+        np.save(
+            output_dir / f"inverted_water_content_t{int(step):05d}.npy", theta_model
+        )
+        np.save(
+            output_dir / f"inverted_delta_theta_t{int(step):05d}.npy", delta_theta_model
+        )
         masked_delta = delta_theta_model.copy()
         masked_delta[coverage_mask] = np.nan
-        np.save(output_dir / f"inverted_delta_theta_masked_nan_t{int(step):05d}.npy", masked_delta)
+        np.save(
+            output_dir / f"inverted_delta_theta_masked_nan_t{int(step):05d}.npy",
+            masked_delta,
+        )
         safe_label = label.replace("-", "").replace(":", "").replace(" ", "_")
-        np.save(output_dir / f"inverted_delta_theta_{safe_label}.npy", delta_theta_model)
+        np.save(
+            output_dir / f"inverted_delta_theta_{safe_label}.npy", delta_theta_model
+        )
 
     with (output_dir / "used_data_files.txt").open("w", encoding="utf-8") as stream:
         for path, label in zip(paths, timestamp_labels, strict=True):
@@ -934,7 +1132,9 @@ def main(argv: list[str] | None = None) -> int:
         "start_date": args.start_date,
         "end_date": args.end_date,
         "file_stride": int(args.file_stride),
-        "max_timesteps": None if args.max_timesteps is None else int(args.max_timesteps),
+        "max_timesteps": None
+        if args.max_timesteps is None
+        else int(args.max_timesteps),
         "n_timesteps": int(len(records)),
         "first_timestamp": timestamp_labels[0],
         "last_timestamp": timestamp_labels[-1],
@@ -966,7 +1166,9 @@ def main(argv: list[str] | None = None) -> int:
         "optimizer": str(args.optimizer),
         "linearized_solver": str(args.linearized_solver),
         "max_iterations": int(args.max_iterations),
-        "final_chi2": float(result.iteration_chi2[-1]) if result.iteration_chi2 else None,
+        "final_chi2": float(result.iteration_chi2[-1])
+        if result.iteration_chi2
+        else None,
         "coverage_percentile": float(args.coverage_percentile),
         "coverage_threshold": coverage_threshold,
         "saturation_exponent_n": float(args.saturation_exponent),
@@ -977,20 +1179,34 @@ def main(argv: list[str] | None = None) -> int:
         "sensor_constraint_lambda": float(args.sensor_constraint_lambda),
         "sensor_constraint_target_mode": str(args.sensor_constraint_target_mode),
         "sensor_constraint_sigma": float(args.sensor_constraint_sigma),
-        "sensor_constraint_horizontal_radius": float(args.sensor_constraint_horizontal_radius),
-        "sensor_constraint_vertical_radius": float(args.sensor_constraint_vertical_radius),
+        "sensor_constraint_horizontal_radius": float(
+            args.sensor_constraint_horizontal_radius
+        ),
+        "sensor_constraint_vertical_radius": float(
+            args.sensor_constraint_vertical_radius
+        ),
         "sensor_constraint_min_cells": int(args.sensor_constraint_min_cells),
-        "sensor_constraint_rows": 0 if sensor_constraint_metadata is None else int(len(sensor_constraint_metadata)),
+        "sensor_constraint_rows": 0
+        if sensor_constraint_metadata is None
+        else int(len(sensor_constraint_metadata)),
         "sensor_constraint_valid_points": 0
         if sensor_constraint_metadata is None
         else int(sensor_constraint_metadata["valid_points"].sum()),
         "delta_theta_min": float(np.min(final_delta_theta)),
         "delta_theta_max": float(np.max(final_delta_theta)),
         "delta_theta_definition": "final_water_content_models[:, t] - final_water_content_models[:, 0]",
-        "water_content_offset_from_theta0_min": float(np.min(final_delta_theta_from_theta0)),
-        "water_content_offset_from_theta0_max": float(np.max(final_delta_theta_from_theta0)),
-        "temperature_correction_factor_min": float(np.min(temperature_correction_factor)),
-        "temperature_correction_factor_max": float(np.max(temperature_correction_factor)),
+        "water_content_offset_from_theta0_min": float(
+            np.min(final_delta_theta_from_theta0)
+        ),
+        "water_content_offset_from_theta0_max": float(
+            np.max(final_delta_theta_from_theta0)
+        ),
+        "temperature_correction_factor_min": float(
+            np.min(temperature_correction_factor)
+        ),
+        "temperature_correction_factor_max": float(
+            np.max(temperature_correction_factor)
+        ),
         "elapsed_sec": float(elapsed_sec),
         "elapsed_min": float(elapsed_sec / 60.0),
         "plot_files": plot_files,

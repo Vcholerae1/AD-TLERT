@@ -30,7 +30,9 @@ def discover_forward_files(forward_dir: Path) -> dict[int, Path]:
             summary_path = forward_dir / "forward_summary.json"
             step = 0
             if summary_path.exists():
-                step = int(json.loads(summary_path.read_text(encoding="utf-8")).get("step", 0))
+                step = int(
+                    json.loads(summary_path.read_text(encoding="utf-8")).get("step", 0)
+                )
             pairs[step] = single_path
     if not pairs:
         raise FileNotFoundError(f"No forward .npz files found in {forward_dir}")
@@ -162,7 +164,8 @@ def model_metrics(estimate: np.ndarray, truth: np.ndarray) -> dict[str, float]:
         "log_mae": float(np.mean(np.abs(log_error))),
         "relative_l2": float(np.linalg.norm(estimate - truth) / np.linalg.norm(truth)),
         "median_absolute_percent_error": float(
-            100.0 * np.median(np.abs(estimate - truth) / np.maximum(np.abs(truth), 1.0e-12))
+            100.0
+            * np.median(np.abs(estimate - truth) / np.maximum(np.abs(truth), 1.0e-12))
         ),
         "log_correlation": float(np.corrcoef(np.log(estimate), np.log(truth))[0, 1]),
     }

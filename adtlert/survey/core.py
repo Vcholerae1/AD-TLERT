@@ -24,7 +24,9 @@ class Survey:
         positions = torch.as_tensor(electrode_positions, dtype=FLOAT_DTYPE)
         quads = torch.as_tensor(measurements, dtype=INT_DTYPE)
         if positions.ndim != 2 or positions.shape[1] not in (2, 3):
-            raise ValueError("electrode_positions must have shape (num_electrodes, 2 or 3)")
+            raise ValueError(
+                "electrode_positions must have shape (num_electrodes, 2 or 3)"
+            )
         if quads.ndim != 2 or quads.shape[1] != 4:
             raise ValueError("measurements must have shape (num_measurements, 4)")
         if bool(torch.any(quads < 0)):
@@ -54,10 +56,23 @@ class Survey:
 
         a, b, m, n = self.electrode_positions[self.measurements.long()].unbind(dim=1)
         distance = lambda p, q: torch.linalg.norm(p - q, dim=-1)  # noqa: E731
-        return 2.0 * math.pi / (1.0 / distance(a, m) - 1.0 / distance(a, n) - 1.0 / distance(b, m) + 1.0 / distance(b, n))
+        return (
+            2.0
+            * math.pi
+            / (
+                1.0 / distance(a, m)
+                - 1.0 / distance(a, n)
+                - 1.0 / distance(b, m)
+                + 1.0 / distance(b, n)
+            )
+        )
 
     def apparent_resistivity(self, voltages, currents=1.0) -> torch.Tensor:
         """Convert measured voltages to apparent resistivity."""
 
         voltages = torch.as_tensor(voltages, dtype=FLOAT_DTYPE)
-        return self.geometric_factors() * voltages / torch.as_tensor(currents, dtype=FLOAT_DTYPE)
+        return (
+            self.geometric_factors()
+            * voltages
+            / torch.as_tensor(currents, dtype=FLOAT_DTYPE)
+        )

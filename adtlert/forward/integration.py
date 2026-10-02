@@ -37,5 +37,13 @@ def build_inverse_cosine_weights(r_min: float, r_max: float) -> CosineTransformW
     points, weights = 0.5 * (points + 1.0), 0.5 * weights
     tail_points, tail_weights = roots_laguerre(4)
     wavenumbers = np.concatenate((k0 * points * points, k0 * (tail_points + 1.0)))
-    quadrature = np.concatenate((2.0 * k0 * points * weights / np.pi, k0 * np.exp(tail_points) * tail_weights / np.pi))
-    return CosineTransformWeights(torch.as_tensor(wavenumbers, dtype=FLOAT_DTYPE), torch.as_tensor(quadrature, dtype=FLOAT_DTYPE))
+    quadrature = np.concatenate(
+        (
+            2.0 * k0 * points * weights / np.pi,
+            k0 * np.exp(tail_points) * tail_weights / np.pi,
+        )
+    )
+    return CosineTransformWeights(
+        torch.as_tensor(wavenumbers, dtype=FLOAT_DTYPE),
+        torch.as_tensor(quadrature, dtype=FLOAT_DTYPE),
+    )

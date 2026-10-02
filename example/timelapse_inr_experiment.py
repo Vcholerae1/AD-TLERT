@@ -91,14 +91,18 @@ class INRForwardBundle:
 def load_flat_timelapse_data(forward_dir: Path, truth_dir: Path) -> FlatTimelapseData:
     """Load the 49 DAT surveys and their matching structured-grid truth."""
 
-    pairs = _discover_forward_dat(forward_dir, file_stride=1, max_timesteps=None, selected_steps=None)
+    pairs = _discover_forward_dat(
+        forward_dir, file_stride=1, max_timesteps=None, selected_steps=None
+    )
     steps = np.asarray([step for step, _ in pairs], dtype=np.int32)
     geometry = _load_geometry(forward_dir / "forward_geometry.npz")
     observed, measurements, elec_x, elec_z, err, data_files, _ = _load_forward_series(
         pairs,
         forward_format="dat",
     )
-    truth_models = np.asarray(np.load(truth_dir / "resistivity.npy", allow_pickle=False), dtype=np.float64)
+    truth_models = np.asarray(
+        np.load(truth_dir / "resistivity.npy", allow_pickle=False), dtype=np.float64
+    )
     metadata = json.loads((truth_dir / "metadata.json").read_text(encoding="utf-8"))
     if err is None:
         raise ValueError("time-lapse INR experiments require per-datum relative errors")
@@ -163,10 +167,14 @@ def build_inr_forward(
         data_file=data.data_files[0],
     )
     if case.mesh.cell_count == data.truth_models.shape[1] * data.truth_models.shape[2]:
-        raise AssertionError("the inversion parameter mesh must differ from the synthetic forward grid")
-    forward_mesh, parameter_ids, forward_parameter_ids, parent_ids = _build_forward_parameterization(
-        case,
-        forward_refinement,
+        raise AssertionError(
+            "the inversion parameter mesh must differ from the synthetic forward grid"
+        )
+    forward_mesh, parameter_ids, forward_parameter_ids, parent_ids = (
+        _build_forward_parameterization(
+            case,
+            forward_refinement,
+        )
     )
     forward = ParameterizedERTForward2p5D.from_mesh_survey(
         forward_mesh,
@@ -181,15 +189,21 @@ def build_inr_forward(
         forward=forward,
         forward_mesh=forward_mesh,
         parameter_cell_ids=np.asarray(parameter_ids),
-        forward_cell_parameter_ids=None if forward_parameter_ids is None else np.asarray(forward_parameter_ids),
+        forward_cell_parameter_ids=None
+        if forward_parameter_ids is None
+        else np.asarray(forward_parameter_ids),
         forward_parent_cell_ids=None if parent_ids is None else np.asarray(parent_ids),
     )
 
 
-def make_global_coordinates(bundle: INRForwardBundle, steps: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def make_global_coordinates(
+    bundle: INRForwardBundle, steps: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Create one global normalized coordinate system shared by every method/window."""
 
-    return spatiotemporal_coordinates(cell_centers(bundle.case.mesh), np.asarray(steps, dtype=np.float32))
+    return spatiotemporal_coordinates(
+        cell_centers(bundle.case.mesh), np.asarray(steps, dtype=np.float32)
+    )
 
 
 def _jsonable_config(config: Any) -> dict[str, Any]:
@@ -252,7 +266,9 @@ def save_inr_result(
     checkpoint = {
         "network_class": type(network).__name__,
         "network_configuration": network.configuration(),
-        "state_dict": {name: value.detach().cpu() for name, value in network.state_dict().items()},
+        "state_dict": {
+            name: value.detach().cpu() for name, value in network.state_dict().items()
+        },
         "coordinate_center": np.asarray(coordinate_center),
         "coordinate_scale": np.asarray(coordinate_scale),
     }
@@ -291,7 +307,9 @@ def save_inr_result(
         "stop_reason": result.stop_reason,
         "gpu": result.gpu_report,
     }
-    (output_dir / "inversion_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (output_dir / "inversion_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
     return summary
 
 
@@ -325,21 +343,29 @@ def plot_inr_recovery(
         & (depth <= bounds["depth_max"])
     )
     if not np.any(anomaly_mask):
-        raise AssertionError("the inversion mesh contains no cells in the anomaly rectangle")
+        raise AssertionError(
+            "the inversion mesh contains no cells in the anomaly rectangle"
+        )
     inverted_curve = np.median(final_models[anomaly_mask], axis=0)
 
     indices = [int(np.flatnonzero(data.steps == step)[0]) for step in selected_steps]
     norm = LogNorm(vmin=30.0, vmax=600.0)
     cmap = "turbo"
-    cumulative_depth = np.concatenate(([0.0], np.cumsum(data.geometry["layer_thickness"])))
+    cumulative_depth = np.concatenate(
+        ([0.0], np.cumsum(data.geometry["layer_thickness"]))
+    )
     x_grid = np.tile(data.geometry["x_nodes"], (cumulative_depth.size, 1))
     z_grid = data.geometry["z_top"][None, :] - cumulative_depth[:, None]
 
     fig = plt.figure(figsize=(18, 8.2), constrained_layout=True)
     grid = fig.add_gridspec(3, len(selected_steps), height_ratios=[1.0, 1.0, 0.78])
-    for column, (step, time_index) in enumerate(zip(selected_steps, indices, strict=True)):
+    for column, (step, time_index) in enumerate(
+        zip(selected_steps, indices, strict=True)
+    ):
         truth_axis = fig.add_subplot(grid[0, column])
-        inversion_axis = fig.add_subplot(grid[1, column], sharex=truth_axis, sharey=truth_axis)
+        inversion_axis = fig.add_subplot(
+            grid[1, column], sharex=truth_axis, sharey=truth_axis
+        )
         truth_axis.pcolormesh(
             x_grid,
             z_grid,
@@ -367,12 +393,23 @@ def plot_inr_recovery(
         truth_axis.tick_params(labelbottom=False)
         inversion_axis.set_xlabel("X (m)")
         for axis in (truth_axis, inversion_axis):
-            axis.set_xlim(float(data.geometry["x_nodes"].min()), float(data.geometry["x_nodes"].max()))
+            axis.set_xlim(
+                float(data.geometry["x_nodes"].min()),
+                float(data.geometry["x_nodes"].max()),
+            )
             axis.set_ylim(float(z_grid.min()), float(z_grid.max()))
 
     curve_axis = fig.add_subplot(grid[2, :])
-    curve_axis.plot(data.steps, data.truth_anomaly_curve, color="black", linewidth=2.4, label="True anomaly")
-    curve_axis.plot(data.steps, inverted_curve, color="#d62728", linewidth=2.1, label=method_label)
+    curve_axis.plot(
+        data.steps,
+        data.truth_anomaly_curve,
+        color="black",
+        linewidth=2.4,
+        label="True anomaly",
+    )
+    curve_axis.plot(
+        data.steps, inverted_curve, color="#d62728", linewidth=2.1, label=method_label
+    )
     for step in selected_steps:
         curve_axis.axvline(step, color="0.75", linewidth=0.7, zorder=0)
     curve_axis.set(
@@ -382,9 +419,13 @@ def plot_inr_recovery(
     )
     curve_axis.grid(alpha=0.22)
     curve_axis.legend(frameon=False, ncol=2)
-    colorbar = fig.colorbar(ScalarMappable(norm=norm, cmap=cmap), ax=fig.axes[:-1], shrink=0.72, pad=0.012)
+    colorbar = fig.colorbar(
+        ScalarMappable(norm=norm, cmap=cmap), ax=fig.axes[:-1], shrink=0.72, pad=0.012
+    )
     colorbar.set_label("Resistivity (ohm-m)")
-    fig.savefig(output_dir / "model_and_temporal_recovery.png", dpi=180, bbox_inches="tight")
+    fig.savefig(
+        output_dir / "model_and_temporal_recovery.png", dpi=180, bbox_inches="tight"
+    )
     plt.show()
     return inverted_curve
 

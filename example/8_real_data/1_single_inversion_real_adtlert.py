@@ -41,7 +41,9 @@ from adtlert.utils.progress import InversionProgressPrinter
 torch.set_default_dtype(torch.float64)
 
 
-def _data_std_summary(data_std: float | np.ndarray, shape: tuple[int, ...]) -> dict[str, float]:
+def _data_std_summary(
+    data_std: float | np.ndarray, shape: tuple[int, ...]
+) -> dict[str, float]:
     values = np.asarray(data_std, dtype=float)
     if values.ndim == 0:
         values = np.full(shape, float(values), dtype=float)
@@ -58,22 +60,67 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", default=None)
     parser.add_argument("--input-file", default="ProcessedData/2022-04-20_1230.txt")
-    parser.add_argument("--output-dir", default="result/8_real_data/1_single_inversion_real_adtlert")
-    parser.add_argument("--mesh-file", default=None, help="Optional saved inversion_mesh.npz to reuse.")
-    parser.add_argument("--depth", type=float, default=90.0, help="Displayed/geometric local depth below highest electrode.")
-    parser.add_argument("--n-layers", type=int, default=28, help="Stored terrain-layer metadata for this real profile.")
+    parser.add_argument(
+        "--output-dir", default="result/8_real_data/1_single_inversion_real_adtlert"
+    )
+    parser.add_argument(
+        "--mesh-file", default=None, help="Optional saved inversion_mesh.npz to reuse."
+    )
+    parser.add_argument(
+        "--depth",
+        type=float,
+        default=90.0,
+        help="Displayed/geometric local depth below highest electrode.",
+    )
+    parser.add_argument(
+        "--n-layers",
+        type=int,
+        default=28,
+        help="Stored terrain-layer metadata for this real profile.",
+    )
     parser.add_argument("--layer-stretch", type=float, default=1.08)
-    parser.add_argument("--data-stride", type=int, default=1, help="Use every Nth valid datum; keep 1 for production.")
-    parser.add_argument("--max-error", type=float, default=None, help="Optional maximum reciprocal/data error filter.")
-    parser.add_argument("--relative-error", type=float, default=0.05, help="Fallback data std if err column is absent.")
+    parser.add_argument(
+        "--data-stride",
+        type=int,
+        default=1,
+        help="Use every Nth valid datum; keep 1 for production.",
+    )
+    parser.add_argument(
+        "--max-error",
+        type=float,
+        default=None,
+        help="Optional maximum reciprocal/data error filter.",
+    )
+    parser.add_argument(
+        "--relative-error",
+        type=float,
+        default=0.05,
+        help="Fallback data std if err column is absent.",
+    )
     parser.add_argument("--minimum-log-std", type=float, default=1.0e-3)
-    parser.add_argument("--data-misfit", choices=available_data_misfits(), default="weighted_log_l2")
+    parser.add_argument(
+        "--data-misfit", choices=available_data_misfits(), default="weighted_log_l2"
+    )
     parser.add_argument("--regularization", type=float, default=50.0)
-    parser.add_argument("--regularization-mode", choices=("model", "update"), default="model")
-    parser.add_argument("--spatial-regularization", choices=available_spatial_regularizations(), default="first_order_smoothness")
+    parser.add_argument(
+        "--regularization-mode", choices=("model", "update"), default="model"
+    )
+    parser.add_argument(
+        "--spatial-regularization",
+        choices=available_spatial_regularizations(),
+        default="first_order_smoothness",
+    )
     parser.add_argument("--z-weight", type=float, default=1.0)
-    parser.add_argument("--optimizer", choices=available_optimization_algorithms(), default="gauss_newton_cgls")
-    parser.add_argument("--linearized-solver", choices=available_linearized_optimizers(), default="gpu_cgls")
+    parser.add_argument(
+        "--optimizer",
+        choices=available_optimization_algorithms(),
+        default="gauss_newton_cgls",
+    )
+    parser.add_argument(
+        "--linearized-solver",
+        choices=available_linearized_optimizers(),
+        default="gpu_cgls",
+    )
     parser.add_argument("--terrain-cache-dir", default=None)
     parser.add_argument("--lm-damping", type=float, default=1.0e-2)
     parser.add_argument("--cgls-tolerance", type=float, default=1.0e-8)
@@ -84,7 +131,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-log-step", type=float, default=1.0)
     parser.add_argument("--target-chi2", type=float, default=None)
     parser.add_argument("--step-tolerance", type=float, default=1.0e-4)
-    parser.add_argument("--line-search", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--line-search", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--inversion-mesh-quality", type=float, default=34.0)
     parser.add_argument("--inversion-mesh-smoothing-iterations", type=int, default=10)
     parser.add_argument("--coverage-percentile", type=float, default=20.0)
@@ -97,11 +146,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    root = Path(args.project_root).resolve() if args.project_root else find_project_root(Path(__file__))
+    root = (
+        Path(args.project_root).resolve()
+        if args.project_root
+        else find_project_root(Path(__file__))
+    )
     input_file = resolve_path(root, args.input_file)
     output_dir = resolve_path(root, args.output_dir)
     mesh_file = None if args.mesh_file is None else resolve_path(root, args.mesh_file)
-    terrain_cache_dir = None if args.terrain_cache_dir is None else resolve_path(root, args.terrain_cache_dir)
+    terrain_cache_dir = (
+        None
+        if args.terrain_cache_dir is None
+        else resolve_path(root, args.terrain_cache_dir)
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     raw_data = read_processed_ert(input_file)
@@ -121,7 +178,9 @@ def main(argv: list[str] | None = None) -> int:
         mesh_file=mesh_file,
     )
     if data.rhoa.shape != (case.survey.measurement_count,):
-        raise ValueError(f"Observed rhoa shape {data.rhoa.shape} does not match survey count {case.survey.measurement_count}.")
+        raise ValueError(
+            f"Observed rhoa shape {data.rhoa.shape} does not match survey count {case.survey.measurement_count}."
+        )
 
     data_std = data_std_from_err(
         data.err,
@@ -155,10 +214,16 @@ def main(argv: list[str] | None = None) -> int:
         progress_callback=progress,
     )
 
-    initial_model = np.full(case.mesh.cell_count, float(np.median(data.rhoa)), dtype=float)
+    initial_model = np.full(
+        case.mesh.cell_count, float(np.median(data.rhoa)), dtype=float
+    )
     run_start = time.perf_counter()
     try:
-        result = ERTInversion(forward=forward, observed_data=data.rhoa, config=config).setup().run(initial_model)
+        result = (
+            ERTInversion(forward=forward, observed_data=data.rhoa, config=config)
+            .setup()
+            .run(initial_model)
+        )
     finally:
         forward.close()
         progress.finish()
@@ -171,14 +236,22 @@ def main(argv: list[str] | None = None) -> int:
     masked_model[coverage_mask] = np.nan
 
     np.save(output_dir / "final_model.npy", np.asarray(result.final_model, dtype=float))
-    np.save(output_dir / "final_log_model.npy", np.asarray(result.final_log_model, dtype=float))
-    np.save(output_dir / "predicted_rhoa.npy", np.asarray(result.predicted_data, dtype=float))
+    np.save(
+        output_dir / "final_log_model.npy",
+        np.asarray(result.final_log_model, dtype=float),
+    )
+    np.save(
+        output_dir / "predicted_rhoa.npy",
+        np.asarray(result.predicted_data, dtype=float),
+    )
     np.save(output_dir / "observed_rhoa.npy", np.asarray(data.rhoa, dtype=float))
     np.save(output_dir / "data_std.npy", np.asarray(data_std, dtype=float))
     np.save(output_dir / "coverage.npy", coverage)
     np.save(output_dir / "coverage_mask.npy", coverage_mask.astype(np.uint8))
     np.save(output_dir / "final_model_masked_nan.npy", masked_model)
-    np.save(output_dir / "chi2_history.npy", np.asarray(result.iteration_chi2, dtype=float))
+    np.save(
+        output_dir / "chi2_history.npy", np.asarray(result.iteration_chi2, dtype=float)
+    )
     save_mesh_npz(output_dir / "inversion_mesh.npz", case)
     np.savez(
         output_dir / "real_data_geometry_and_survey.npz",
@@ -238,7 +311,9 @@ def main(argv: list[str] | None = None) -> int:
         "linearized_solver": str(args.linearized_solver),
         "max_iterations": int(args.max_iterations),
         "iterations": int(len(result.iteration_chi2)),
-        "final_chi2": float(result.iteration_chi2[-1]) if result.iteration_chi2 else None,
+        "final_chi2": float(result.iteration_chi2[-1])
+        if result.iteration_chi2
+        else None,
         "model_bounds": [float(args.model_min), float(args.model_max)],
         "coverage_percentile": float(args.coverage_percentile),
         "coverage_threshold": coverage_threshold,

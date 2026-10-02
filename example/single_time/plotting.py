@@ -42,7 +42,9 @@ def _mesh_edge_segments(case) -> np.ndarray:
             start = int(node_id)
             stop = int(next_node_id)
             edges.add((start, stop) if start < stop else (stop, start))
-    return np.asarray([[nodes[start], nodes[stop]] for start, stop in sorted(edges)], dtype=float)
+    return np.asarray(
+        [[nodes[start], nodes[stop]] for start, stop in sorted(edges)], dtype=float
+    )
 
 
 def _set_terrain_limits(ax, case) -> None:
@@ -64,7 +66,9 @@ def _plot_mesh_edges(path: Path, case, step: int) -> None:
     from matplotlib.collections import LineCollection
 
     fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.add_collection(LineCollection(_mesh_edge_segments(case), colors="0.5", linewidths=0.6))
+    ax.add_collection(
+        LineCollection(_mesh_edge_segments(case), colors="0.5", linewidths=0.6)
+    )
     ax.plot(case.x_nodes, case.z_top, "k-", lw=2, label="Topography")
     ax.set_title("X-Z Cross Section with Cell Edges (Terrain + Variable Dz)")
     ax.set_xlabel("X (m)")
@@ -129,7 +133,9 @@ def _plot_resistivity_model(path: Path, case, step: int) -> None:
     plt.close(fig)
 
 
-def _plot_pseudosection(path: Path, case, rhoa: np.ndarray, step: int, label: str) -> None:
+def _plot_pseudosection(
+    path: Path, case, rhoa: np.ndarray, step: int, label: str
+) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -144,7 +150,9 @@ def _plot_pseudosection(path: Path, case, rhoa: np.ndarray, step: int, label: st
         raise ValueError(f"rhoa must have shape ({measurements.shape[0]},)")
 
     electrode_x = np.asarray(case.elec_x, dtype=float)
-    electrode_spacing = float(np.median(np.diff(electrode_x))) if electrode_x.size > 1 else 1.0
+    electrode_spacing = (
+        float(np.median(np.diff(electrode_x))) if electrode_x.size > 1 else 1.0
+    )
     spacing_ids = measurements[:, 2] - measurements[:, 0]
     x_centers = np.mean(electrode_x[measurements], axis=1)
     max_spacing = int(np.max(spacing_ids))
@@ -192,7 +200,9 @@ def _plot_pseudosection(path: Path, case, rhoa: np.ndarray, step: int, label: st
     plt.close(fig)
 
 
-def plot_case(output_dir: Path, case, rhoa: np.ndarray, step: int, label: str) -> dict[str, Path]:
+def plot_case(
+    output_dir: Path, case, rhoa: np.ndarray, step: int, label: str
+) -> dict[str, Path]:
     """Save mesh, resistivity-model, and pseudosection figures; returns their paths."""
 
     output_dir.mkdir(parents=True, exist_ok=True)

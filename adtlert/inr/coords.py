@@ -19,7 +19,9 @@ def cell_centers(mesh: Any) -> np.ndarray:
     return np.asarray(nodes[cells].mean(axis=1), dtype=np.float32)
 
 
-def normalize_coordinates(coordinates: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def normalize_coordinates(
+    coordinates: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Normalize each coordinate axis to ``[-1, 1]``.
 
     Constant axes are mapped to zero. The returned center and half-span allow
@@ -64,13 +66,23 @@ def spatiotemporal_coordinates(
     if time_center is None:
         normalized_time, center_array, scale_array = normalize_coordinates(time_values)
     else:
-        if not np.isfinite(time_center) or not np.isfinite(time_scale) or time_scale <= 0.0:
-            raise ValueError("time_center must be finite and time_scale must be positive")
+        if (
+            not np.isfinite(time_center)
+            or not np.isfinite(time_scale)
+            or time_scale <= 0.0
+        ):
+            raise ValueError(
+                "time_center must be finite and time_scale must be positive"
+            )
         center_array = np.asarray([time_center], dtype=np.float32)
         scale_array = np.asarray([time_scale], dtype=np.float32)
         normalized_time = (time_values - center_array) / scale_array
-    tiled_spatial = np.broadcast_to(spatial[None, :, :], (time_values.shape[0], *spatial.shape))
-    tiled_time = np.broadcast_to(normalized_time[:, None, :], (time_values.shape[0], spatial.shape[0], 1))
+    tiled_spatial = np.broadcast_to(
+        spatial[None, :, :], (time_values.shape[0], *spatial.shape)
+    )
+    tiled_time = np.broadcast_to(
+        normalized_time[:, None, :], (time_values.shape[0], spatial.shape[0], 1)
+    )
     combined = np.concatenate((tiled_spatial, tiled_time), axis=-1).astype(np.float32)
     center = np.concatenate((spatial_center, center_array)).astype(np.float32)
     scale = np.concatenate((spatial_scale, scale_array)).astype(np.float32)
