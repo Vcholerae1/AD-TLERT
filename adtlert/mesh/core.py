@@ -14,6 +14,22 @@ import meshio
 from adtlert.utils.dtypes import FLOAT_DTYPE, INT_DTYPE, NP_FLOAT_DTYPE
 
 
+def edge_midpoint_builder(nodes) -> tuple[list[np.ndarray], "Callable[[int, int], int]"]:
+    """Return a growing node list and ``midpoint(a, b)``, which adds each edge midpoint once."""
+
+    points = [np.asarray(point, dtype=float) for point in np.asarray(nodes, dtype=float)]
+    index: dict[tuple[int, int], int] = {}
+
+    def midpoint(a: int, b: int) -> int:
+        key = (a, b) if a < b else (b, a)
+        if key not in index:
+            index[key] = len(points)
+            points.append(0.5 * (points[key[0]] + points[key[1]]))
+        return index[key]
+
+    return points, midpoint
+
+
 def triangle_areas(nodes: Array, cells: Array) -> Array:
     """Compute the area of each triangle cell."""
 
