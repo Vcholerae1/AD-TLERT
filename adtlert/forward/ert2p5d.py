@@ -39,6 +39,7 @@ from adtlert.forward.integration import (
     build_inverse_cosine_weights,
     survey_wavenumber_bounds,
 )
+from adtlert.forward.kernels import GroupSum, normal_sensitivity, sampled_products
 from adtlert.mesh import Mesh
 from adtlert.mesh.core import edge_midpoint_builder
 from adtlert.survey import Survey
@@ -84,16 +85,19 @@ class _SparsePattern:
     def nnz(self) -> int:
         return int(self.indices.size)
 
+    def _indices(self, device: torch.device) -> tuple[Tensor, Tensor]:
+        key = str(device)
+        if key not in self._device_indices:
+            self._device_indices[key] = tuple(
+                torch.as_tensor(x, dtype=torch.long, device=device)
+                for x in (self.indptr, self.indices)
+            )
+        return self._device_indices[key]
+
     def matvec(self, values: Tensor, vectors: Tensor) -> Tensor:
         """Apply ``A_b`` to ``vectors[b]`` for each operator ``b`` (rows are vectors)."""
 
-        key = str(values.device)
-        if key not in self._device_indices:
-            self._device_indices[key] = (
-                torch.as_tensor(self.indptr, dtype=torch.long, device=values.device),
-                torch.as_tensor(self.indices, dtype=torch.long, device=values.device),
-            )
-        indptr, indices = self._device_indices[key]
+        indptr, indices = self._indices(values.device)
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore", message="Sparse (CSR tensor support|invariant checks)"
@@ -107,6 +111,11 @@ class _SparsePattern:
                     for value, vector in zip(values, vectors, strict=True)
                 ]
             )
+
+    def sample(self, left: Tensor, right: Tensor) -> Tensor:
+        """``(left @ right)`` at the nonzeros, in CSR order (SDDMM)."""
+
+        return sampled_products(*self._indices(left.device), self.shape, left, right)
 
 
 def _sparse_pattern(
@@ -667,17 +676,6 @@ def _exact_node_indices(dof_nodes, points, tol: float = 1e-6) -> np.ndarray:
     return indices
 
 
-def _cupy():
-    try:
-        import cupy as cp
-        import cupyx.scipy.sparse as cupy_sparse
-    except ImportError as exc:
-        raise ImportError(
-            "ERTForward2p5D requires CuPy and cuDSS on a CUDA-capable system"
-        ) from exc
-    return cp, cupy_sparse
-
-
 def _cudss_solver(matrices, rhs, *, spd: bool):
     try:
         from nvmath.sparse import advanced
@@ -703,35 +701,6 @@ def _cudss_solver(matrices, rhs, *, spd: bool):
             )
     solver.plan()
     return solver
-
-
-_SENSITIVITY_KERNEL = r"""
-extern "C" __global__ void normal_sensitivity(
-    const SCALAR* __restrict__ phi, const int* __restrict__ a, const int* __restrict__ b,
-    const int* __restrict__ m, const int* __restrict__ n, const int* __restrict__ cells,
-    const int* __restrict__ targets, const SCALAR* __restrict__ templates, SCALAR* __restrict__ out,
-    const int wavenumbers, const int sources, const int nodes, const int measurements,
-    const int cell_count, const int target_count) {
-    const int id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (id >= measurements * cell_count) return;
-    const int cell = id % cell_count, row = id / cell_count, target = targets[cell];
-    if (target < 0 || target >= target_count) return;
-    const int local[3] = {cells[3 * cell], cells[3 * cell + 1], cells[3 * cell + 2]};
-    SCALAR total = 0;
-    for (int w = 0; w < wavenumbers; ++w) {
-        const SCALAR* field = phi + (long long)w * sources * nodes;
-        const SCALAR* tmpl = templates + ((long long)w * cell_count + cell) * 9;
-        SCALAR current[3], receiver[3];
-        for (int i = 0; i < 3; ++i) {
-            current[i] = field[(long long)a[row] * nodes + local[i]] - field[(long long)b[row] * nodes + local[i]];
-            receiver[i] = field[(long long)m[row] * nodes + local[i]] - field[(long long)n[row] * nodes + local[i]];
-        }
-        for (int i = 0; i < 3; ++i)
-            for (int j = 0; j < 3; ++j) total += receiver[i] * tmpl[3 * i + j] * current[j];
-    }
-    atomicAdd(out + (long long)row * target_count + target, -total);
-}
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -963,43 +932,47 @@ class ERTForward2p5D:
         models. The numeric factorization is redone unless ``refactorize=False``.
         """
 
-        cp, cupy_sparse = _cupy()
-        values_cp, rhs_cp = (
-            cp.from_dlpack(tensor.to(_CUDA, self.dtype).contiguous())
-            for tensor in (values, rhs)
+        values, rhs_device, rhs = (
+            values.to(_CUDA, self.dtype),
+            rhs.device,
+            rhs.to(_CUDA, self.dtype),
         )
         key = (d.name, tuple(rhs.shape))
         state = self._cudss_state.get(key)
         if state is None:
             indptr, indices = (
-                cp.asarray(d.pattern.indptr),
-                cp.asarray(d.pattern.indices),
+                torch.as_tensor(x, device=_CUDA)
+                for x in (d.pattern.indptr, d.pattern.indices)
             )
-            data = [cp.array(value, copy=True) for value in values_cp]
             matrices = [
-                cupy_sparse.csr_matrix((value, indices, indptr), shape=d.pattern.shape)
-                for value in data
+                torch.sparse_csr_tensor(
+                    indptr, indices, value.clone(), size=d.pattern.shape
+                )
+                for value in values
             ]
-            rhs_buffer = rhs_cp.copy()
-            rhs_view = rhs_buffer.transpose((0, 2, 1))
+            rhs_buffer = rhs.clone()
             state = {
-                "data": data,
                 "matrices": matrices,
                 "rhs": rhs_buffer,
-                "rhs_view": rhs_view,
+                "rhs_view": rhs_buffer.transpose(1, 2),
             }
-            state["solver"] = _cudss_solver(matrices, rhs_view, spd=d.spd)
+            state["solver"] = _cudss_solver(matrices, state["rhs_view"], spd=d.spd)
             self._cudss_state[key] = state
             refactorize = True
         else:
-            for buffer, value in zip(state["data"], values_cp, strict=True):
-                buffer[...] = value
-            state["rhs"][...] = rhs_cp
+            for matrix, value in zip(state["matrices"], values, strict=True):
+                matrix.values().copy_(value)
+            state["rhs"].copy_(rhs)
             state["solver"].reset_operands(b=state["rhs_view"])
         if refactorize:
             state["solver"].factorize()
-        solution = cp.ascontiguousarray(state["solver"].solve().transpose((0, 2, 1)))
-        return torch.from_dlpack(solution).to(rhs.device, copy=True)
+        return (
+            state["solver"]
+            .solve()
+            .transpose(1, 2)
+            .to(rhs_device, copy=True)
+            .contiguous()
+        )
 
     # -- primary fields and terrain caches ----------------------------------
 
@@ -1395,8 +1368,10 @@ class ERTForward2p5D:
             )
         return ids[parents], count
 
-    def _active_targets(self, targets: np.ndarray, device: torch.device):
-        """Active discretization cells (``None`` when all are active) and their output column."""
+    def _aggregation(
+        self, targets: np.ndarray, count: int
+    ) -> tuple[Tensor | None, GroupSum]:
+        """Active discretization cells (``None`` when all are) and their reduction into ``count`` columns."""
 
         digest = hashlib.blake2b(targets.tobytes(), digest_size=16).digest()
 
@@ -1405,53 +1380,72 @@ class ERTForward2p5D:
             cells = (
                 None
                 if active.size == targets.size
-                else torch.as_tensor(active, device=device)
+                else torch.as_tensor(active, device=_CUDA)
             )
-            return cells, torch.as_tensor(targets[active], device=device)
+            return cells, GroupSum(targets[active], count, _CUDA)
 
-        return self._cached(("targets", digest, str(device)), build)
+        return self._cached(("aggregation", digest, count), build)
 
     def _cell_gradient(
         self, phi: Tensor, lam: Tensor, *, robin: bool = True, targets=None, count=None
     ) -> Tensor:
-        """``-sum_w lam^T dA_w/dsigma phi`` per output column; ``lam`` may carry a leading batch axis.
+        """``-sum_{w,s} lam_ws^T dA_w/dsigma phi_ws`` per output column; ``lam`` may lead with a batch axis.
 
-        The dense contraction runs on the GPU when one is available.
+        The volume term is the transpose of assembly: ``sum_ws lam phi^T`` is sampled on the
+        sparsity pattern (SDDMM) and contracted with the stiffness/mass templates, so no
+        ``W x S x C x k`` gathered blocks are formed. Reductions are deterministic.
         """
 
-        d, device = self.discretization, self._device
+        d = self.discretization
         if targets is None:
             targets, count = d.parent_cell_ids.numpy(), self.mesh.cell_count
-        active, columns = self._active_targets(targets, device)
-        templates = self._volume_templates(d, device)
-        cell_dofs = self._on(f"{d.name}.cell_dofs", lambda: d.cell_dofs, device)
-        if active is not None:
-            templates, cell_dofs = templates[:, active], cell_dofs[active]
-        phi, lam = phi.to(device), lam.to(device)
-        batch = "q" if lam.ndim == 4 else ""
-        gradient = -torch.einsum(
-            f"w{batch}sci,wcij,wscj->{batch}c",
-            lam[..., cell_dofs],
-            templates,
-            phi[..., cell_dofs],
+        active, reduce = self._aggregation(targets, count)
+        phi, lam = phi.to(_CUDA), lam.to(_CUDA)
+        if lam.ndim == 4:
+            return torch.stack(
+                [
+                    self._cell_gradient(
+                        phi, block, robin=robin, targets=targets, count=count
+                    )
+                    for block in lam.unbind(1)
+                ]
+            )
+
+        W, S, N = phi.shape
+        k2 = torch.square(self.wavenumbers.to(_CUDA, phi.dtype))[:, None, None]
+        right = phi.reshape(W * S, N)
+        q0 = d.pattern.sample(lam.reshape(W * S, N).T, right)
+        q2 = d.pattern.sample((k2 * lam).reshape(W * S, N).T, right)
+        entries = self._on(
+            f"{d.name}.entries",
+            lambda: d.pattern.volume_inverse.reshape(d.cell_dofs.shape[0], -1),
+            _CUDA,
         )
+        stiffness, mass = (
+            self._on(
+                f"{d.name}.{name}",
+                lambda t=t: t.reshape(entries.shape).to(self.dtype),
+                _CUDA,
+            )
+            for name, t in (("stiffness", d.stiffness), ("mass", d.mass))
+        )
+        gradient = -(stiffness * q0[entries] + mass * q2[entries]).sum(dim=1)
         if robin:
             boundary_dofs = self._on(
-                f"{d.name}.boundary_dofs", lambda: d.boundary_dofs, device
+                f"{d.name}.boundary_dofs", lambda: d.boundary_dofs, _CUDA
             )
             boundary = -torch.einsum(
-                f"w{batch}sbi,wbij,wsbj->{batch}b",
+                "wsbi,wbij,wsbj->b",
                 lam[..., boundary_dofs],
-                self._boundary_templates(d, device),
+                self._boundary_templates(d, _CUDA),
                 phi[..., boundary_dofs],
             )
-            gradient = gradient.index_add(
-                gradient.ndim - 1, d.boundary_cells.to(device), boundary
+            to_cells = self._cached(
+                (d.name, "boundary_to_cells"),
+                lambda: GroupSum(d.boundary_cells.numpy(), d.cell_dofs.shape[0], _CUDA),
             )
-        out = torch.zeros(
-            (*gradient.shape[:-1], count), dtype=gradient.dtype, device=device
-        )
-        return out.index_add_(out.ndim - 1, columns, gradient).cpu()
+            gradient = gradient + to_cells(boundary)
+        return reduce(gradient if active is None else gradient[active]).cpu()
 
     def vjp(self, conductivity, cotangent) -> Tensor:
         """Apply the transposed resistance Jacobian to a measurement cotangent."""
@@ -1503,13 +1497,13 @@ class ERTForward2p5D:
         phi = self._fields(conductivity).on(device)
         weights = _measurement_vector(
             cotangent, self.survey.measurement_count, phi.dtype
-        ).to(device)
-        a, b, m, n = self._abmn(device)
+        )
+        a, b, m, n = self._abmn()
         sources = self.survey.electrode_count
-        pairs = torch.zeros(sources * sources, dtype=phi.dtype, device=device).index_add_(
+        pairs = torch.zeros(sources * sources, dtype=phi.dtype).index_add_(
             0, torch.cat((m * sources + a, m * sources + b, n * sources + a, n * sources + b)),
             torch.cat((weights, -weights, -weights, weights)),
-        ).reshape(sources, sources)  # fmt: skip
+        ).reshape(sources, sources).to(device)  # fmt: skip
         current = torch.einsum("ef,wfn->wen", pairs, phi)
         receiver = self.weights.to(device, phi.dtype)[:, None, None] * phi
         gradient = self._cell_gradient(
@@ -1532,9 +1526,11 @@ class ERTForward2p5D:
         ]
         volume = direction[None, :, None, None] * self._volume_templates(d, device)
         count = self.wavenumbers.shape[0]
-        tangent = torch.zeros(
-            (count, d.pattern.nnz), dtype=phi.dtype, device=device
-        ).index_add_(1, d.pattern.volume_inverse.to(device), volume.reshape(count, -1))
+        assemble = self._cached(
+            (d.name, "volume_assembly"),
+            lambda: GroupSum(d.pattern.volume_inverse.numpy(), d.pattern.nnz, _CUDA),
+        )
+        tangent = assemble(volume.reshape(count, -1))
         gram = torch.einsum(
             "w,wen,wfn->ef",
             self.weights.to(device, phi.dtype),
@@ -1592,74 +1588,30 @@ class ERTForward2p5D:
     def _normal_jacobian(
         self, fields: _Fields, batch_size: int, targets: np.ndarray, count: int
     ) -> Tensor:
-        """Direct normal sensitivity ``-sum_w w_w (u_M - u_N)^T dA_w (u_A - u_B)`` per measurement chunk."""
+        """Direct normal sensitivity ``-sum_w w_w (u_M - u_N)^T dA_w (u_A - u_B)`` (fused Triton kernel)."""
 
-        d, device = self.discretization, self._device
-        active, columns = self._active_targets(targets, device)
-        templates = self.weights.to(device, self.dtype)[
+        d = self.discretization
+        active, reduce = self._aggregation(targets, count)
+        templates = self.weights.to(_CUDA, self.dtype)[
             :, None, None, None
-        ] * self._volume_templates(d, device)
-        cell_dofs = self._on(f"{d.name}.cell_dofs", lambda: d.cell_dofs, device)
+        ] * self._volume_templates(d, _CUDA)
+        cell_dofs = self._on(f"{d.name}.cell_dofs", lambda: d.cell_dofs, _CUDA)
         if active is not None:
             templates, cell_dofs = templates[:, active], cell_dofs[active]
-        phi = fields.on(device)
-        a, b, m, n = self._abmn(device)
-        rows = []
-        for start in range(0, self.survey.measurement_count, batch_size):
-            chunk = slice(start, start + batch_size)
-            if cell_dofs.shape[1] == 3:
-                rows.append(
-                    self._normal_jacobian_cuda(
-                        phi,
-                        a[chunk],
-                        b[chunk],
-                        m[chunk],
-                        n[chunk],
-                        cell_dofs,
-                        columns,
-                        templates,
-                        count,
-                    )
+        phi = fields.on(_CUDA)
+        a, b, m, n = self._abmn(_CUDA)
+        rows = [
+            reduce(
+                normal_sensitivity(
+                    phi, a[chunk], b[chunk], m[chunk], n[chunk], cell_dofs, templates
                 )
-                continue
-            current = (phi[:, a[chunk]] - phi[:, b[chunk]])[..., cell_dofs]
-            receiver = (phi[:, m[chunk]] - phi[:, n[chunk]])[..., cell_dofs]
-            local = -torch.einsum("wbci,wcij,wbcj->bc", receiver, templates, current)
-            rows.append(
-                torch.zeros(
-                    (local.shape[0], count), dtype=local.dtype, device=device
-                ).index_add_(1, columns, local)
             )
-        return torch.cat(rows).cpu()
-
-    def _normal_jacobian_cuda(
-        self, phi, a, b, m, n, cell_dofs, columns, templates, count
-    ) -> Tensor:
-        """Fused CuPy kernel avoiding ``W x B x C x 3`` gathered field blocks for triangle cells."""
-
-        cp, _ = _cupy()
-        scalar = "double" if phi.dtype == torch.float64 else "float"
-        kernel = self._cached(
-            ("sensitivity_kernel", scalar),
-            lambda: cp.RawKernel(
-                _SENSITIVITY_KERNEL.replace("SCALAR", scalar), "normal_sensitivity"
-            ),
-        )
-        as_int = [
-            cp.from_dlpack(x.to(torch.int32).contiguous())
-            for x in (a, b, m, n, cell_dofs.reshape(-1), columns)
+            for chunk in (
+                slice(start, start + batch_size)
+                for start in range(0, self.survey.measurement_count, batch_size)
+            )
         ]
-        out = torch.zeros((a.shape[0], count), dtype=phi.dtype, device=phi.device)
-        cells = int(cell_dofs.shape[0])
-        threads = a.shape[0] * cells
-        kernel(
-            ((threads + 255) // 256,),
-            (256,),
-            (cp.from_dlpack(phi.contiguous()), *as_int[:5], as_int[5], cp.from_dlpack(templates.contiguous()),
-             cp.from_dlpack(out), np.int32(phi.shape[0]), np.int32(phi.shape[1]), np.int32(phi.shape[2]),
-             np.int32(a.shape[0]), np.int32(cells), np.int32(count)),
-        )  # fmt: skip
-        return out
+        return torch.cat(rows).cpu()
 
     def _adjoint_jacobian(
         self,

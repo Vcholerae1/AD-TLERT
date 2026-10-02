@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
+import torch
 from scipy.sparse.linalg import cg, lsqr
 
 
@@ -32,9 +34,7 @@ _LINEARIZED_OPTIMIZERS = {
     optimizer.name: optimizer
     for optimizer in (
         LinearizedOptimizer("lsqr", "SciPy LSQR on the assembled linearized system."),
-        LinearizedOptimizer(
-            "gpu_cgls", "CuPy CGLS on the assembled linearized system."
-        ),
+        LinearizedOptimizer("gpu_cgls", "GPU CGLS on the assembled linearized system."),
         LinearizedOptimizer(
             "normal_cg", "SciPy conjugate-gradient solve on normal equations."
         ),
@@ -281,7 +281,7 @@ def solve_linearized(matrix: sp.spmatrix, rhs: np.ndarray, config) -> np.ndarray
 
     solver = config.linearized_solver
     if solver == "gpu_cgls":
-        solution = _cupy_cgls(
+        solution = _gpu_cgls(
             matrix,
             rhs,
             max_iterations=config.cgls_max_iterations,
@@ -320,54 +320,52 @@ def solve_linearized(matrix: sp.spmatrix, rhs: np.ndarray, config) -> np.ndarray
     return np.asarray(solution, dtype=float)
 
 
-def _cupy_cgls(
+def _gpu_cgls(
     matrix: sp.spmatrix, rhs: np.ndarray, *, max_iterations: int, tolerance: float
 ) -> np.ndarray:
-    """CGLS for ``min ||A x - b||`` with CuPy sparse matvecs."""
-
-    try:
-        import cupy as cp
-        import cupyx.scipy.sparse as cupy_sparse
-    except ImportError as exc:
-        raise ImportError("linearized_solver='gpu_cgls' requires CuPy") from exc
+    """CGLS for ``min ||A x - b||`` on the GPU; ``A`` and ``A^T`` are both stored as CSR."""
 
     cpu = matrix.tocsr()
     dtype = (
-        np.float64
+        torch.float64
         if cpu.dtype == np.float64 or np.asarray(rhs).dtype == np.float64
-        else np.float32
+        else torch.float32
     )
-    system = cupy_sparse.csr_matrix(
-        (
-            cp.asarray(cpu.data, dtype=dtype),
-            cp.asarray(cpu.indices, dtype=cp.int32),
-            cp.asarray(cpu.indptr, dtype=cp.int32),
-        ),
-        shape=cpu.shape,
-    )
-    r = cp.asarray(np.asarray(rhs, dtype=dtype).ravel())
-    x = cp.zeros(system.shape[1], dtype=dtype)
-    s = system.T @ r
-    p = s.copy()
-    gamma = cp.dot(s, s)
+
+    def csr(m):
+        tensors = (torch.as_tensor(x, device="cuda") for x in (m.indptr, m.indices))
+        return torch.sparse_csr_tensor(
+            *tensors, torch.as_tensor(m.data, dtype=dtype, device="cuda"), size=m.shape
+        )
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="Sparse CSR tensor support is in beta"
+        )
+        system, transpose = csr(cpu), csr(cpu.T.tocsr())
+    r = torch.as_tensor(np.asarray(rhs).ravel(), dtype=dtype, device="cuda")
+    x = torch.zeros(system.shape[1], dtype=dtype, device="cuda")
+    s = transpose @ r
+    p = s.clone()
+    gamma = torch.dot(s, s)
     gamma0 = float(gamma)
-    if gamma0 <= 0.0 or float(cp.dot(r, r)) <= 0.0:
-        return cp.asnumpy(x)
+    if gamma0 <= 0.0 or float(torch.dot(r, r)) <= 0.0:
+        return x.cpu().numpy()
     for _ in range(int(max_iterations)):
         q = system @ p
-        denominator = cp.dot(q, q)
+        denominator = torch.dot(q, q)
         if float(denominator) <= 0.0:
             break
         alpha = gamma / denominator
         x = x + alpha * p
         r = r - alpha * q
-        s = system.T @ r
-        gamma_new = cp.dot(s, s)
+        s = transpose @ r
+        gamma_new = torch.dot(s, s)
         if float(gamma_new) <= 0.0 or float(gamma_new) / gamma0 < float(tolerance):
             break
         p = s + (gamma_new / gamma) * p
         gamma = gamma_new
-    return np.asarray(cp.asnumpy(x), dtype=float)
+    return x.cpu().numpy().astype(float)
 
 
 def _pyhydro_cgls(

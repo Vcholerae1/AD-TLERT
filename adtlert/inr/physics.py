@@ -39,16 +39,13 @@ def _full_log_model(forward: Any, parameter_log: np.ndarray) -> np.ndarray:
 
 
 def select_cuda_device(device: torch.device | str = "cuda") -> dict[str, Any]:
-    """Make ``device`` current for Torch and CuPy; returns its index and name."""
+    """Make ``device`` the current CUDA device; returns its index and name."""
 
     device = torch.device(device)
     if device.type != "cuda":
         raise ValueError(f"INR inversion runs on CUDA devices, got {device}")
     index = device.index if device.index is not None else torch.cuda.current_device()
     torch.cuda.set_device(index)
-    import cupy as cp
-
-    cp.cuda.Device(index).use()
     return {"gpu_device_index": index, "gpu_name": torch.cuda.get_device_name(index)}
 
 

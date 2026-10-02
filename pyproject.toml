@@ -32,7 +32,6 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 dependencies = [
-    "cupy-cuda12x>=14,<15",
     "meshio>=5.3.5",
     "numpy>=1.26,<3",
     "nvidia-cudss-cu12>=0.7.1.6,<1",

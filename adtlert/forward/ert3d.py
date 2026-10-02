@@ -328,58 +328,37 @@ class ERTForward3D:
         return self._cached_operator
 
     def _solve_cudss_rhs(
-        self,
-        operator: sp.csr_matrix,
-        rhs: np.ndarray,
-        *,
-        factorize: bool,
-        rhs_key: str,
+        self, operator: sp.csr_matrix, rhs: np.ndarray, *, factorize: bool, rhs_key: str
     ) -> np.ndarray:
-        """Solve multiple RHS columns with NVIDIA cuDSS through nvmath-python."""
+        """Solve the rows of ``rhs`` with cuDSS; the plan and matrix buffers are reused across models."""
 
-        try:
-            import cupy as cp
-            import cupyx.scipy.sparse as cupy_sparse
-            from nvmath.sparse.advanced import (
-                DirectSolver,
-                DirectSolverMatrixType,
-                DirectSolverOptions,
-            )
-        except ImportError as exc:
-            raise ImportError(
-                "ERTForward3D requires CuPy and nvmath-python for the cuDSS backend"
-            ) from exc
+        from nvmath.sparse.advanced import (
+            DirectSolver,
+            DirectSolverMatrixType,
+            DirectSolverOptions,
+        )
 
-        canonical = operator
-        matrix_data = self._cudss_state.get("matrix_data")
-        if matrix_data is None:
-            indptr = cp.asarray(canonical.indptr, dtype=cp.int32)
-            indices = cp.asarray(canonical.indices, dtype=cp.int32)
-            matrix_data = cp.asarray(canonical.data)
-            matrix_gpu = cupy_sparse.csr_matrix(
-                (matrix_data, indices, indptr), shape=canonical.shape
+        cuda = torch.device("cuda")
+        matrix = self._cudss_state.get("matrix")
+        if matrix is None:
+            matrix = torch.sparse_csr_tensor(
+                *(
+                    torch.as_tensor(x, device=cuda)
+                    for x in (operator.indptr, operator.indices, operator.data)
+                ),
+                size=operator.shape,
             )
-            self._cudss_state.update(
-                {
-                    "matrix_data": matrix_data,
-                    "matrix_gpu": matrix_gpu,
-                    "indptr": indptr,
-                    "indices": indices,
-                }
-            )
+            self._cudss_state["matrix"] = matrix
+        elif matrix.values().numel() != operator.data.size:
+            raise RuntimeError("cuDSS operator sparsity changed after planning")
         else:
-            if int(matrix_data.size) != int(canonical.data.size):
-                raise RuntimeError("cuDSS operator sparsity changed after planning")
-            matrix_data[...] = cp.asarray(canonical.data)
-            matrix_gpu = self._cudss_state["matrix_gpu"]
-
-        gpu_rhs_key = f"rhs_{rhs_key}"
-        rhs_gpu = self._cudss_state.get(gpu_rhs_key)
-        if rhs_gpu is None:
-            rhs_gpu = cp.asfortranarray(
-                cp.asarray(np.asarray(rhs, dtype=canonical.dtype).T)
-            )
-            self._cudss_state[gpu_rhs_key] = rhs_gpu
+            matrix.values().copy_(torch.as_tensor(operator.data, device=cuda))
+        rhs_gpu = self._cudss_state.get(f"rhs_{rhs_key}")
+        if rhs_gpu is None:  # fixed right-hand sides, stored column-major
+            rhs_gpu = torch.as_tensor(
+                np.asarray(rhs, dtype=operator.dtype), device=cuda
+            ).T
+            self._cudss_state[f"rhs_{rhs_key}"] = rhs_gpu
         solver = self._cudss_state.get("solver")
         if solver is None:
             options = DirectSolverOptions(
@@ -387,16 +366,16 @@ class ERTForward3D:
                 logger=_CUDSS_LOGGER,
                 blocking=True,
             )
-            solver = DirectSolver(matrix_gpu, rhs_gpu, options=options)
+            solver = self._cudss_state["solver"] = DirectSolver(
+                matrix, rhs_gpu, options=options
+            )
             solver.plan()
-            self._cudss_state["solver"] = solver
             factorize = True
         else:
             solver.reset_operands(b=rhs_gpu)
         if factorize:
             solver.factorize()
-        solution = solver.solve()
-        return np.asarray(cp.asnumpy(solution.T), dtype=np.float64)
+        return solver.solve().T.cpu().numpy().astype(np.float64)
 
     def _solve_node_fields(self, conductivity: torch.Tensor | float) -> np.ndarray:
         values = np.asarray(conductivity, dtype=np.float64)

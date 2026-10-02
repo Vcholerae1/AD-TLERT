@@ -22,14 +22,13 @@ requirements.
 
 ADTLERT is a CUDA library: every sparse solve runs on NVIDIA cuDSS and the
 adjoint contractions run on the GPU. It requires Linux, an NVIDIA GPU, and a
-driver that supports CUDA 12. CuPy, cuDSS, and nvmath-python are installed as
-regular dependencies:
+driver that supports CUDA 12. cuDSS and nvmath-python are installed as regular
+dependencies; the fused sensitivity kernels are written in Triton, which ships
+with PyTorch:
 
 ```bash
 python -m pip install adtlert
 ```
-
-Only one CuPy CUDA variant may be installed in an environment.
 
 For development from a checkout, use `uv`. The terrain examples read ParFlow
 PFB files and build Triangle inversion meshes:

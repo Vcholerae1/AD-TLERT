@@ -39,24 +39,6 @@ from example.shared import load_petrophysical_parameters, resolve, write_json
 torch.set_default_dtype(torch.float64)
 
 
-def _synchronize_gpu() -> None:
-    """Wait for pending Torch and CuPy GPU work before reading a wall timer."""
-
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-    except (ImportError, RuntimeError):
-        pass
-    try:
-        import cupy as cp
-
-        cp.cuda.get_current_stream().synchronize()
-    except (ImportError, RuntimeError):
-        pass
-
-
 def _load_forward_npz(path: Path) -> dict[str, np.ndarray]:
     with np.load(path) as data:
         required = {
@@ -474,10 +456,10 @@ def main(argv: list[str] | None = None) -> int:
             observed_data=observed_rhoa,
             config=config,
         ).setup()
-        _synchronize_gpu()
+        torch.cuda.synchronize()
         inversion_start = time.perf_counter()
         result = inversion.run(initial_model)
-        _synchronize_gpu()
+        torch.cuda.synchronize()
         inversion_sec = time.perf_counter() - inversion_start
     finally:
         forward.close()
