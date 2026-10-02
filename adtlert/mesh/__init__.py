@@ -19,9 +19,9 @@ __all__ = [
     "cell_areas_2d",
     "extract_boundary_edges",
     "locate_points_in_quadrilaterals",
-    "locate_points_in_triangles",
     "locate_points_in_tetrahedra",
+    "locate_points_in_triangles",
     "refine_triangle_mesh",
-    "triangle_areas",
     "tetrahedron_volumes",
+    "triangle_areas",
 ]

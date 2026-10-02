@@ -30,6 +30,7 @@ from _real_data_common import (
     selected_plot_indices,
     write_json,
 )
+
 from adtlert.inversion import (
     InversionConfig,
     TimeLapseERTInversion,
@@ -305,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             run_meta = {
                 "inversion_mode": "windowed",
-                "n_windows": int(len(result.window_reports)),
+                "n_windows": len(result.window_reports),
                 "window_size": int(args.window_size),
                 "window_step": int(args.window_step),
             }
@@ -395,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
         "max_timesteps": None
         if args.max_timesteps is None
         else int(args.max_timesteps),
-        "n_timesteps": int(len(records)),
+        "n_timesteps": len(records),
         "first_timestamp": timestamp_labels[0],
         "last_timestamp": timestamp_labels[-1],
         "n_electrodes": int(records[0].elec_x.size),

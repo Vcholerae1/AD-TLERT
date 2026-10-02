@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 
 import numpy as np
 import scipy.sparse as sp
@@ -18,7 +18,6 @@ from adtlert.fem.tetrahedron import (
 from adtlert.mesh import Mesh3D
 from adtlert.survey import Survey
 from adtlert.utils.dtypes import FLOAT_DTYPE
-
 
 _CUDSS_LOGGER = logging.getLogger("adtlert.cudss")
 _CUDSS_LOGGER.setLevel(logging.ERROR)
@@ -89,7 +88,7 @@ class ERTForward3D:
         element_order: int = 1,
         geometric_factor_mode: str = "auto",
         **_: object,
-    ) -> "ERTForward3D":
+    ) -> ERTForward3D:
         return cls(
             mesh=mesh,
             survey=survey,

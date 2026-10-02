@@ -13,11 +13,9 @@ os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import torch
 import numpy as np
+import torch
 
-from example.single_time.plotting import plot_case
-from example.shared import resolve
 from adtlert.workflows import (
     build_terrain_forward_case,
     parse_pftcl,
@@ -27,6 +25,8 @@ from adtlert.workflows import (
     save_terrain_forward_dat,
     save_terrain_forward_npz,
 )
+from example.shared import resolve
+from example.single_time.plotting import plot_case
 
 # Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
 torch.set_default_dtype(torch.float64)
@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         "measurements": int(case.survey.measurement_count),
         "rhoa_min": float(np.min(rhoa)),
         "rhoa_max": float(np.max(rhoa)),
-        "n_electrodes": int(len(case.elec_x)),
+        "n_electrodes": len(case.elec_x),
         "relative_error": float(args.relative_error),
         "plot_files": {name: str(path) for name, path in plot_paths.items()},
     }

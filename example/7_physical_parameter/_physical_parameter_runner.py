@@ -9,7 +9,6 @@ import numpy as np
 
 from adtlert.inversion import build_petrophysical_transform
 
-
 COMMON_ARGS = [
     "--inversion-mode",
     "windowed",

@@ -26,12 +26,11 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 import torch
-from _real_data_common import (  # noqa: E402
-    check_same_layout,
-    selected_plot_indices,
+from _real_data_common import (
     apply_data_stride,
     build_parameterized_forward,
     build_real_inversion_case,
+    check_same_layout,
     data_std_from_err,
     discover_processed_files,
     find_project_root,
@@ -40,9 +39,11 @@ from _real_data_common import (  # noqa: E402
     read_processed_ert,
     resolve_path,
     save_mesh_npz,
+    selected_plot_indices,
     write_json,
 )
-from adtlert.inversion import (  # noqa: E402
+
+from adtlert.inversion import (
     InversionConfig,
     TimeLapseERTInversion,
     WindowedTimeLapseERTInversion,
@@ -52,7 +53,7 @@ from adtlert.inversion import (  # noqa: E402
     available_spatial_regularizations,
     available_temporal_regularizations,
 )
-from adtlert.utils.progress import InversionProgressPrinter  # noqa: E402
+from adtlert.utils.progress import InversionProgressPrinter
 
 # Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
 torch.set_default_dtype(torch.float64)
@@ -193,7 +194,7 @@ def _build_sensor_constraint_from_tmc(
 
     n_rows = len(targets_rows)
     n_cells = int(case.mesh.cell_count)
-    n_times = int(len(ert_times))
+    n_times = len(ert_times)
     indptr = [0]
     indices: list[int] = []
     data: list[float] = []
@@ -914,7 +915,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             run_meta = {
                 "inversion_mode": "windowed",
-                "n_windows": int(len(result.window_reports)),
+                "n_windows": len(result.window_reports),
                 "window_size": int(args.window_size),
                 "window_step": int(args.window_step),
             }
@@ -1135,7 +1136,7 @@ def main(argv: list[str] | None = None) -> int:
         "max_timesteps": None
         if args.max_timesteps is None
         else int(args.max_timesteps),
-        "n_timesteps": int(len(records)),
+        "n_timesteps": len(records),
         "first_timestamp": timestamp_labels[0],
         "last_timestamp": timestamp_labels[-1],
         "n_electrodes": int(records[0].elec_x.size),
@@ -1188,7 +1189,7 @@ def main(argv: list[str] | None = None) -> int:
         "sensor_constraint_min_cells": int(args.sensor_constraint_min_cells),
         "sensor_constraint_rows": 0
         if sensor_constraint_metadata is None
-        else int(len(sensor_constraint_metadata)),
+        else len(sensor_constraint_metadata),
         "sensor_constraint_valid_points": 0
         if sensor_constraint_metadata is None
         else int(sensor_constraint_metadata["valid_points"].sum()),

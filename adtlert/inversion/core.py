@@ -8,16 +8,16 @@ either a Gauss-Newton/LM step or a matrix-free first-order step.
 
 from __future__ import annotations
 
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-import time
 from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.spatial import cKDTree
 import torch
+from scipy.spatial import cKDTree
 
 from adtlert.forward import ERTForward2p5D, ERTForwardModeling
 from adtlert.forward.modeling import log_response_and_jacobian

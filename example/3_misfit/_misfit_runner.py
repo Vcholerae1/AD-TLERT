@@ -4,7 +4,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 COMMON_ARGS = [
     "--inversion-mode",
     "windowed",

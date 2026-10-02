@@ -8,7 +8,6 @@ import numpy as np
 import torch
 from torch import nn
 
-
 FREQUENCY_SPACINGS = ("log_uniform", "octave")
 
 
@@ -202,7 +201,7 @@ class _BoundedLogResistivity(nn.Module):
         self.bounded_output = resistivity_bounds is not None
         buffer = lambda name, value: self.register_buffer(
             name, torch.tensor(value, dtype=torch.float32)
-        )  # noqa: E731
+        )
         buffer("initial_log_resistivity", math.log(initial_resistivity))
         if resistivity_bounds is None:
             log_lower = log_upper = float("nan")

@@ -115,7 +115,7 @@ def build_p1_element_data(mesh, quadrature_order: int = 2) -> P1ElementData:
     )
     as_tensor = lambda array: torch.as_tensor(
         np.ascontiguousarray(array), dtype=FLOAT_DTYPE
-    )  # noqa: E731
+    )
     return P1ElementData(
         quadrature_points=as_tensor(points),
         quadrature_weights=as_tensor(weights),

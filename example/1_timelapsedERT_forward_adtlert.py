@@ -12,8 +12,8 @@ from pathlib import Path
 
 os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 
-import torch
 import numpy as np
+import torch
 
 from adtlert.workflows import (
     build_terrain_forward_case,
@@ -168,16 +168,16 @@ def main(argv: list[str] | None = None) -> int:
     summary = {
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
-        "n_selected": int(len(pairs)),
+        "n_selected": len(pairs),
         "n_ok": int(sum(1 for record in manifest if record.status == "ok")),
         "n_skipped": int(
             sum(1 for record in manifest if record.status == "skipped_existing")
         ),
-        "n_failed": int(len(failures)),
+        "n_failed": len(failures),
         "first_step": int(pairs[0][0]),
         "last_step": int(pairs[-1][0]),
         "y_index": int(args.y_index),
-        "n_electrodes": int(len(first_case.elec_x)),
+        "n_electrodes": len(first_case.elec_x),
         "scheme_name": "wa",
         "measurements": int(first_case.survey.measurement_count),
         "mesh_cells": int(first_case.mesh.cell_count),

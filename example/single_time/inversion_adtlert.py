@@ -6,18 +6,17 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 import time
+from pathlib import Path
 
 os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import torch
 import numpy as np
+import torch
 
-from example.shared import load_petrophysical_parameters, resolve, write_json
 from adtlert.inversion import (
     ERTInversion,
     InversionConfig,
@@ -34,6 +33,7 @@ from adtlert.workflows import (
     load_terrain_forward_dat,
     parse_resistivity_slice_name,
 )
+from example.shared import load_petrophysical_parameters, resolve, write_json
 
 # Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
 torch.set_default_dtype(torch.float64)
@@ -160,8 +160,8 @@ def _plot_comparison(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.collections import PolyCollection
     from matplotlib.cm import ScalarMappable
+    from matplotlib.collections import PolyCollection
     from matplotlib.colors import LogNorm
 
     true_top = np.asarray(true_rho_2d, dtype=float)[::-1, :]

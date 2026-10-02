@@ -20,9 +20,9 @@ from adtlert.inr.physics import (
 from adtlert.inr.train import INRConfig, INRResult, fit_inr, fit_timelapse_inr
 
 __all__ = [
+    "DualNetworkINR",
     "INRConfig",
     "INRResult",
-    "DualNetworkINR",
     "JointSpatioTemporalINR",
     "MultiscaleFourierEncoder",
     "MultiscaleINR",

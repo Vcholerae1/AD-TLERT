@@ -196,8 +196,8 @@ class ERTForwardModeling:
 
         self.mesh, self._mesh, self._forward = mesh, None, None
 
-    setData = set_data  # noqa: N815 - compatibility with common ERT APIs
-    setMesh = set_mesh  # noqa: N815
+    setData = set_data
+    setMesh = set_mesh
 
     def _resolved_mesh(self) -> Mesh | Mesh3D:
         if self.mesh is None:

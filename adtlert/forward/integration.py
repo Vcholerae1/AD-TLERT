@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.special import roots_laguerre, roots_legendre
 import torch
+from scipy.special import roots_laguerre, roots_legendre
 
 from adtlert.survey import Survey
 from adtlert.utils.dtypes import FLOAT_DTYPE

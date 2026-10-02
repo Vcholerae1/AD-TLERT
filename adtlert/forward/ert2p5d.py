@@ -12,17 +12,17 @@ Both cases share one code path parameterized by :class:`_Discretization`.
 
 from __future__ import annotations
 
-from collections import OrderedDict
-from dataclasses import dataclass, field
 import hashlib
 import logging
 import os
-from pathlib import Path
 import warnings
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
-from scipy.special import k0 as besselk0
 import torch
+from scipy.special import k0 as besselk0
 
 from adtlert.fem import (
     assemble_local_boundary_mass,

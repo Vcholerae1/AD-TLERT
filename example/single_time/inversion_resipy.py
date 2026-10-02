@@ -15,11 +15,10 @@ from pathlib import Path
 
 import numpy as np
 import psutil
-
 from common import (
     discover_forward_files,
-    resistivity_column,
     resipy_parser,
+    resistivity_column,
     select_steps,
     write_json,
 )

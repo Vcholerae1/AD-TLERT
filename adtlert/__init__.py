@@ -25,8 +25,8 @@ except PackageNotFoundError:  # pragma: no cover - source tree without installat
     __version__ = "0+unknown"
 
 __all__ = [
-    "ERTForward2p5D",
     "ERT2p5DApparentResistivityFunction",
+    "ERTForward2p5D",
     "ERTForwardModeling",
     "ERTInversion",
     "ForwardResponse",
@@ -36,8 +36,8 @@ __all__ = [
     "Survey",
     "TimeLapseERTInversion",
     "WindowedTimeLapseERTInversion",
+    "__version__",
     "apparent_resistivity_autograd",
     "build_p1_element_data",
     "p1_shape_functions",
-    "__version__",
 ]

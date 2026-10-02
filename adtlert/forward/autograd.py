@@ -79,7 +79,7 @@ class ERT2p5DApparentResistivityFunction(torch.autograd.Function):
         conductivity_work = conductivity.detach().to(device="cpu", dtype=FLOAT_DTYPE)
         currents_work = currents.detach().to(device="cpu", dtype=FLOAT_DTYPE)
         resistance = forward_operator.resistance(conductivity_work).detach()
-        geometric_scale = forward_operator._geometric_factors().detach().abs()  # noqa: SLF001
+        geometric_scale = forward_operator._geometric_factors().detach().abs()
         apparent_resistivity = geometric_scale * resistance / currents_work
 
         ctx.forward_operator = forward_operator

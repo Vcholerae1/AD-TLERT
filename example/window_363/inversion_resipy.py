@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "single_time"))
-from common import discover_forward_files, write_json  # noqa: E402
+from common import discover_forward_files, write_json
 
 
 def build_parser() -> argparse.ArgumentParser:

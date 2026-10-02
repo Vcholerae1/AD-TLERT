@@ -27,6 +27,7 @@ from _real_data_common import (
     save_mesh_npz,
     write_json,
 )
+
 from adtlert.inversion import (
     ERTInversion,
     InversionConfig,
@@ -310,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         "optimizer": str(args.optimizer),
         "linearized_solver": str(args.linearized_solver),
         "max_iterations": int(args.max_iterations),
-        "iterations": int(len(result.iteration_chi2)),
+        "iterations": len(result.iteration_chi2),
         "final_chi2": float(result.iteration_chi2[-1])
         if result.iteration_chi2
         else None,

@@ -12,8 +12,6 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from example.single_time.plotting import plot_case
-from example.shared import resolve
 from adtlert.workflows import (
     build_terrain_forward_case,
     parse_pftcl,
@@ -22,6 +20,8 @@ from adtlert.workflows import (
     save_terrain_forward_dat,
     save_terrain_forward_npz,
 )
+from example.shared import resolve
+from example.single_time.plotting import plot_case
 
 
 def _write_summary(path: Path, summary: dict[str, object]) -> None:
@@ -176,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         "measurements": int(case.survey.measurement_count),
         "rhoa_min": float(np.min(rhoa)),
         "rhoa_max": float(np.max(rhoa)),
-        "n_electrodes": int(len(case.elec_x)),
+        "n_electrodes": len(case.elec_x),
         "relative_error": float(args.relative_error),
         "k_min": float(np.min(k_values)),
         "k_max": float(np.max(k_values)),

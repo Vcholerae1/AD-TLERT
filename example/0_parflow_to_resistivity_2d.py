@@ -581,7 +581,7 @@ def main(argv: list[str] | None = None) -> int:
         "range_preset": args.range_preset,
         "seed": None if args.range_preset is None else int(args.seed),
         "saturation_floor": float(args.saturation_floor),
-        "n_input_files": int(len(pairs)),
+        "n_input_files": len(pairs),
         "n_written": int(written),
         "n_skipped_existing": int(skipped),
         "rho_min_written": None if written == 0 else float(rho_min),

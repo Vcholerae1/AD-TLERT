@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-
 FORWARD_PATTERN = re.compile(r"synthetic_ert_terrain_vardz_t(\d+)\.npz$")
 
 

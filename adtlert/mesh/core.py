@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Callable
 from dataclasses import dataclass
-import heapq
 from pathlib import Path
 
 import meshio

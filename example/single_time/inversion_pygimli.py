@@ -34,8 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    from pygimli.physics import ert
     import pygimli as pg
+    from pygimli.physics import ert
 
     root = (
         Path(args.project_root).resolve()

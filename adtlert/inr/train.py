@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-import time
 from typing import Any
 
 import numpy as np
@@ -21,7 +21,6 @@ from adtlert.inversion.regularization import (
     first_order_constraint_matrix,
     regularization_mesh,
 )
-
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 PenaltyCallback = Callable[[torch.Tensor, int], torch.Tensor]

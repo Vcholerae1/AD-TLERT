@@ -16,15 +16,9 @@ os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import torch
 import numpy as np
+import torch
 
-from example.shared import (
-    grid2d_to_mesh_cells,
-    load_petrophysical_parameters,
-    resolve,
-    write_json,
-)
 from adtlert.inversion import (
     InversionConfig,
     ParameterizedERTForward2p5D,
@@ -42,6 +36,12 @@ from adtlert.workflows import (
     TerrainForwardData,
     build_source_position_triangle_inversion_case,
     load_terrain_forward_dat,
+)
+from example.shared import (
+    grid2d_to_mesh_cells,
+    load_petrophysical_parameters,
+    resolve,
+    write_json,
 )
 
 # Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.

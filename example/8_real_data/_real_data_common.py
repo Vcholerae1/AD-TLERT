@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+
 from adtlert.inversion import ParameterizedERTForward2p5D
 from adtlert.workflows import build_source_position_triangle_inversion_case
 
@@ -26,7 +27,7 @@ class RealERTData:
     timestamp: datetime | None
     elevation_reference: float
 
-    def with_measurement_mask(self, mask: np.ndarray) -> "RealERTData":
+    def with_measurement_mask(self, mask: np.ndarray) -> RealERTData:
         mask_array = np.asarray(mask, dtype=bool).ravel()
         if mask_array.shape != self.rhoa.shape:
             raise ValueError(

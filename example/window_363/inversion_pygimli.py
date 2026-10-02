@@ -30,9 +30,9 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     tqdm = None
 
-from PyHydroGeophysX.inversion import TimeLapseERTInversion
 import PyHydroGeophysX.inversion.time_lapse as pyhgx_time_lapse
 import PyHydroGeophysX.solvers.solver as pyhgx_solver
+from PyHydroGeophysX.inversion import TimeLapseERTInversion
 
 
 def _safe_float(value: object) -> float:
@@ -120,11 +120,11 @@ class _SimpleProgress:
             )
             self.last_print = now
         if self.count >= self.total:
-            print("", flush=True)
+            print(flush=True)
 
     def close(self) -> None:
         if self.count < self.total:
-            print("", flush=True)
+            print(flush=True)
 
 
 @contextmanager
@@ -397,7 +397,7 @@ def _run_windowed_inversion(
     )
     run_meta = {
         "inversion_mode": "windowed",
-        "n_windows": int(len(window_starts)),
+        "n_windows": len(window_starts),
         "window_size": int(window_size),
         "window_step": int(max(1, window_step)),
         "progress": bool(show_progress),
