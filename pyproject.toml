@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "adtlert"
 version = "0.1.0"
-description = "Differentiable 2.5D and 3D electrical resistivity tomography on PyTorch"
+description = "CUDA-accelerated differentiable 2.5D and 3D electrical resistivity tomography on PyTorch"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -28,20 +28,20 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Physics",
+    "Environment :: GPU :: NVIDIA CUDA :: 12",
+    "Operating System :: POSIX :: Linux",
 ]
 dependencies = [
+    "cupy-cuda12x>=14,<15",
     "meshio>=5.3.5",
     "numpy>=1.26,<3",
+    "nvidia-cudss-cu12>=0.7.1.6,<1",
+    "nvmath-python[cu12]>=0.8,<2",
     "scipy>=1.16,<2",
     "torch>=2.10,<3",
 ]
 
 [project.optional-dependencies]
-cuda12 = [
-    "cupy-cuda12x>=14,<15; sys_platform == 'linux'",
-    "nvidia-cudss-cu12>=0.7.1.6,<1; sys_platform == 'linux'",
-    "nvmath-python[cu12]>=0.8,<2; sys_platform == 'linux'",
-]
 terrain = [
     "pftools>=1.3.14",
     "triangle>=20250106",
@@ -78,3 +78,6 @@ include = [
     "/README.md",
     "/pyproject.toml",
 ]
+
+[tool.uv]
+environments = ["sys_platform == 'linux'"]

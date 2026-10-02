@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from adtlert.inr.networks import MultiscaleINR
-from adtlert.inr.physics import matrix_free_log_rhoa, matrix_free_log_rhoa_series, prepare_cuda_forward
+from adtlert.inr.physics import matrix_free_log_rhoa, matrix_free_log_rhoa_series, prepare_cuda_forward, select_cuda_device
 from adtlert.inversion.regularization import first_order_constraint_matrix, regularization_mesh
 
 
@@ -30,7 +30,6 @@ class INRConfig:
     learning_rate_milestones: tuple[int, ...] = (100, 200)
     target_chi2: float | None = 1.0
     device: str = "cuda"
-    require_cuda: bool = True
     gradient_clip_norm: float | None = 10.0
     weight_decay: float = 0.0
     plateau_patience: int = 20
@@ -89,8 +88,6 @@ class INRConfig:
             raise ValueError("regularization strengths must be non-negative")
         if self.regularization_huber_delta <= 0.0:
             raise ValueError("regularization_huber_delta must be positive")
-        if self.require_cuda and not self.prepare_solver:
-            raise ValueError("require_cuda=True requires prepare_solver=True so cuDSS can be verified")
         if self.time_window_size is not None and self.time_window_size < 1:
             raise ValueError("time_window_size must be positive when set")
         if self.time_window_step < 1:
@@ -198,8 +195,7 @@ def _emit(config: INRConfig, event: str, **payload: Any) -> None:
 
 
 def _synchronize(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    torch.cuda.synchronize(device)
 
 
 def _spatial_operator(forward: Any, cell_count: int, device: torch.device) -> torch.Tensor:
@@ -254,10 +250,7 @@ def _fit(
 ) -> INRResult:
     config.validate()
     device = torch.device(config.device)
-    if config.require_cuda and device.type != "cuda":
-        raise RuntimeError("require_cuda=True requires a CUDA network device")
-    if config.require_cuda and not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for INR inversion, but no CUDA device is available")
+    gpu_report = select_cuda_device(device)
 
     network = network.to(device=device, dtype=torch.float32)
     coordinate_values = np.asarray(coordinates, dtype=np.float32)
@@ -326,23 +319,11 @@ def _fit(
             f"observed_rhoa has {observed_log.shape[-1]} measurements, but survey expects {int(measurement_count)}"
         )
 
-    gpu_report: dict[str, Any] = {
-        "network_cuda_available": bool(torch.cuda.is_available()),
-        "linear_solver_backend": None,
-        "cudss_gpu_enabled": False,
-        "cudss_zero_copy": False,
-        "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
-    }
     if config.prepare_solver:
         preparation_model = initial_log.detach().to(device="cpu", dtype=torch.float64).numpy()
         if series:
             preparation_model = preparation_model[0]
-        gpu_report = prepare_cuda_forward(
-            forward,
-            preparation_model,
-            require_cuda=config.require_cuda,
-            device=device,
-        )
+        prepare_cuda_forward(forward, preparation_model, device=device)
 
     optimizer = _build_optimizer(config, network)
     scheduler = _build_scheduler(config, optimizer)

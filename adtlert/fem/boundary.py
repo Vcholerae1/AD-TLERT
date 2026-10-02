@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import numpy as np
+import torch
 from scipy.special import k0 as besselk0
 from scipy.special import k1 as besselk1
-import torch
 
 from adtlert.fem.triangle import _scalar
 from adtlert.utils.dtypes import FLOAT_DTYPE, NP_FLOAT_DTYPE

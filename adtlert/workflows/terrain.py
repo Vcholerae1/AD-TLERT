@@ -118,13 +118,12 @@ class TerrainForwardRunner:
         cls,
         case: TerrainForwardCase,
         *,
-        linear_solver_backend: str = "auto",
         reuse_solver_state: bool = True,
         terrain_cache_dir: str | Path | None = None,
         prepare_forward: bool = False,
     ) -> TerrainForwardRunner:
         forward = ERTForward2p5D.from_mesh_survey(
-            case.mesh, case.survey, linear_solver_backend=linear_solver_backend, terrain_cache_dir=terrain_cache_dir
+            case.mesh, case.survey, terrain_cache_dir=terrain_cache_dir
         )
         runner = cls(case_template=case, forward=forward, reuse_solver_state=bool(reuse_solver_state))
         if prepare_forward:
@@ -662,7 +661,6 @@ def build_terrain_forward_case(
 def run_terrain_forward(
     case: TerrainForwardCase,
     *,
-    linear_solver_backend: str = "auto",
     reuse_solver_state: bool = True,
     terrain_cache_dir: str | Path | None = None,
     prepare_forward: bool = False,
@@ -671,7 +669,6 @@ def run_terrain_forward(
 
     runner = TerrainForwardRunner.from_case(
         case,
-        linear_solver_backend=linear_solver_backend,
         reuse_solver_state=reuse_solver_state,
         terrain_cache_dir=terrain_cache_dir,
         prepare_forward=prepare_forward,
@@ -704,7 +701,6 @@ def run_terrain_forward_series(
     topo_offset: float = 0.0,
     relative_error: float = 0.03,
     overwrite: bool = True,
-    linear_solver_backend: str = "auto",
     reuse_solver_state: bool = True,
     terrain_cache_dir: str | Path | None = None,
     prepare_forward: bool = False,
@@ -733,7 +729,6 @@ def run_terrain_forward_series(
                     case = build_terrain_forward_case(rho_2d, grid, slope_x, y_index=slice_y, n_electrodes=n_electrodes, topo_offset=topo_offset)
                     runners[slice_y] = TerrainForwardRunner.from_case(
                         case,
-                        linear_solver_backend=linear_solver_backend,
                         reuse_solver_state=reuse_solver_state,
                         terrain_cache_dir=terrain_cache_dir,
                         prepare_forward=prepare_forward,

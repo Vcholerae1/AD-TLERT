@@ -12,32 +12,30 @@ The repository contains:
 - `parflow_models/` and `resistivity_models_2d/`: input data used by the
   examples.
 
-See [`example/README.md`](example/README.md) for commands and backend
+
+  
+
+See [`example/README.md`](example/README.md) for commands and dependency
 requirements.
 
 ## Install
 
-Install the CPU/SciPy build from PyPI:
+ADTLERT is a CUDA library: every sparse solve runs on NVIDIA cuDSS and the
+adjoint contractions run on the GPU. It requires Linux, an NVIDIA GPU, and a
+driver that supports CUDA 12. CuPy, cuDSS, and nvmath-python are installed as
+regular dependencies:
 
 ```bash
 python -m pip install adtlert
 ```
 
-CUDA 12 acceleration through NVIDIA cuDSS is an optional Linux extra:
-
-```bash
-python -m pip install "adtlert[cuda12]"
-```
-
-The CUDA driver must support CUDA 12, and only one CuPy CUDA variant may be
-installed in an environment. CPU-only installations do not install CuPy,
-cuDSS, or nvmath-python.
+Only one CuPy CUDA variant may be installed in an environment.
 
 For development from a checkout, use `uv`. The terrain examples read ParFlow
 PFB files and build Triangle inversion meshes:
 
 ```bash
-uv sync --extra cuda12 --extra examples
+uv sync --extra examples
 ```
 
 ## Core Forward API
@@ -95,7 +93,6 @@ forward3d = ERTForward3D.from_mesh_survey(
     survey3d,
     element_order=2,
     geometric_factor_mode="auto",  # numerical for terrain, analytic when flat
-    linear_solver_backend="cudss",  # or "scipy"; "auto" selects an available GPU
 )
 ```
 
@@ -105,8 +102,8 @@ active AB/MN electrode sets, numerical geometric factors, sparse plans, and
 fixed GPU right-hand sides are cached across inversion iterations.
 
 The initial 3D implementation supports flat-surface half-space models,
-four-node tetrahedral geometry, P1 or ten-node P2 basis functions, SciPy or
-NVIDIA cuDSS sparse factorization, analytic or terrain-aware numerical
+four-node tetrahedral geometry, P1 or ten-node P2 basis functions, NVIDIA cuDSS
+sparse factorization, analytic or terrain-aware numerical
 geometric factors, exact adjoint cell sensitivities, first-order face-neighbor
 regularization, and the existing single-time inversion API. Large-scale
 matrix-free time-lapse inversion remains on the 3D roadmap.

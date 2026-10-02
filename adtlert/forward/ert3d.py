@@ -1,4 +1,4 @@
-"""Three-dimensional DC ERT forward operator on tetrahedral P1 meshes."""
+"""Three-dimensional DC ERT forward operator on tetrahedral P1/P2 meshes (cuDSS sparse solves)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import logging
 
 import numpy as np
 import scipy.sparse as sp
-import scipy.sparse.linalg as spla
 import torch
 
 from adtlert.fem.tetrahedron import (
@@ -76,7 +75,6 @@ class ERTForward3D:
     survey: Survey
     boundary_mode: str = "mixed"
     singularity_removal: bool = True
-    linear_solver_backend: str = "auto"
     element_order: int = 1
     geometric_factor_mode: str = "auto"
 
@@ -88,7 +86,6 @@ class ERTForward3D:
         *,
         boundary_mode: str = "mixed",
         singularity_removal: bool = True,
-        linear_solver_backend: str = "auto",
         element_order: int = 1,
         geometric_factor_mode: str = "auto",
         **_: object,
@@ -98,7 +95,6 @@ class ERTForward3D:
             survey=survey,
             boundary_mode=boundary_mode,
             singularity_removal=singularity_removal,
-            linear_solver_backend=linear_solver_backend,
             element_order=element_order,
             geometric_factor_mode=geometric_factor_mode,
         )
@@ -111,8 +107,9 @@ class ERTForward3D:
             return value
 
         self.boundary_mode = choice("boundary_mode", ("mixed", "dirichlet"))
-        self.linear_solver_backend = choice("linear_solver_backend", ("auto", "cudss", "scipy"))
         self.geometric_factor_mode = choice("geometric_factor_mode", ("auto", "analytic", "numerical"))
+        if not torch.cuda.is_available():
+            raise RuntimeError("ADTLERT requires an NVIDIA GPU with CUDA (cuDSS sparse solves)")
         if self.element_order not in (1, 2):
             raise ValueError("element_order must be 1 or 2")
         if self.survey.dimension != 3:
@@ -271,33 +268,16 @@ class ERTForward3D:
         padded[: rhs.shape[0]] = rhs
         return padded
 
-    def _operator_and_factorization(self, conductivity: np.ndarray):
+    def _operator(self, conductivity: np.ndarray) -> sp.csr_matrix:
+        """Assembled operator for ``conductivity``; a new model invalidates the cached fields."""
+
         values = np.asarray(conductivity, dtype=np.float64).reshape(-1)
-        if self._cached_conductivity is not None and np.array_equal(values, self._cached_conductivity):
-            return self._cached_operator, self._cached_factorization
-        operator = self._assemble_operator(values)
-        if self.boundary_mode == "dirichlet":
-            operator = self._apply_dirichlet_matrix(operator)
-        factorization = None if self._use_cudss() else spla.splu(operator.tocsc())
-        self._cached_conductivity = values.copy()
-        self._cached_operator = operator
-        self._cached_factorization = factorization
-        self._cached_node_fields = None
-        self._cached_receiver_fields = None
-        return operator, factorization
-
-    def _use_cudss(self) -> bool:
-        if self.linear_solver_backend == "scipy":
-            return False
-        if self.linear_solver_backend == "cudss":
-            return True
-        try:
-            import cupy as cp
-            from nvmath.sparse.advanced import DirectSolver  # noqa: F401
-
-            return int(cp.cuda.runtime.getDeviceCount()) > 0
-        except Exception:
-            return False
+        if self._cached_conductivity is None or not np.array_equal(values, self._cached_conductivity):
+            operator = self._assemble_operator(values)
+            self._reset_solution_cache()
+            self._cached_conductivity = values.copy()
+            self._cached_operator = self._apply_dirichlet_matrix(operator) if self.boundary_mode == "dirichlet" else operator
+        return self._cached_operator
 
     def _solve_cudss_rhs(
         self,
@@ -315,8 +295,6 @@ class ERTForward3D:
             from nvmath.sparse.advanced import DirectSolver, DirectSolverMatrixType, DirectSolverOptions
         except ImportError as exc:
             raise ImportError("ERTForward3D requires CuPy and nvmath-python for the cuDSS backend") from exc
-        if int(cp.cuda.runtime.getDeviceCount()) < 1:
-            raise RuntimeError("ERTForward3D cuDSS backend requires a CUDA-capable GPU")
 
         canonical = operator
         matrix_data = self._cudss_state.get("matrix_data")
@@ -362,17 +340,9 @@ class ERTForward3D:
         if values.ndim == 0:
             values = np.full(self.mesh.cell_count, float(values), dtype=np.float64)
         values = values.reshape(-1)
-        operator, factorization = self._operator_and_factorization(values)
+        operator = self._operator(values)
         if self._cached_node_fields is None:
-            if self._use_cudss():
-                self._cached_node_fields = self._solve_cudss_rhs(
-                    operator,
-                    self._source_rhs,
-                    factorize=True,
-                    rhs_key="sources",
-                )
-            else:
-                self._cached_node_fields = np.asarray(factorization.solve(self._source_rhs.T).T, dtype=np.float64)
+            self._cached_node_fields = self._solve_cudss_rhs(operator, self._source_rhs, factorize=True, rhs_key="sources")
         return self._cached_node_fields[: len(self._current_electrode_ids)]
 
     def _measurement_values(self, node_fields: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -484,18 +454,7 @@ class ERTForward3D:
                 receiver_rhs[: receiver_values.shape[0]] = receiver_values
                 if self.boundary_mode == "dirichlet":
                     receiver_rhs[:, self._dirichlet_node_ids()] = 0.0
-                if self._use_cudss():
-                    receiver_fields = self._solve_cudss_rhs(
-                        self._cached_operator,
-                        receiver_rhs,
-                        factorize=False,
-                        rhs_key="receivers",
-                    )
-                else:
-                    receiver_fields = np.asarray(
-                        self._cached_factorization.solve(receiver_rhs.T).T,
-                        dtype=np.float64,
-                    )
+                receiver_fields = self._solve_cudss_rhs(self._cached_operator, receiver_rhs, factorize=False, rhs_key="receivers")
                 self._cached_receiver_fields = receiver_fields[: len(self._receiver_electrode_ids)]
         receiver_basis_fields = self._cached_receiver_fields
         quads = np.asarray(self.survey.measurements, dtype=np.int32)
@@ -562,10 +521,10 @@ class ERTForward3D:
 
     def prepare(self, conductivity: torch.Tensor | None = None, *, include_solver_state: bool = True) -> None:
         if conductivity is not None and include_solver_state:
-            self._operator_and_factorization(np.asarray(conductivity, dtype=float))
+            self._operator(np.asarray(conductivity, dtype=float))
 
     def _reset_solution_cache(self) -> None:
-        self._cached_conductivity = self._cached_operator = self._cached_factorization = None
+        self._cached_conductivity = self._cached_operator = None
         self._cached_node_fields = self._cached_receiver_fields = None
 
     def close(self) -> None:

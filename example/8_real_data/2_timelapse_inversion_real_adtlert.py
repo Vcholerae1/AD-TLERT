@@ -83,7 +83,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--z-weight", type=float, default=1.0)
     parser.add_argument("--optimizer", choices=available_optimization_algorithms(), default="gauss_newton_cgls")
     parser.add_argument("--linearized-solver", choices=available_linearized_optimizers(), default="gpu_cgls")
-    parser.add_argument("--linear-solver-backend", default="auto")
     parser.add_argument("--terrain-cache-dir", default=None)
     parser.add_argument("--lm-damping", type=float, default=1.0e-2)
     parser.add_argument("--cgls-tolerance", type=float, default=1.0e-8)
@@ -177,7 +176,6 @@ def main(argv: list[str] | None = None) -> int:
 
     forward = build_parameterized_forward(
         case,
-        linear_solver_backend=args.linear_solver_backend,
         terrain_cache_dir=terrain_cache_dir,
     )
     progress = InversionProgressPrinter(enabled=not args.quiet)
@@ -330,7 +328,6 @@ def main(argv: list[str] | None = None) -> int:
         "spatial_regularization": str(args.spatial_regularization),
         "optimizer": str(args.optimizer),
         "linearized_solver": str(args.linearized_solver),
-        "linear_solver_backend": str(args.linear_solver_backend),
         "max_iterations": int(args.max_iterations),
         "final_chi2": float(result.iteration_chi2[-1]) if result.iteration_chi2 else None,
         "model_bounds": [float(args.model_min), float(args.model_max)],

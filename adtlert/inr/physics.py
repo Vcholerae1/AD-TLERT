@@ -38,48 +38,27 @@ def _full_log_model(forward: Any, parameter_log: np.ndarray) -> np.ndarray:
     return np.asarray(parameter_log, dtype=float)
 
 
-def prepare_cuda_forward(
-    forward: Any,
-    parameter_log: np.ndarray,
-    *,
-    require_cuda: bool,
-    device: torch.device | str = "cuda",
-) -> dict[str, Any]:
-    """Warm solver caches and prove that the requested backend reached CUDA."""
+def select_cuda_device(device: torch.device | str = "cuda") -> dict[str, Any]:
+    """Make ``device`` current for Torch and CuPy; returns its index and name."""
 
-    operator = forward_operator(forward)
-    requested_device = torch.device(device)
-    if require_cuda and not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for INR inversion, but torch.cuda.is_available() is False")
-    if require_cuda and operator.linear_solver_backend == "scipy":
-        raise RuntimeError("CUDA is required, but the ERT forward operator uses the SciPy backend")
-    if requested_device.type == "cuda":
-        device_index = requested_device.index if requested_device.index is not None else torch.cuda.current_device()
-        torch.cuda.set_device(device_index)
-        try:
-            import cupy as cp
+    device = torch.device(device)
+    if device.type != "cuda":
+        raise ValueError(f"INR inversion runs on CUDA devices, got {device}")
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    torch.cuda.set_device(index)
+    import cupy as cp
 
-            cp.cuda.Device(device_index).use()
-        except ImportError:
-            if require_cuda:
-                raise RuntimeError("CUDA INR inversion requires CuPy") from None
-    else:
-        device_index = None
+    cp.cuda.Device(index).use()
+    return {"gpu_device_index": index, "gpu_name": torch.cuda.get_device_name(index)}
 
+
+def prepare_cuda_forward(forward: Any, parameter_log: np.ndarray, *, device: torch.device | str = "cuda") -> dict[str, Any]:
+    """Select the CUDA device and warm the forward caches and cuDSS plans at ``parameter_log``."""
+
+    report = select_cuda_device(device)
     full_log = _full_log_model(forward, np.asarray(parameter_log, dtype=float).reshape(-1))
-    conductivity = torch.as_tensor(np.exp(-full_log), dtype=FLOAT_DTYPE)
-    operator.prepare(conductivity, include_solver_state=True)
-    gpu_enabled = bool(operator._cudss_state.get("gpu_enabled", False))
-    if require_cuda and not gpu_enabled:
-        raise RuntimeError("cuDSS preparation completed without activating the GPU backend")
-    return {
-        "network_cuda_available": bool(torch.cuda.is_available()),
-        "linear_solver_backend": str(operator.linear_solver_backend),
-        "cudss_gpu_enabled": gpu_enabled,
-        "cudss_zero_copy": bool(operator._cudss_state.get("gpu_zero_copy", False)),
-        "gpu_device_index": device_index,
-        "gpu_name": torch.cuda.get_device_name(device_index) if device_index is not None else None,
-    }
+    forward_operator(forward).prepare(torch.as_tensor(np.exp(-full_log), dtype=FLOAT_DTYPE), include_solver_state=True)
+    return report
 
 
 def _exact_log_response_vjp(

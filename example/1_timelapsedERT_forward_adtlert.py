@@ -74,7 +74,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-electrodes", type=int, default=48)
     parser.add_argument("--relative-error", type=float, default=0.03)
     parser.add_argument("--topo-offset", type=float, default=0.0)
-    parser.add_argument("--linear-solver-backend", default="auto")
     parser.add_argument("--terrain-cache-dir", default=None)
     parser.add_argument("--skip-existing", action="store_true", help="Reuse existing .dat/.npz files.")
     parser.add_argument(
@@ -139,7 +138,6 @@ def main(argv: list[str] | None = None) -> int:
         topo_offset=args.topo_offset,
         relative_error=args.relative_error,
         overwrite=not args.skip_existing,
-        linear_solver_backend=args.linear_solver_backend,
         reuse_solver_state=args.reuse_solver_state,
         terrain_cache_dir=None if args.terrain_cache_dir is None else _resolve(root, args.terrain_cache_dir),
         prepare_forward=args.prepare_forward,
@@ -165,7 +163,6 @@ def main(argv: list[str] | None = None) -> int:
         "relative_error": float(args.relative_error),
         "geometry_file": str(geometry_file),
         "save_per_step": ".dat and .npz",
-        "linear_solver_backend": str(args.linear_solver_backend),
         "reuse_solver_state": bool(args.reuse_solver_state),
         "elapsed_sec": float(elapsed_sec),
         "elapsed_min": float(elapsed_sec / 60.0),

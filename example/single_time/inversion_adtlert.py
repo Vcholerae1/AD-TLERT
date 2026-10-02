@@ -319,7 +319,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-chi2", type=float, default=1.5)
     parser.add_argument("--max-log-step", type=float, default=None)
     parser.add_argument("--coverage-percentile", type=float, default=20.0)
-    parser.add_argument("--linear-solver-backend", default="auto")
     parser.add_argument("--terrain-cache-dir", default=None)
     parser.add_argument("--quiet", action="store_true", help="Disable progress output on stderr.")
     parser.add_argument("--no-plot", action="store_true")
@@ -373,7 +372,6 @@ def main(argv: list[str] | None = None) -> int:
         case.survey,
         case.parameter_cell_ids,
         regularization_mesh=case.mesh,
-        linear_solver_backend=args.linear_solver_backend,
         terrain_cache_dir=None if args.terrain_cache_dir is None else resolve(root, args.terrain_cache_dir),
     )
     petrophysical_parameter_dir = (
@@ -505,7 +503,6 @@ def main(argv: list[str] | None = None) -> int:
         "method": str(args.optimizer),
         "optimizer": str(args.optimizer),
         "linearized_solver": str(args.linearized_solver),
-        "forward_linear_solver_backend": str(args.linear_solver_backend),
         "lm_damping": float(args.lm_damping),
         "optimizer_max_step": float(args.optimizer_max_step),
         "lbfgs_history": int(args.lbfgs_history),

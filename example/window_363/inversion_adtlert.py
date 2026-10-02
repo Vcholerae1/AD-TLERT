@@ -549,7 +549,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--forward-refinement", choices=("native", "h2"), default="native")
-    parser.add_argument("--linear-solver-backend", default="auto")
     parser.add_argument("--normal-field-cache-max-entries", type=int, default=8)
     parser.add_argument("--terrain-cache-dir", default=None)
     parser.add_argument("--quiet", action="store_true", help="Disable progress output on stderr.")
@@ -622,7 +621,6 @@ def main(argv: list[str] | None = None) -> int:
         parameter_cell_ids,
         regularization_mesh=case.mesh,
         forward_cell_parameter_ids=forward_cell_parameter_ids,
-        linear_solver_backend=args.linear_solver_backend,
         normal_field_cache_max_entries=args.normal_field_cache_max_entries,
         terrain_cache_dir=None if args.terrain_cache_dir is None else resolve(root, args.terrain_cache_dir),
     )
@@ -847,7 +845,6 @@ def main(argv: list[str] | None = None) -> int:
         "method": str(args.optimizer),
         "optimizer": str(args.optimizer),
         "linearized_solver": str(args.linearized_solver),
-        "forward_linear_solver_backend": str(args.linear_solver_backend),
         "normal_field_cache_max_entries": int(args.normal_field_cache_max_entries),
         "lm_damping": float(args.lm_damping),
         "optimizer_max_step": float(args.optimizer_max_step),

@@ -21,8 +21,6 @@ from pathlib import Path
 import warnings
 
 import numpy as np
-import scipy.sparse as sp
-import scipy.sparse.linalg as spla
 from scipy.special import k0 as besselk0
 import torch
 
@@ -46,6 +44,7 @@ from adtlert.utils.dtypes import FLOAT_DTYPE, NP_FLOAT_DTYPE
 Tensor = torch.Tensor
 
 _TERRAIN_CACHE_VERSION = "terrain_auxiliary_v2"
+_CUDA = torch.device("cuda")
 _CUDSS_LOGGER = logging.getLogger("adtlert.cudss")
 _CUDSS_LOGGER.setLevel(logging.ERROR)
 
@@ -546,16 +545,6 @@ def _cudss_solver(matrices, rhs, *, spd: bool):
     return solver
 
 
-def _splu_solve(pattern: _SparsePattern, values: Tensor, rhs: Tensor) -> Tensor:
-    values_np = values.detach().cpu().numpy()
-    rhs_np = rhs.detach().cpu().numpy().astype(values_np.dtype, copy=False)
-    solution = np.empty(rhs_np.shape, dtype=values_np.dtype)
-    for index, (data, block) in enumerate(zip(values_np, rhs_np, strict=True)):
-        matrix = sp.csr_matrix((data, pattern.indices, pattern.indptr), shape=pattern.shape).tocsc()
-        solution[index] = spla.splu(matrix).solve(np.asfortranarray(block.T)).T
-    return torch.as_tensor(solution)
-
-
 _SENSITIVITY_KERNEL = r"""
 extern "C" __global__ void normal_sensitivity(
     const SCALAR* __restrict__ phi, const int* __restrict__ a, const int* __restrict__ b,
@@ -622,7 +611,6 @@ class ERTForward2p5D:
     numerical_h2_refined: bool
     numerical_p2_refined: bool
     topographic_geometric_factor_mode: str
-    linear_solver_backend: str
     terrain_cache_dir: Path | None
     normal_field_cache_max_entries: int = 8
     _cache: dict = field(default_factory=dict, init=False, repr=False)
@@ -638,11 +626,11 @@ class ERTForward2p5D:
         numerical_h2_refined: bool = True,
         numerical_p2_refined: bool = True,
         topographic_geometric_factor_mode: str = "analytic",
-        linear_solver_backend: str = "auto",
         terrain_cache_dir: str | Path | None = None,
         normal_field_cache_max_entries: int = 8,
     ) -> ERTForward2p5D:
-        backend = _choice(linear_solver_backend, ("auto", "cudss", "scipy"), "linear_solver_backend")
+        if not torch.cuda.is_available():
+            raise RuntimeError("ADTLERT requires an NVIDIA GPU with CUDA (cuDSS sparse solves)")
         gf_mode = _choice(topographic_geometric_factor_mode, ("analytic", "numerical"), "topographic_geometric_factor_mode")
         if int(normal_field_cache_max_entries) < 0:
             raise ValueError("normal_field_cache_max_entries must be non-negative")
@@ -686,7 +674,6 @@ class ERTForward2p5D:
             numerical_h2_refined=numerical_h2_refined,
             numerical_p2_refined=numerical_p2_refined,
             topographic_geometric_factor_mode=gf_mode,
-            linear_solver_backend=backend,
             terrain_cache_dir=_terrain_cache_dir(terrain_cache_dir),
             normal_field_cache_max_entries=int(normal_field_cache_max_entries),
         )
@@ -709,9 +696,9 @@ class ERTForward2p5D:
 
     @property
     def _device(self) -> torch.device:
-        """Device for dense adjoint contractions (the sparse solves run in their backend)."""
+        """Device of the dense adjoint contractions (fields are cached on the host)."""
 
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return _CUDA
 
     def _cached(self, key, compute):
         if key not in self._cache:
@@ -761,17 +748,6 @@ class ERTForward2p5D:
     # -- linear solves ------------------------------------------------------
 
     def _solve(self, d: _Discretization, values: Tensor, rhs: Tensor, *, refactorize: bool = True) -> Tensor:
-        if self.linear_solver_backend == "scipy":
-            return _splu_solve(d.pattern, values, rhs)
-        return self._solve_cudss(d, values, rhs, refactorize=refactorize)
-
-    def _to_cupy(self, tensor: Tensor):
-        cp, _ = _cupy()
-        tensor = tensor.to(self.dtype)
-        self._cudss_state["gpu_zero_copy"] = tensor.is_cuda
-        return cp.from_dlpack(tensor) if tensor.is_cuda else cp.asarray(tensor.numpy())
-
-    def _solve_cudss(self, d: _Discretization, values: Tensor, rhs: Tensor, *, refactorize: bool) -> Tensor:
         """Batched sparse solve ``A_b X_b = rhs_b``; plans are reused per pattern and RHS shape.
 
         Matrix buffers are refreshed in place, so the symbolic analysis survives across
@@ -779,7 +755,7 @@ class ERTForward2p5D:
         """
 
         cp, cupy_sparse = _cupy()
-        values_cp, rhs_cp = self._to_cupy(values), self._to_cupy(rhs)
+        values_cp, rhs_cp = (cp.from_dlpack(tensor.to(_CUDA, self.dtype).contiguous()) for tensor in (values, rhs))
         key = (d.name, tuple(rhs.shape))
         state = self._cudss_state.get(key)
         if state is None:
@@ -791,7 +767,6 @@ class ERTForward2p5D:
             state = {"data": data, "matrices": matrices, "rhs": rhs_buffer, "rhs_view": rhs_view}
             state["solver"] = _cudss_solver(matrices, rhs_view, spd=d.spd)
             self._cudss_state[key] = state
-            self._cudss_state["gpu_enabled"] = True
             refactorize = True
         else:
             for buffer, value in zip(state["data"], values_cp, strict=True):
@@ -801,9 +776,7 @@ class ERTForward2p5D:
         if refactorize:
             state["solver"].factorize()
         solution = cp.ascontiguousarray(state["solver"].solve().transpose((0, 2, 1)))
-        if self._cudss_state["gpu_zero_copy"]:
-            return torch.from_dlpack(solution).clone()
-        return torch.as_tensor(cp.asnumpy(solution))
+        return torch.from_dlpack(solution).to(rhs.device, copy=True)
 
     # -- primary fields and terrain caches ----------------------------------
 
@@ -1266,7 +1239,7 @@ class ERTForward2p5D:
         rows = []
         for start in range(0, self.survey.measurement_count, batch_size):
             chunk = slice(start, start + batch_size)
-            if device.type == "cuda" and cell_dofs.shape[1] == 3:
+            if cell_dofs.shape[1] == 3:
                 rows.append(self._normal_jacobian_cuda(phi, a[chunk], b[chunk], m[chunk], n[chunk], cell_dofs, columns, templates, count))
                 continue
             current = (phi[:, a[chunk]] - phi[:, b[chunk]])[..., cell_dofs]
@@ -1375,7 +1348,7 @@ class ERTForward2p5D:
         """Drop cached fields and release cuDSS solver resources."""
 
         self._field_cache.clear()
-        for key in [key for key in self._cudss_state if isinstance(key, tuple)]:
+        for key in list(self._cudss_state):
             try:
                 self._cudss_state.pop(key)["solver"].free()
             except Exception:  # best-effort release during teardown

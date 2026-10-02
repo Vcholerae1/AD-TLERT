@@ -145,7 +145,6 @@ def build_inr_forward(
     mesh_max_cell_area: float = 100.0,
     mesh_smoothing_iterations: int = 10,
     forward_refinement: str = "native",
-    linear_solver_backend: str = "cudss",
     normal_field_cache_max_entries: int = 8,
 ) -> INRForwardBundle:
     """Build the shared independent inversion mesh and GPU forward facade."""
@@ -175,7 +174,6 @@ def build_inr_forward(
         parameter_ids,
         regularization_mesh=case.mesh,
         forward_cell_parameter_ids=forward_parameter_ids,
-        linear_solver_backend=linear_solver_backend,
         normal_field_cache_max_entries=normal_field_cache_max_entries,
     )
     return INRForwardBundle(

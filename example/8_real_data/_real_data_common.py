@@ -267,13 +267,12 @@ def build_real_inversion_case(
     )
 
 
-def build_parameterized_forward(case, *, linear_solver_backend: str, terrain_cache_dir: Path | None = None):
+def build_parameterized_forward(case, *, terrain_cache_dir: Path | None = None):
     return ParameterizedERTForward2p5D.from_mesh_survey(
         case.forward_mesh,
         case.survey,
         case.parameter_cell_ids,
         regularization_mesh=case.mesh,
-        linear_solver_backend=linear_solver_backend,
         terrain_cache_dir=terrain_cache_dir,
     )
 

@@ -135,7 +135,6 @@ class ERTForwardModeling:
     numerical_h2_refined: bool = True
     numerical_p2_refined: bool = True
     topographic_geometric_factor_mode: str = "analytic"
-    linear_solver_backend: str = "auto"
     terrain_cache_dir: str | Path | None = None
     include_robin_boundary_derivative: bool = False
     normal_sensitivity: bool = True
@@ -190,7 +189,6 @@ class ERTForwardModeling:
                     survey,
                     boundary_mode=self.boundary_mode_3d,
                     singularity_removal=self.singularity_removal_3d,
-                    linear_solver_backend=self.linear_solver_backend,
                     element_order=self.element_order_3d,
                     geometric_factor_mode=self.geometric_factor_mode_3d,
                 )
@@ -202,7 +200,6 @@ class ERTForwardModeling:
                     numerical_h2_refined=self.numerical_h2_refined,
                     numerical_p2_refined=self.numerical_p2_refined,
                     topographic_geometric_factor_mode=self.topographic_geometric_factor_mode,
-                    linear_solver_backend=self.linear_solver_backend,
                     terrain_cache_dir=self.terrain_cache_dir,
                 )
         return self._forward
@@ -280,7 +277,6 @@ class MappedERTForwardModeling:
     numerical_h2_refined: bool = True
     numerical_p2_refined: bool = True
     topographic_geometric_factor_mode: str = "analytic"
-    linear_solver_backend: str = "auto"
     terrain_cache_dir: str | Path | None = None
     include_robin_boundary_derivative: bool = False
     normal_sensitivity: bool = True

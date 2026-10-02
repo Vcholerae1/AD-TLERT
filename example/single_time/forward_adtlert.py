@@ -49,7 +49,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-electrodes", type=int, default=48)
     parser.add_argument("--relative-error", type=float, default=0.03)
     parser.add_argument("--topo-offset", type=float, default=0.0)
-    parser.add_argument("--linear-solver-backend", default="auto")
     parser.add_argument("--terrain-cache-dir", default=None)
     parser.add_argument("--no-plot", action="store_true", help="Do not save the PNG preview.")
     return parser
@@ -78,7 +77,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     rhoa = run_terrain_forward(
         case,
-        linear_solver_backend=args.linear_solver_backend,
         terrain_cache_dir=None if args.terrain_cache_dir is None else resolve(root, args.terrain_cache_dir),
     )
 
