@@ -37,6 +37,18 @@ PFB files and build Triangle inversion meshes:
 uv sync --extra examples
 ```
 
+## Tests
+
+```bash
+uv run pytest            # CPU-only tests plus, on a CUDA machine, the GPU tests
+uv run pytest -m "not gpu"
+```
+
+The suite checks mesh/FEM building blocks, adjoint consistency (dot tests), the exact Jacobian
+against finite differences and the resistivity-scaling identity, the Triton sensitivity kernel
+against an einsum reference (bitwise identical across autotune configurations), deterministic
+reductions, the inversion loops, and the implicit-neural-representation training.
+
 ## Core Forward API
 
 ```python

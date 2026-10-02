@@ -28,27 +28,61 @@ def _csr(indptr, indices, values, size) -> Tensor:
 class GroupSum:
     """Deterministic ``out[g] = sum_{i: groups[i] = g} x[i]`` along the last axis.
 
-    Entries with a negative group are dropped.
+    Entries with a negative group are dropped. The sum is a fixed tree: each group's entries
+    are laid out in padded blocks, reduced with a plain ``sum`` over a fixed axis, and the
+    block sums are reduced the same way until one value per group remains. Only gathers and
+    fixed-shape reductions are involved, so results are bitwise repeatable for any group
+    size (cuSPARSE and atomics are not).
     """
 
-    def __init__(self, groups: np.ndarray, count: int, device: torch.device):
+    def __init__(
+        self, groups: np.ndarray, count: int, device: torch.device, block: int = 64
+    ):
         groups = np.asarray(groups, dtype=np.int64)
-        kept = np.flatnonzero(groups >= 0)
-        order = kept[np.argsort(groups[kept], kind="stable")]
-        indptr = np.concatenate(
-            ([0], np.cumsum(np.bincount(groups[kept], minlength=count)))
-        )
-        self.size = (int(count), int(groups.size))
-        self._indptr = torch.as_tensor(indptr, device=device)
-        self._indices = torch.as_tensor(order, device=device)
-        self._matrices: dict[torch.dtype, Tensor] = {}
+        self.count = int(count)
+        entries = np.flatnonzero(
+            groups >= 0
+        )  # indices into the input of the current level
+        owner = groups[entries]
+        n_inputs = groups.size
+        self._levels: list[Tensor] = []
+        while True:
+            order = np.argsort(owner, kind="stable")
+            entries, owner = entries[order], owner[order]
+            sizes = np.bincount(owner, minlength=self.count)
+            width = int(
+                min(block, 1 << max(int(sizes.max(initial=1)) - 1, 0).bit_length())
+            )
+            blocks = -(-sizes // width)
+            block_owner = np.repeat(np.arange(self.count), blocks)
+            starts = np.cumsum(sizes) - sizes
+            within = (
+                np.arange(block_owner.size) - (np.cumsum(blocks) - blocks)[block_owner]
+            )
+            position = (
+                starts[block_owner][:, None]
+                + within[:, None] * width
+                + np.arange(width)[None, :]
+            )
+            valid = position < (starts + sizes)[block_owner][:, None]
+            index = np.where(
+                valid, entries[np.minimum(position, max(entries.size - 1, 0))], n_inputs
+            )
+            self._levels.append(
+                torch.as_tensor(index, device=device)
+            )  # n_inputs is the zero pad
+            if blocks.max(initial=0) <= 1:
+                break
+            n_inputs = block_owner.size
+            entries, owner = np.arange(n_inputs), block_owner
+        self._target = torch.as_tensor(block_owner, device=device)
 
     def __call__(self, x: Tensor) -> Tensor:
-        if x.dtype not in self._matrices:
-            ones = torch.ones(self._indices.numel(), dtype=x.dtype, device=x.device)
-            self._matrices[x.dtype] = _csr(self._indptr, self._indices, ones, self.size)
-        flat = x.reshape(-1, x.shape[-1]).T
-        return (self._matrices[x.dtype] @ flat).T.reshape(*x.shape[:-1], self.size[0])
+        for level in self._levels:
+            padded = torch.cat((x, x.new_zeros(*x.shape[:-1], 1)), dim=-1)
+            x = padded[..., level].sum(dim=-1)
+        out = x.new_zeros(*x.shape[:-1], self.count)
+        return out.index_copy_(x.ndim - 1, self._target, x)
 
 
 def sampled_products(

@@ -67,12 +67,18 @@ dev = [
     "pytest>=8.4.2",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["gpu: needs an NVIDIA GPU (cuDSS, Triton); skipped automatically without one"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["adtlert"]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "/adtlert",
+    "/tests",
     "/LICENSE",
     "/README.md",
     "/pyproject.toml",
