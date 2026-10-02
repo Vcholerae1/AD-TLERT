@@ -62,26 +62,17 @@ class MultiscaleFourierEncoder(nn.Module):
         self.spatial_levels = int(spatial_levels if input_dimensions >= 2 else 0)
         self.temporal_levels = int(temporal_levels if input_dimensions in (1, 3) else 0)
         self.frequency_spacing = str(frequency_spacing)
-        self.register_buffer(
-            "spatial_frequencies",
-            fourier_frequency_bank(self.spatial_levels, self.frequency_spacing),
-            persistent=True,
-        )
-        self.register_buffer(
-            "temporal_frequencies",
-            fourier_frequency_bank(self.temporal_levels, self.frequency_spacing),
-            persistent=True,
-        )
-        self.register_buffer(
-            "spatial_level_weights",
-            torch.ones(self.spatial_levels, dtype=torch.float32),
-            persistent=True,
-        )
-        self.register_buffer(
-            "temporal_level_weights",
-            torch.ones(self.temporal_levels, dtype=torch.float32),
-            persistent=True,
-        )
+        for name, levels in (
+            ("spatial", self.spatial_levels),
+            ("temporal", self.temporal_levels),
+        ):
+            frequencies = fourier_frequency_bank(levels, self.frequency_spacing)
+            self.register_buffer(f"{name}_frequencies", frequencies, persistent=True)
+            self.register_buffer(
+                f"{name}_level_weights",
+                torch.ones(levels, dtype=torch.float32),
+                persistent=True,
+            )
 
     @property
     def output_dimensions(self) -> int:
@@ -221,6 +212,9 @@ class _BoundedLogResistivity(nn.Module):
         buffer("log_upper_bound", log_upper)
         buffer("initial_logit", initial_logit)
 
+    def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
+        return self.forward_encoded(self.encode(coordinates))
+
     def _output(self, residual: torch.Tensor) -> torch.Tensor:
         if not self.bounded_output:
             return self.initial_log_resistivity + residual
@@ -310,9 +304,6 @@ class MultiscaleINR(_BoundedLogResistivity):
             dtype=encoded_coordinates.dtype, device=encoded_coordinates.device
         )
         return self._output(self.mlp(encoded_coordinates * feature_mask).squeeze(-1))
-
-    def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
-        return self.forward_encoded(self.encode(coordinates))
 
 
 class JointSpatioTemporalINR(MultiscaleINR):
@@ -448,9 +439,6 @@ class DualNetworkINR(_BoundedLogResistivity):
         spatial_mask = torch.sigmoid(self.spatial_mlp(spatial_features).squeeze(-1))
         temporal_amplitude = self.temporal_mlp(temporal_features).squeeze(-1)
         return self._output(temporal_amplitude[:, None] * spatial_mask[None, :])
-
-    def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
-        return self.forward_encoded(self.encode(coordinates))
 
 
 __all__ = [

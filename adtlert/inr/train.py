@@ -1,9 +1,13 @@
-"""Fast GPU training loops for physics-coupled implicit ERT inversion."""
+"""Training of coordinate networks against ERT data through the differentiable physics.
+
+One loop serves single surveys and time series: a single survey is a series of length one.
+"""
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -12,7 +16,7 @@ import torch
 
 from adtlert.inr.networks import MultiscaleINR
 from adtlert.inr.physics import (
-    matrix_free_log_rhoa,
+    forward_operator,
     matrix_free_log_rhoa_series,
     prepare_cuda_forward,
     select_cuda_device,
@@ -24,6 +28,13 @@ from adtlert.inversion.regularization import (
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 PenaltyCallback = Callable[[torch.Tensor, int], torch.Tensor]
+
+_OPTIMIZERS = {
+    "adam": torch.optim.Adam,
+    "adamw": torch.optim.AdamW,
+    "radam": torch.optim.RAdam,
+}
+_SCHEDULERS = ("multistep", "plateau", "none")
 
 
 @dataclass(frozen=True)
@@ -59,64 +70,41 @@ class INRConfig:
     progress_callback: ProgressCallback | None = field(
         default=None, repr=False, compare=False
     )
-    # Weighted scalar added to the objective; receives the full log-resistivity model and the iteration.
+    # Added to the objective; receives the network output (log resistivity) and the iteration.
     extra_penalty: PenaltyCallback | None = field(
         default=None, repr=False, compare=False
     )
 
     def validate(self) -> None:
-        if self.max_iterations < 1:
-            raise ValueError("max_iterations must be >= 1")
-        if self.learning_rate <= 0.0:
-            raise ValueError("learning_rate must be positive")
-        if self.optimizer not in {"adam", "adamw", "radam"}:
-            raise ValueError("optimizer must be 'adam', 'adamw', or 'radam'")
-        if self.scheduler not in {"multistep", "plateau", "none"}:
-            raise ValueError("scheduler must be 'multistep', 'plateau', or 'none'")
-        if any(step < 1 for step in self.learning_rate_milestones):
-            raise ValueError(
-                "learning_rate_milestones must contain positive iterations"
-            )
-        if (
-            tuple(sorted(set(self.learning_rate_milestones)))
-            != self.learning_rate_milestones
-        ):
-            raise ValueError("learning_rate_milestones must be strictly increasing")
-        if self.target_chi2 is not None and self.target_chi2 <= 0.0:
-            raise ValueError("target_chi2 must be positive")
-        if self.gradient_clip_norm is not None and self.gradient_clip_norm <= 0.0:
-            raise ValueError("gradient_clip_norm must be positive when set")
-        if self.weight_decay < 0.0:
-            raise ValueError("weight_decay must be non-negative")
-        if self.plateau_patience < 1:
-            raise ValueError("plateau_patience must be >= 1")
-        if not (0.0 < self.plateau_factor < 1.0):
-            raise ValueError("plateau_factor must be in (0, 1)")
-        if not (0.0 < self.minimum_learning_rate <= self.learning_rate):
-            raise ValueError(
-                "minimum_learning_rate must be positive and <= learning_rate"
-            )
-        if self.log_every < 1:
-            raise ValueError("log_every must be >= 1")
-        if self.progressive_full_iteration < 1:
-            raise ValueError("progressive_full_iteration must be >= 1")
-        if (
-            self.progressive_spatial_start_levels < 0
-            or self.progressive_temporal_start_levels < 0
-        ):
-            raise ValueError("progressive start levels must be non-negative")
-        if self.spatial_regularization < 0.0 or self.temporal_regularization < 0.0:
-            raise ValueError("regularization strengths must be non-negative")
-        if self.regularization_huber_delta <= 0.0:
-            raise ValueError("regularization_huber_delta must be positive")
-        if self.time_window_size is not None and self.time_window_size < 1:
-            raise ValueError("time_window_size must be positive when set")
-        if self.time_window_step < 1:
-            raise ValueError("time_window_step must be positive")
-        if self.full_evaluation_interval < 1:
-            raise ValueError("full_evaluation_interval must be positive")
-        if self.snapshot_interval is not None and self.snapshot_interval < 1:
-            raise ValueError("snapshot_interval must be positive when set")
+        def optional_positive(value):
+            return value is None or value > 0
+
+        checks = (
+            (self.max_iterations >= 1, "max_iterations must be >= 1"),
+            (self.learning_rate > 0.0, "learning_rate must be positive"),
+            (self.optimizer in _OPTIMIZERS, "optimizer must be 'adam', 'adamw', or 'radam'"),
+            (self.scheduler in _SCHEDULERS, "scheduler must be 'multistep', 'plateau', or 'none'"),
+            (all(step >= 1 for step in self.learning_rate_milestones), "learning_rate_milestones must contain positive iterations"),
+            (tuple(sorted(set(self.learning_rate_milestones))) == self.learning_rate_milestones, "learning_rate_milestones must be strictly increasing"),
+            (optional_positive(self.target_chi2), "target_chi2 must be positive"),
+            (optional_positive(self.gradient_clip_norm), "gradient_clip_norm must be positive when set"),
+            (self.weight_decay >= 0.0, "weight_decay must be non-negative"),
+            (self.plateau_patience >= 1, "plateau_patience must be >= 1"),
+            (0.0 < self.plateau_factor < 1.0, "plateau_factor must be in (0, 1)"),
+            (0.0 < self.minimum_learning_rate <= self.learning_rate, "minimum_learning_rate must be positive and <= learning_rate"),
+            (self.log_every >= 1, "log_every must be >= 1"),
+            (self.progressive_full_iteration >= 1, "progressive_full_iteration must be >= 1"),
+            (self.progressive_spatial_start_levels >= 0 and self.progressive_temporal_start_levels >= 0, "progressive start levels must be non-negative"),
+            (self.spatial_regularization >= 0.0 and self.temporal_regularization >= 0.0, "regularization strengths must be non-negative"),
+            (self.regularization_huber_delta > 0.0, "regularization_huber_delta must be positive"),
+            (optional_positive(self.time_window_size), "time_window_size must be positive when set"),
+            (self.time_window_step >= 1, "time_window_step must be positive"),
+            (self.full_evaluation_interval >= 1, "full_evaluation_interval must be positive"),
+            (optional_positive(self.snapshot_interval), "snapshot_interval must be positive when set"),
+        )  # fmt: skip
+        for valid, message in checks:
+            if not valid:
+                raise ValueError(message)
 
 
 @dataclass(frozen=True)
@@ -153,63 +141,38 @@ class INRResult:
     physics_vjp_timesteps: int
 
 
-def _build_optimizer(
-    config: INRConfig, network: torch.nn.Module
-) -> torch.optim.Optimizer:
-    """Build a one-forward/one-VJP optimizer suitable for expensive ERT physics."""
-
-    kwargs = {
-        "lr": float(config.learning_rate),
-        "weight_decay": float(config.weight_decay),
-    }
-    if config.optimizer == "radam":
-        return torch.optim.RAdam(network.parameters(), **kwargs)
-    if config.optimizer == "adamw":
-        return torch.optim.AdamW(network.parameters(), **kwargs)
-    return torch.optim.Adam(network.parameters(), **kwargs)
-
-
-def _build_scheduler(
-    config: INRConfig,
-    optimizer: torch.optim.Optimizer,
-) -> (
-    torch.optim.lr_scheduler.LRScheduler
-    | torch.optim.lr_scheduler.ReduceLROnPlateau
-    | None
-):
-    if config.scheduler == "none":
-        return None
+def _scheduler(config: INRConfig, optimizer: torch.optim.Optimizer):
     if config.scheduler == "multistep":
         return torch.optim.lr_scheduler.MultiStepLR(
             optimizer,
             milestones=list(config.learning_rate_milestones),
-            gamma=float(config.plateau_factor),
+            gamma=config.plateau_factor,
         )
-    return torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="min",
-        factor=float(config.plateau_factor),
-        patience=int(config.plateau_patience),
-        min_lr=float(config.minimum_learning_rate),
-    )
+    if config.scheduler == "plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=config.plateau_factor,
+            patience=config.plateau_patience,
+            min_lr=config.minimum_learning_rate,
+        )
+    return None
 
 
-def _validated_data(
-    observed_rhoa: np.ndarray,
-    data_std: float | np.ndarray,
-    *,
-    device: torch.device,
+def _log_data(
+    observed_rhoa, data_std, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    observed = np.asarray(observed_rhoa, dtype=np.float32)
+    """``(log observed, std)`` as float32 device tensors of shape ``(T, D)`` (1D input -> ``T = 1``)."""
+
+    observed = np.atleast_2d(np.asarray(observed_rhoa, dtype=np.float32))
     if (
-        observed.ndim not in (1, 2)
+        observed.ndim != 2
         or not np.all(np.isfinite(observed))
         or np.any(observed <= 0.0)
     ):
         raise ValueError("observed_rhoa must be a finite positive 1D or 2D array")
-    std = np.asarray(data_std, dtype=np.float32)
     try:
-        std = np.broadcast_to(std, observed.shape).copy()
+        std = np.broadcast_to(np.asarray(data_std, dtype=np.float32), observed.shape)
     except ValueError as exc:
         raise ValueError(
             f"data_std cannot broadcast to observed shape {observed.shape}"
@@ -217,18 +180,9 @@ def _validated_data(
     if not np.all(np.isfinite(std)) or np.any(std <= 0.0):
         raise ValueError("data_std must contain positive finite values")
     return (
-        torch.as_tensor(np.log(observed), device=device, dtype=torch.float32),
-        torch.as_tensor(std, device=device, dtype=torch.float32),
+        torch.as_tensor(np.log(observed), device=device),
+        torch.as_tensor(np.ascontiguousarray(std), device=device),
     )
-
-
-def _emit(config: INRConfig, event: str, **payload: Any) -> None:
-    if config.progress_callback is not None:
-        config.progress_callback({"event": event, **payload})
-
-
-def _synchronize(device: torch.device) -> None:
-    torch.cuda.synchronize(device)
 
 
 def _spatial_operator(
@@ -251,180 +205,118 @@ def _spatial_operator(
 def _huber_mean(values: torch.Tensor, delta: float) -> torch.Tensor:
     if values.numel() == 0:
         return values.sum()
-    absolute = torch.abs(values)
-    delta_t = torch.as_tensor(delta, dtype=values.dtype, device=values.device)
-    return torch.mean(
-        torch.where(
-            absolute <= delta_t,
-            0.5 * values.square() / delta_t,
-            absolute - 0.5 * delta_t,
-        )
+    magnitude = values.abs()
+    return torch.where(
+        magnitude <= delta, 0.5 * values.square() / delta, magnitude - 0.5 * delta
+    ).mean()
+
+
+def _misfit(prediction, observed, std, weights) -> tuple[torch.Tensor, torch.Tensor]:
+    """Weighted ``(chi2, rms %)`` of log-data residuals; ``weights`` has one entry per timestep."""
+
+    difference = prediction - observed
+    norm = difference.shape[1] * weights.sum()
+    chi2 = ((difference / std).square() * weights[:, None]).sum() / norm
+    rms = 100.0 * torch.sqrt(
+        (torch.expm1(difference).square() * weights[:, None]).sum() / norm
     )
+    return chi2, rms
 
 
-def _detach_encoded(encoded: Any) -> Any:
+def _detach(encoded: Any) -> Any:
     if isinstance(encoded, torch.Tensor):
         return encoded.detach()
     if isinstance(encoded, tuple):
-        return tuple(_detach_encoded(value) for value in encoded)
+        return tuple(_detach(value) for value in encoded)
     raise TypeError("network.encode must return a Tensor or tuple of Tensors")
 
 
-def _window_schedule(
-    n_times: int, size: int, step: int
-) -> tuple[list[np.ndarray], np.ndarray]:
-    size = min(int(size), n_times)
-    starts = list(range(0, max(n_times - size + 1, 1), int(step)))
-    final_start = n_times - size
-    if starts[-1] != final_start:
-        starts.append(final_start)
-    windows = [np.arange(start, start + size, dtype=np.int64) for start in starts]
-    coverage = np.zeros(n_times, dtype=np.int64)
-    for indices in windows:
-        coverage[indices] += 1
-    if np.any(coverage == 0):
-        raise ValueError(
-            "time windows do not cover every timestep; reduce time_window_step"
-        )
-    return windows, coverage
+class _Schedule:
+    """Which timesteps enter each physics call.
 
+    Without windows every call uses all steps. With windows (``time_window_size`` below the
+    number of steps) calls cycle through overlapping windows, optionally alternating
+    direction each cycle; each step's loss is weighted by ``1 / (number of windows covering it)``.
+    """
 
-def _fit(
-    *,
-    forward: Any,
-    network: torch.nn.Module,
-    coordinates: np.ndarray,
-    observed_rhoa: np.ndarray,
-    data_std: float | np.ndarray,
-    config: INRConfig,
-    series: bool,
-) -> INRResult:
-    config.validate()
-    device = torch.device(config.device)
-    gpu_report = select_cuda_device(device)
-
-    network = network.to(device=device, dtype=torch.float32)
-    coordinate_values = np.asarray(coordinates, dtype=np.float32)
-    expected_ndim = 3 if series else 2
-    if (
-        coordinate_values.ndim != expected_ndim
-        or coordinate_values.shape[-1] != network.input_dimensions
-    ):
-        raise ValueError(
-            f"coordinates must have {expected_ndim} dimensions and end with {network.input_dimensions} features"
-        )
-    coordinates_t = torch.as_tensor(
-        coordinate_values, device=device, dtype=torch.float32
-    )
-    with torch.no_grad():
-        if config.progressive_encoding:
-            network.set_progressive_levels(
-                0.0,
-                spatial_start_levels=config.progressive_spatial_start_levels,
-                temporal_start_levels=config.progressive_temporal_start_levels,
+    def __init__(self, n_times: int, config: INRConfig, device: torch.device):
+        size = config.time_window_size
+        self.windowed = size is not None and size < n_times
+        self.alternate = config.alternate_window_direction
+        self.device = device
+        if self.windowed:
+            size = min(int(size), n_times)
+            starts = list(range(0, max(n_times - size + 1, 1), config.time_window_step))
+            if starts[-1] != n_times - size:
+                starts.append(n_times - size)
+            self.windows = [np.arange(start, start + size) for start in starts]
+            coverage = np.zeros(n_times, dtype=np.int64)
+            for window in self.windows:
+                coverage[window] += 1
+            if np.any(coverage == 0):
+                raise ValueError(
+                    "time windows do not cover every timestep; reduce time_window_step"
+                )
+        else:
+            self.windows, coverage = (
+                [np.arange(n_times)],
+                np.ones(n_times, dtype=np.int64),
             )
-        encoded = _detach_encoded(network.encode(coordinates_t))
-        initial_log = network.forward_encoded(encoded)
-
-    observed_log, std = _validated_data(observed_rhoa, data_std, device=device)
-    expected_model_shape = tuple(coordinate_values.shape[:-1])
-    if tuple(initial_log.shape) != expected_model_shape:
-        raise ValueError(
-            f"network model shape {tuple(initial_log.shape)} does not match {expected_model_shape}"
-        )
-    forward_cell_count = getattr(forward, "cell_count", None)
-    if forward_cell_count is not None and expected_model_shape[-1] != int(
-        forward_cell_count
-    ):
-        raise ValueError(
-            f"coordinates describe {expected_model_shape[-1]} cells, but forward expects {int(forward_cell_count)}"
-        )
-    expected_data_ndim = 2 if series else 1
-    if observed_log.ndim != expected_data_ndim:
-        raise ValueError(
-            f"observed_rhoa must be {expected_data_ndim}D for this training mode"
-        )
-    if series and observed_log.shape[0] != expected_model_shape[0]:
-        raise ValueError(
-            "observed_rhoa timestep count must match spatiotemporal coordinates"
-        )
-    if not series and config.time_window_size is not None:
-        raise ValueError("time_window_size is only valid for time-lapse inversion")
-    n_times = expected_model_shape[0] if series else 1
-    windowed = bool(
-        series
-        and config.time_window_size is not None
-        and config.time_window_size < n_times
-    )
-    if windowed:
-        windows, window_coverage = _window_schedule(
-            n_times,
-            int(config.time_window_size),
-            int(config.time_window_step),
-        )
-        inverse_window_coverage = torch.as_tensor(
-            1.0 / window_coverage,
-            device=device,
-            dtype=torch.float32,
-        )
-    else:
-        windows = [np.arange(n_times, dtype=np.int64)]
-        inverse_window_coverage = torch.ones(
-            n_times, device=device, dtype=torch.float32
-        )
-    # The VJP reuses forward fields from the operator LRU; a cache smaller than one
-    # forward/VJP batch evicts them and silently re-solves every forward in backward.
-    operator = getattr(forward, "forward_operator", forward)
-    cache_entries = getattr(operator, "normal_field_cache_max_entries", None)
-    batch_timesteps = max(int(window.size) for window in windows)
-    if cache_entries is not None and int(cache_entries) < batch_timesteps:
-        raise ValueError(
-            f"normal_field_cache_max_entries={int(cache_entries)} is smaller than the {batch_timesteps} "
-            "timesteps per forward/VJP batch; set it to at least that value when building the forward"
-        )
-    survey = getattr(forward, "survey", None)
-    measurement_count = getattr(survey, "measurement_count", None)
-    if measurement_count is not None and observed_log.shape[-1] != int(
-        measurement_count
-    ):
-        raise ValueError(
-            f"observed_rhoa has {observed_log.shape[-1]} measurements, but survey expects {int(measurement_count)}"
+        self.weights = torch.as_tensor(
+            1.0 / coverage, dtype=torch.float32, device=device
         )
 
-    if config.prepare_solver:
-        preparation_model = (
-            initial_log.detach().to(device="cpu", dtype=torch.float64).numpy()
-        )
-        if series:
-            preparation_model = preparation_model[0]
-        prepare_cuda_forward(forward, preparation_model, device=device)
+    @property
+    def batch_size(self) -> int:
+        return max(window.size for window in self.windows)
 
-    optimizer = _build_optimizer(config, network)
-    scheduler = _build_scheduler(config, optimizer)
-    physics = matrix_free_log_rhoa_series if series else matrix_free_log_rhoa
-    spatial_operator = None
-    if config.spatial_regularization > 0.0:
-        spatial_operator = _spatial_operator(forward, expected_model_shape[-1], device)
-    chi2_history: list[float] = []
-    rms_history: list[float] = []
-    objective_history: list[float] = []
-    spatial_penalty_history: list[float] = []
-    temporal_penalty_history: list[float] = []
-    extra_penalty_history: list[float] = []
-    full_chi2_iterations: list[int] = []
-    full_chi2_history: list[float] = []
-    best: dict[str, Any] = {"chi2": float("inf"), "iteration": 0}
+    def window(self, iteration: int) -> np.ndarray:
+        cycle, position = divmod(iteration, len(self.windows))
+        return self.windows[
+            len(self.windows) - 1 - position
+            if self.alternate and cycle % 2
+            else position
+        ]
+
+    def rows(self, window: np.ndarray) -> torch.Tensor | slice:
+        return (
+            torch.as_tensor(window, device=self.device)
+            if self.windowed
+            else slice(None)
+        )
+
+
+class _Recorder:
+    """Per-iteration histories, phase timers, and the best full-data model."""
+
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.series: dict[str, list[float]] = {
+            name: []
+            for name in ("chi2", "rms", "objective", "spatial", "temporal", "extra")
+        }
+        self.full_iterations: list[int] = []
+        self.full_chi2: list[float] = []
+        self.best: dict[str, Any] = {"chi2": float("inf"), "iteration": 0}
+        self.seconds = {"forward": 0.0, "backward": 0.0, "optimizer": 0.0}
+        self.timesteps = {"forward": 0, "vjp": 0}
+
+    @contextmanager
+    def timed(self, phase: str):
+        torch.cuda.synchronize(self.device)
+        started = time.perf_counter()
+        yield
+        torch.cuda.synchronize(self.device)
+        self.seconds[phase] += time.perf_counter() - started
 
     def remember(
-        iteration: int, chi2_value: float, model: torch.Tensor, prediction: torch.Tensor
+        self, iteration: int, chi2: float, model, prediction, network: torch.nn.Module
     ) -> None:
-        """Record a full-data chi-square; keep the best model, prediction, and network state."""
-
-        full_chi2_iterations.append(iteration)
-        full_chi2_history.append(chi2_value)
-        if chi2_value < best["chi2"]:
-            best.update(
-                chi2=chi2_value,
+        self.full_iterations.append(iteration)
+        self.full_chi2.append(chi2)
+        if chi2 < self.best["chi2"]:
+            self.best.update(
+                chi2=chi2,
                 iteration=iteration,
                 model=model.detach().clone(),
                 prediction=prediction.detach().clone(),
@@ -434,14 +326,147 @@ def _fit(
                 },
             )
 
-    stop_reason = "max_iterations"
-    forward_seconds = 0.0
-    backward_seconds = 0.0
-    optimizer_seconds = 0.0
-    physics_forward_timesteps = 0
-    physics_vjp_timesteps = 0
 
-    _synchronize(device)
+@dataclass
+class _Problem:
+    forward: Any
+    network: torch.nn.Module
+    encoded: Any
+    observed: torch.Tensor
+    std: torch.Tensor
+    schedule: _Schedule
+    series: bool
+    spatial_operator: torch.Tensor | None
+
+    @property
+    def n_times(self) -> int:
+        return self.observed.shape[0]
+
+
+def _prepare(
+    forward, network, coordinates, observed_rhoa, data_std, config, series: bool, device
+) -> _Problem:
+    """Validate the inputs and precompute everything that is fixed during training."""
+
+    network = network.to(device=device, dtype=torch.float32)
+    coordinates = np.asarray(coordinates, dtype=np.float32)
+    expected_ndim = 3 if series else 2
+    if (
+        coordinates.ndim != expected_ndim
+        or coordinates.shape[-1] != network.input_dimensions
+    ):
+        raise ValueError(
+            f"coordinates must have {expected_ndim} dimensions and end with {network.input_dimensions} features"
+        )
+    if not series and config.time_window_size is not None:
+        raise ValueError("time_window_size is only valid for time-lapse inversion")
+    if np.ndim(observed_rhoa) != (2 if series else 1):
+        raise ValueError(
+            f"observed_rhoa must be {2 if series else 1}D for this training mode"
+        )
+
+    with torch.no_grad():
+        if config.progressive_encoding:
+            network.set_progressive_levels(
+                0.0,
+                spatial_start_levels=config.progressive_spatial_start_levels,
+                temporal_start_levels=config.progressive_temporal_start_levels,
+            )
+        encoded = _detach(network.encode(torch.as_tensor(coordinates, device=device)))
+        initial_model = network.forward_encoded(encoded)
+    model_shape = tuple(coordinates.shape[:-1])
+    if tuple(initial_model.shape) != model_shape:
+        raise ValueError(
+            f"network model shape {tuple(initial_model.shape)} does not match {model_shape}"
+        )
+    cell_count = getattr(forward, "cell_count", None)
+    if cell_count is not None and model_shape[-1] != int(cell_count):
+        raise ValueError(
+            f"coordinates describe {model_shape[-1]} cells, but forward expects {int(cell_count)}"
+        )
+
+    observed, std = _log_data(observed_rhoa, data_std, device)
+    n_times = model_shape[0] if series else 1
+    if observed.shape[0] != n_times:
+        raise ValueError(
+            "observed_rhoa timestep count must match spatiotemporal coordinates"
+        )
+    measurements = getattr(getattr(forward, "survey", None), "measurement_count", None)
+    if measurements is not None and observed.shape[1] != int(measurements):
+        raise ValueError(
+            f"observed_rhoa has {observed.shape[1]} measurements, but survey expects {int(measurements)}"
+        )
+
+    schedule = _Schedule(n_times, config, device)
+    # The VJP reuses forward fields from the operator's LRU cache; one smaller than a
+    # forward/VJP batch evicts them and silently re-solves every forward during backward.
+    entries = getattr(forward_operator(forward), "normal_field_cache_max_entries", None)
+    if entries is not None and int(entries) < schedule.batch_size:
+        raise ValueError(
+            f"normal_field_cache_max_entries={int(entries)} is smaller than the {schedule.batch_size} timesteps "
+            "per forward/VJP batch; set it to at least that value when building the forward"
+        )
+    if config.prepare_solver:
+        first = initial_model[0] if series else initial_model
+        prepare_cuda_forward(
+            forward, first.detach().double().cpu().numpy(), device=device
+        )
+    spatial = (
+        _spatial_operator(forward, model_shape[-1], device)
+        if config.spatial_regularization > 0.0
+        else None
+    )
+    return _Problem(forward, network, encoded, observed, std, schedule, series, spatial)
+
+
+def _penalties(
+    problem: _Problem, config: INRConfig, log_model: torch.Tensor, iteration: int
+) -> dict[str, torch.Tensor]:
+    """Weighted regularization terms of the objective."""
+
+    zero = torch.zeros((), device=log_model.device)
+    model = log_model.reshape(problem.n_times, -1)
+    terms = {"spatial": zero, "temporal": zero, "extra": zero}
+    if problem.spatial_operator is not None:
+        differences = torch.sparse.mm(problem.spatial_operator, model.T)
+        terms["spatial"] = config.spatial_regularization * _huber_mean(
+            differences, config.regularization_huber_delta
+        )
+    if problem.series and config.temporal_regularization > 0.0:
+        terms["temporal"] = config.temporal_regularization * _huber_mean(
+            model[1:] - model[:-1], config.regularization_huber_delta
+        )
+    if config.extra_penalty is not None:
+        terms["extra"] = config.extra_penalty(log_model, iteration)
+    return terms
+
+
+def _fit(
+    *,
+    forward,
+    network,
+    coordinates,
+    observed_rhoa,
+    data_std,
+    config: INRConfig,
+    series: bool,
+) -> INRResult:
+    config.validate()
+    device = torch.device(config.device)
+    gpu_report = select_cuda_device(device)
+    problem = _prepare(
+        forward, network, coordinates, observed_rhoa, data_std, config, series, device
+    )
+    network, schedule = problem.network, problem.schedule
+    optimizer = _OPTIMIZERS[config.optimizer](
+        network.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
+    )
+    scheduler = _scheduler(config, optimizer)
+    record = _Recorder(device)
+    emit = config.progress_callback or (lambda payload: None)
+    stop_reason = "max_iterations"
+
+    torch.cuda.synchronize(device)
     started = time.perf_counter()
     for iteration in range(config.max_iterations + 1):
         if config.progressive_encoding:
@@ -450,159 +475,103 @@ def _fit(
                 spatial_start_levels=config.progressive_spatial_start_levels,
                 temporal_start_levels=config.progressive_temporal_start_levels,
             )
-        forward_started = time.perf_counter()
-        log_model = network.forward_encoded(encoded)
-        snapshot_due = (
-            config.snapshot_interval is not None
-            and iteration > 0
-            and iteration % config.snapshot_interval == 0
-        )
-        evaluate_full = (
-            not windowed or iteration == 0 or iteration == config.max_iterations
-        )
-        evaluate_full = (
-            evaluate_full
-            or iteration % config.full_evaluation_interval == 0
-            or snapshot_due
-        )
-        full_chi2: float | None = None
-        full_rms: float | None = None
-        if windowed and evaluate_full:
-            with torch.no_grad():
-                full_prediction = matrix_free_log_rhoa_series(
-                    log_model.detach(), forward
-                )
-                full_residual = (full_prediction - observed_log) / std
-                full_chi2 = float(torch.mean(full_residual.square()).item())
-                full_rms = float(
-                    (
-                        100.0
-                        * torch.sqrt(
-                            torch.mean(
-                                torch.expm1(full_prediction - observed_log).square()
-                            )
-                        )
-                    ).item()
-                )
-            physics_forward_timesteps += n_times
-            remember(iteration, full_chi2, log_model, full_prediction)
-        if windowed:
-            cycle, position = divmod(iteration, len(windows))
-            schedule_position = (
-                len(windows) - 1 - position
-                if config.alternate_window_direction and cycle % 2
-                else position
+        with record.timed("forward"):
+            log_model = network.forward_encoded(problem.encoded)
+            model = log_model.reshape(problem.n_times, -1)
+            snapshot_due = bool(
+                config.snapshot_interval
+                and iteration > 0
+                and iteration % config.snapshot_interval == 0
             )
-            batch_indices_np = windows[schedule_position]
-            batch_indices = torch.as_tensor(
-                batch_indices_np, device=device, dtype=torch.int64
+            full = (
+                None  # (chi2, rms) over every timestep, when evaluated this iteration
             )
-            batch_model = log_model.index_select(0, batch_indices)
-            batch_observed = observed_log.index_select(0, batch_indices)
-            batch_std = std.index_select(0, batch_indices)
-            predicted_log = matrix_free_log_rhoa_series(batch_model, forward)
-            residual = (predicted_log - batch_observed) / batch_std
-            time_weights = inverse_window_coverage.index_select(0, batch_indices)
-            chi2_tensor = torch.sum(residual.square() * time_weights[:, None]) / (
-                residual.shape[1] * torch.sum(time_weights)
+            if schedule.windowed and (
+                iteration in (0, config.max_iterations)
+                or iteration % config.full_evaluation_interval == 0
+                or snapshot_due
+            ):
+                with torch.no_grad():
+                    full_prediction = matrix_free_log_rhoa_series(
+                        model.detach(), forward
+                    )
+                    full_misfit = _misfit(
+                        full_prediction,
+                        problem.observed,
+                        problem.std,
+                        torch.ones_like(schedule.weights),
+                    )
+                full = tuple(torch.stack(full_misfit).tolist())
+                record.timesteps["forward"] += problem.n_times
+                record.remember(iteration, full[0], log_model, full_prediction, network)
+
+            window = schedule.window(iteration)
+            rows = schedule.rows(window)
+            prediction = matrix_free_log_rhoa_series(model[rows], forward)
+            chi2_t, rms_t = _misfit(
+                prediction,
+                problem.observed[rows],
+                problem.std[rows],
+                schedule.weights[rows],
             )
-            rms_tensor = 100.0 * torch.sqrt(
-                torch.sum(
-                    torch.expm1(predicted_log - batch_observed).square()
-                    * time_weights[:, None]
-                )
-                / (residual.shape[1] * torch.sum(time_weights))
+            record.timesteps["forward"] += window.size
+            terms = _penalties(problem, config, log_model, iteration)
+            objective = 0.5 * chi2_t + sum(terms.values())
+            values = (
+                torch.stack((chi2_t, rms_t, objective, *terms.values()))
+                .detach()
+                .tolist()
             )
-            batch_timestep_count = int(batch_indices.numel())
-        else:
-            batch_indices_np = np.arange(n_times, dtype=np.int64)
-            predicted_log = physics(log_model, forward)
-            residual = (predicted_log - observed_log) / std
-            chi2_tensor = torch.mean(torch.square(residual))
-            rms_tensor = 100.0 * torch.sqrt(
-                torch.mean(torch.square(torch.expm1(predicted_log - observed_log)))
-            )
-            batch_timestep_count = n_times
-        physics_forward_timesteps += batch_timestep_count
-        spatial_penalty = torch.zeros((), device=device)
-        if spatial_operator is not None:
-            model_columns = log_model.transpose(0, 1) if series else log_model[:, None]
-            spatial_differences = torch.sparse.mm(spatial_operator, model_columns)
-            spatial_penalty = _huber_mean(
-                spatial_differences, config.regularization_huber_delta
-            )
-        temporal_penalty = torch.zeros((), device=device)
-        if series and config.temporal_regularization > 0.0:
-            temporal_penalty = _huber_mean(
-                log_model[1:] - log_model[:-1],
-                config.regularization_huber_delta,
-            )
-        extra_penalty = torch.zeros((), device=device)
-        if config.extra_penalty is not None:
-            extra_penalty = config.extra_penalty(log_model, iteration)
-        objective = (
-            0.5 * chi2_tensor
-            + config.spatial_regularization * spatial_penalty
-            + config.temporal_regularization * temporal_penalty
-            + extra_penalty
-        )
-        chi2 = float(chi2_tensor.detach().item())
-        rms = float(rms_tensor.detach().item())
-        objective_value = float(objective.detach().item())
-        _synchronize(device)
-        forward_seconds += time.perf_counter() - forward_started
+        chi2, rms, objective_value, spatial, temporal, extra = values
         if not np.isfinite(chi2):
             raise FloatingPointError("INR inversion produced a non-finite chi-square")
-        chi2_history.append(chi2)
-        rms_history.append(rms)
-        objective_history.append(objective_value)
-        spatial_penalty_history.append(float(spatial_penalty.detach().item()))
-        temporal_penalty_history.append(float(temporal_penalty.detach().item()))
-        extra_penalty_history.append(float(extra_penalty.detach().item()))
+        for name, value in zip(record.series, values, strict=True):
+            record.series[name].append(value)
+        if not schedule.windowed:
+            full = (chi2, rms)
+            record.remember(iteration, chi2, log_model, prediction, network)
 
-        if not windowed:
-            full_prediction = predicted_log
-            full_chi2 = chi2
-            full_rms = rms
-            remember(iteration, full_chi2, log_model, full_prediction)
-
+        full_chi2, full_rms = full or (None, None)
         target_reached = (
             config.target_chi2 is not None
             and full_chi2 is not None
             and full_chi2 <= config.target_chi2
         )
+        learning_rate = float(optimizer.param_groups[0]["lr"])
         if (
             iteration % config.log_every == 0
             or target_reached
             or iteration == config.max_iterations
         ):
-            _emit(
-                config,
-                "iteration",
-                iteration=iteration,
-                chi2=chi2,
-                rms=rms,
-                full_chi2=full_chi2,
-                full_rms=full_rms,
-                window_start=int(batch_indices_np[0]) if windowed else None,
-                window_stop=int(batch_indices_np[-1] + 1) if windowed else None,
-                learning_rate=float(optimizer.param_groups[0]["lr"]),
-                objective=objective_value,
-                spatial_penalty=spatial_penalty_history[-1],
-                temporal_penalty=temporal_penalty_history[-1],
-                extra_penalty=extra_penalty_history[-1],
+            emit(
+                {
+                    "event": "iteration",
+                    "iteration": iteration,
+                    "chi2": chi2,
+                    "rms": rms,
+                    "full_chi2": full_chi2,
+                    "full_rms": full_rms,
+                    "window_start": int(window[0]) if schedule.windowed else None,
+                    "window_stop": int(window[-1] + 1) if schedule.windowed else None,
+                    "learning_rate": learning_rate,
+                    "objective": objective_value,
+                    "spatial_penalty": spatial,
+                    "temporal_penalty": temporal,
+                    "extra_penalty": extra,
+                }
             )
         if snapshot_due:
-            _emit(
-                config,
-                "snapshot",
-                iteration=iteration,
-                chi2=full_chi2,
-                rms=full_rms,
-                learning_rate=float(optimizer.param_groups[0]["lr"]),
-                log_resistivity=log_model.detach()
-                .to(device="cpu", dtype=torch.float64)
-                .numpy(),
+            emit(
+                {
+                    "event": "snapshot",
+                    "iteration": iteration,
+                    "chi2": full_chi2,
+                    "rms": full_rms,
+                    "learning_rate": learning_rate,
+                    "log_resistivity": log_model.detach()
+                    .to(device="cpu", dtype=torch.float64)
+                    .numpy(),
+                }
             )
         if target_reached:
             stop_reason = "target_chi2"
@@ -610,61 +579,60 @@ def _fit(
         if iteration == config.max_iterations:
             break
 
-        optimizer.zero_grad(set_to_none=True)
-        backward_started = time.perf_counter()
-        objective.backward()
-        physics_vjp_timesteps += batch_timestep_count
-        if config.gradient_clip_norm is not None:
-            torch.nn.utils.clip_grad_norm_(
-                network.parameters(), float(config.gradient_clip_norm)
-            )
-        _synchronize(device)
-        backward_seconds += time.perf_counter() - backward_started
-        optimizer_started = time.perf_counter()
-        optimizer.step()
-        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            scheduler.step(chi2)
-        elif scheduler is not None:
-            scheduler.step()
-        _synchronize(device)
-        optimizer_seconds += time.perf_counter() - optimizer_started
+        with record.timed("backward"):
+            optimizer.zero_grad(set_to_none=True)
+            objective.backward()
+            record.timesteps["vjp"] += window.size
+            if config.gradient_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    network.parameters(), config.gradient_clip_norm
+                )
+        with record.timed("optimizer"):
+            optimizer.step()
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(chi2)
+            elif scheduler is not None:
+                scheduler.step()
 
-    _synchronize(device)
+    torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - started
-    if "model" not in best:
-        raise RuntimeError("INR optimization did not evaluate a model")
+    best = record.best
     network.load_state_dict(best["state"])
-    log_model_np = best["model"].to(device="cpu", dtype=torch.float64).numpy()
-    predicted_np = best["prediction"].to(device="cpu", dtype=torch.float64).numpy()
+    log_model = best["model"].to(device="cpu", dtype=torch.float64).numpy()
+    predicted = best["prediction"].to(device="cpu", dtype=torch.float64).numpy()
+    predicted = predicted if series else predicted[0]
+    history = {
+        name: np.asarray(values, dtype=float) for name, values in record.series.items()
+    }
     return INRResult(
-        log_resistivity=log_model_np,
-        resistivity=np.exp(log_model_np),
-        predicted_log_data=predicted_np,
-        predicted_data=np.exp(predicted_np),
-        chi2_history=np.asarray(chi2_history, dtype=float),
-        rms_history=np.asarray(rms_history, dtype=float),
-        iterations=len(chi2_history) - 1,
+        log_resistivity=log_model,
+        resistivity=np.exp(log_model),
+        predicted_log_data=predicted,
+        predicted_data=np.exp(predicted),
+        chi2_history=history["chi2"],
+        rms_history=history["rms"],
+        iterations=len(history["chi2"]) - 1,
         best_iteration=int(best["iteration"]),
         best_chi2=float(best["chi2"]),
         stop_reason=stop_reason,
         elapsed_seconds=float(elapsed),
-        forward_seconds=float(forward_seconds),
-        backward_seconds=float(backward_seconds),
-        optimizer_seconds=float(optimizer_seconds),
+        forward_seconds=record.seconds["forward"],
+        backward_seconds=record.seconds["backward"],
+        optimizer_seconds=record.seconds["optimizer"],
         device=str(device),
         gpu_report=gpu_report,
         optimizer=config.optimizer,
         scheduler=config.scheduler,
-        objective_history=np.asarray(objective_history, dtype=float),
-        spatial_penalty_history=np.asarray(spatial_penalty_history, dtype=float),
-        temporal_penalty_history=np.asarray(temporal_penalty_history, dtype=float),
-        extra_penalty_history=np.asarray(extra_penalty_history, dtype=float),
-        full_chi2_iterations=np.asarray(full_chi2_iterations, dtype=np.int32),
-        full_chi2_history=np.asarray(full_chi2_history, dtype=float),
-        time_window_size=None if not windowed else int(config.time_window_size),
+        objective_history=history["objective"],
+        spatial_penalty_history=history["spatial"],
+        temporal_penalty_history=history["temporal"],
+        extra_penalty_history=history["extra"],
+        full_chi2_iterations=np.asarray(record.full_iterations, dtype=np.int32),
+        full_chi2_history=np.asarray(record.full_chi2, dtype=float),
+        time_window_size=int(config.time_window_size) if schedule.windowed else None,
         time_window_step=int(config.time_window_step),
-        physics_forward_timesteps=int(physics_forward_timesteps),
-        physics_vjp_timesteps=int(physics_vjp_timesteps),
+        physics_forward_timesteps=record.timesteps["forward"],
+        physics_vjp_timesteps=record.timesteps["vjp"],
     )
 
 
@@ -685,7 +653,7 @@ def fit_inr(
         coordinates=coordinates,
         observed_rhoa=observed_rhoa,
         data_std=data_std,
-        config=INRConfig() if config is None else config,
+        config=config or INRConfig(),
         series=False,
     )
 
@@ -699,11 +667,10 @@ def fit_timelapse_inr(
     *,
     config: INRConfig | None = None,
 ) -> INRResult:
-    """Invert a complete time series, optionally using windowed physics loss.
+    """Invert a complete time series, optionally using a windowed physics loss.
 
-    ``INRConfig.time_window_size`` changes only which timesteps enter each
-    forward/VJP call. The network, its global time coordinates, and optimizer
-    state persist for the complete run.
+    ``INRConfig.time_window_size`` changes only which timesteps enter each forward/VJP call.
+    The network, its global time coordinates, and the optimizer state persist for the run.
     """
 
     if network.input_dimensions != 3:
@@ -714,7 +681,7 @@ def fit_timelapse_inr(
         coordinates=coordinates,
         observed_rhoa=observed_rhoa,
         data_std=data_std,
-        config=INRConfig() if config is None else config,
+        config=config or INRConfig(),
         series=True,
     )
 

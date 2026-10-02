@@ -249,6 +249,7 @@ class ParameterizedERTForward2p5D:
             self._prolongation() if background_mode == "pygimli_prolongation" else None
         )
         self._jacobian_projection = self._projection()
+        self._torch_maps: dict[str, torch.Tensor] = {}
 
     @classmethod
     def from_mesh_survey(
@@ -400,6 +401,36 @@ class ParameterizedERTForward2p5D:
                 else float(np.mean(parameter_log))
             )
         return full_log, self._jacobian_projection
+
+    def log_model_to_full(self, log_parameters: torch.Tensor) -> torch.Tensor:
+        """Differentiable ``(..., n_parameters) -> (..., n_forward_cells)`` log-resistivity map.
+
+        The torch counterpart of :meth:`_full_log_model` (float64, on the input's device),
+        used to backpropagate through the background extension.
+        """
+
+        exponential = self.background_mode == "pygimli_prolongation"
+        device = log_parameters.device
+        if str(device) not in self._torch_maps:
+            matrix = (
+                self._resistivity_prolongation_matrix
+                if exponential
+                else self._jacobian_projection
+            ).tocoo()
+            self._torch_maps[str(device)] = torch.sparse_coo_tensor(
+                np.vstack((matrix.row, matrix.col)),
+                matrix.data,
+                matrix.shape,
+                dtype=torch.float64,
+                device=device,
+            ).coalesce()
+        flat = log_parameters.to(torch.float64).reshape(-1, log_parameters.shape[-1]).T
+        full = torch.sparse.mm(
+            self._torch_maps[str(device)], torch.exp(flat) if exponential else flat
+        ).T
+        if exponential:
+            full = torch.log(full)
+        return full.reshape(*log_parameters.shape[:-1], full.shape[-1])
 
     def forward_and_jacobian(
         self,
