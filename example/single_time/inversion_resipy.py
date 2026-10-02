@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
-import os
 import platform
 import re
 import shutil
@@ -155,7 +154,6 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("Time-lapse mode needs at least two steps")
 
     from resipy import Project
-    import resipy
 
     project = Project(dirname=str(output_dir / "work"), typ="R2")
     files = [str(available[step]) for step in steps]

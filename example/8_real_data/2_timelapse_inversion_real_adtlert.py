@@ -6,14 +6,30 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import time
+from pathlib import Path
 
 os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 
-import torch
 import numpy as np
-
+import torch
+from _real_data_common import (
+    apply_data_stride,
+    build_parameterized_forward,
+    build_real_inversion_case,
+    check_same_layout,
+    data_std_from_err,
+    discover_processed_files,
+    find_project_root,
+    plot_chi2,
+    plot_timelapse_models,
+    quality_mask,
+    read_processed_ert,
+    resolve_path,
+    save_mesh_npz,
+    selected_plot_indices,
+    write_json,
+)
 from adtlert.inversion import (
     InversionConfig,
     TimeLapseERTInversion,
@@ -26,39 +42,8 @@ from adtlert.inversion import (
 )
 from adtlert.utils.progress import InversionProgressPrinter
 
-from _real_data_common import (
-    apply_data_stride,
-    build_parameterized_forward,
-    build_real_inversion_case,
-    data_std_from_err,
-    discover_processed_files,
-    find_project_root,
-    plot_chi2,
-    plot_timelapse_models,
-    quality_mask,
-    read_processed_ert,
-    resolve_path,
-    save_mesh_npz,
-    write_json,
-)
-
 # Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
 torch.set_default_dtype(torch.float64)
-
-
-def _check_same_layout(first, current) -> None:
-    if not np.array_equal(current.measurements, first.measurements):
-        raise ValueError(f"{current.path}: ABMN layout differs from first timestep {first.path}")
-    if not np.allclose(current.elec_x, first.elec_x, rtol=0.0, atol=1.0e-10):
-        raise ValueError(f"{current.path}: electrode x positions differ from first timestep")
-    if not np.allclose(current.elec_z, first.elec_z, rtol=0.0, atol=1.0e-10):
-        raise ValueError(f"{current.path}: electrode z positions differ from first timestep")
-
-
-def _selected_plot_indices(n_times: int, max_panels: int) -> np.ndarray:
-    if n_times <= max_panels:
-        return np.arange(n_times, dtype=np.int32)
-    return np.unique(np.round(np.linspace(0, n_times - 1, max_panels)).astype(np.int32))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -144,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     raw_records = [first]
     for path in paths[1:]:
         current = read_processed_ert(path, elevation_reference=first.elevation_reference)
-        _check_same_layout(first, current)
+        check_same_layout(first, current)
         raw_records.append(current)
 
     common_mask = np.ones(first.rhoa.shape, dtype=bool)
@@ -294,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
 
     plot_files: dict[str, str] = {}
     if not args.no_plot:
-        indices = _selected_plot_indices(final_models.shape[1], args.plot_count)
+        indices = selected_plot_indices(final_models.shape[1], args.plot_count)
         labels = [timestamp_labels[int(index)] for index in indices]
         model_plot = output_dir / "timelapse_real_inverted_resistivity.png"
         plot_timelapse_models(

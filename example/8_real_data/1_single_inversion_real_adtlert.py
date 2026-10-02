@@ -6,24 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import time
+from pathlib import Path
 
 os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 
-import torch
 import numpy as np
-
-from adtlert.inversion import (
-    ERTInversion,
-    InversionConfig,
-    available_data_misfits,
-    available_linearized_optimizers,
-    available_optimization_algorithms,
-    available_spatial_regularizations,
-)
-from adtlert.utils.progress import InversionProgressPrinter
-
+import torch
 from _real_data_common import (
     apply_data_stride,
     build_parameterized_forward,
@@ -38,6 +27,15 @@ from _real_data_common import (
     save_mesh_npz,
     write_json,
 )
+from adtlert.inversion import (
+    ERTInversion,
+    InversionConfig,
+    available_data_misfits,
+    available_linearized_optimizers,
+    available_optimization_algorithms,
+    available_spatial_regularizations,
+)
+from adtlert.utils.progress import InversionProgressPrinter
 
 # Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
 torch.set_default_dtype(torch.float64)

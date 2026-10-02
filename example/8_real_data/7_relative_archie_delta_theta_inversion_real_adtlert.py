@@ -17,29 +17,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import time
+from pathlib import Path
 
 os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 
-import torch
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-
-from adtlert.inversion import (  # noqa: E402
-    InversionConfig,
-    TimeLapseERTInversion,
-    WindowedTimeLapseERTInversion,
-    available_data_misfits,
-    available_linearized_optimizers,
-    available_optimization_algorithms,
-    available_spatial_regularizations,
-    available_temporal_regularizations,
-)
-from adtlert.utils.progress import InversionProgressPrinter  # noqa: E402
-
+import torch
 from _real_data_common import (  # noqa: E402
+    check_same_layout,
+    selected_plot_indices,
     apply_data_stride,
     build_parameterized_forward,
     build_real_inversion_case,
@@ -53,24 +42,20 @@ from _real_data_common import (  # noqa: E402
     save_mesh_npz,
     write_json,
 )
+from adtlert.inversion import (  # noqa: E402
+    InversionConfig,
+    TimeLapseERTInversion,
+    WindowedTimeLapseERTInversion,
+    available_data_misfits,
+    available_linearized_optimizers,
+    available_optimization_algorithms,
+    available_spatial_regularizations,
+    available_temporal_regularizations,
+)
+from adtlert.utils.progress import InversionProgressPrinter  # noqa: E402
 
 # Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
 torch.set_default_dtype(torch.float64)
-
-
-def _check_same_layout(first, current) -> None:
-    if not np.array_equal(current.measurements, first.measurements):
-        raise ValueError(f"{current.path}: ABMN layout differs from first timestep {first.path}")
-    if not np.allclose(current.elec_x, first.elec_x, rtol=0.0, atol=1.0e-10):
-        raise ValueError(f"{current.path}: electrode x positions differ from first timestep")
-    if not np.allclose(current.elec_z, first.elec_z, rtol=0.0, atol=1.0e-10):
-        raise ValueError(f"{current.path}: electrode z positions differ from first timestep")
-
-
-def _selected_plot_indices(n_times: int, max_panels: int) -> np.ndarray:
-    if n_times <= max_panels:
-        return np.arange(n_times, dtype=np.int32)
-    return np.unique(np.round(np.linspace(0, n_times - 1, max_panels)).astype(np.int32))
 
 
 def _cell_geometry(case) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -623,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
     raw_records = [first]
     for path in paths[1:]:
         current = read_processed_ert(path, elevation_reference=first.elevation_reference)
-        _check_same_layout(first, current)
+        check_same_layout(first, current)
         raw_records.append(current)
 
     common_mask = np.ones(first.rhoa.shape, dtype=bool)
@@ -917,7 +902,7 @@ def main(argv: list[str] | None = None) -> int:
 
     plot_files: dict[str, str] = {}
     if not args.no_plot:
-        indices = _selected_plot_indices(final_delta_theta.shape[1], args.plot_count)
+        indices = selected_plot_indices(final_delta_theta.shape[1], args.plot_count)
         labels = [timestamp_labels[int(index)] for index in indices]
         delta_plot = output_dir / "timelapse_real_ad_delta_theta.png"
         _plot_delta_theta_models(

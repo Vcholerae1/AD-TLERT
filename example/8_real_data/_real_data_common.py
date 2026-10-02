@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-import json
 from pathlib import Path
-import re
 
 import numpy as np
-
 from adtlert.inversion import ParameterizedERTForward2p5D
 from adtlert.workflows import build_source_position_triangle_inversion_case
 
@@ -440,3 +439,18 @@ def plot_timelapse_models(
         cbar.ax.set_title(r"$\rho$ [$\Omega$m]")
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
+
+
+def check_same_layout(first, current) -> None:
+    if not np.array_equal(current.measurements, first.measurements):
+        raise ValueError(f"{current.path}: ABMN layout differs from first timestep {first.path}")
+    if not np.allclose(current.elec_x, first.elec_x, rtol=0.0, atol=1.0e-10):
+        raise ValueError(f"{current.path}: electrode x positions differ from first timestep")
+    if not np.allclose(current.elec_z, first.elec_z, rtol=0.0, atol=1.0e-10):
+        raise ValueError(f"{current.path}: electrode z positions differ from first timestep")
+
+
+def selected_plot_indices(n_times: int, max_panels: int) -> np.ndarray:
+    if n_times <= max_panels:
+        return np.arange(n_times, dtype=np.int32)
+    return np.unique(np.round(np.linspace(0, n_times - 1, max_panels)).astype(np.int32))

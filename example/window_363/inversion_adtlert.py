@@ -14,12 +14,12 @@ from pathlib import Path
 os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 import numpy as np
 
+from example.shared import grid2d_to_mesh_cells, load_petrophysical_parameters, resolve, write_json
 from adtlert.inversion import (
     InversionConfig,
     ParameterizedERTForward2p5D,
@@ -41,15 +41,6 @@ from adtlert.workflows import (
 
 # Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
 torch.set_default_dtype(torch.float64)
-
-
-def _resolve(root: Path, value: str | Path) -> Path:
-    path = Path(value)
-    return path if path.is_absolute() else root / path
-
-
-def _write_json(path: Path, value: object) -> None:
-    path.write_text(json.dumps(value, indent=2), encoding="utf-8")
 
 
 def _discover_forward_dat(
@@ -100,63 +91,7 @@ def _structural_prior_cell_ids(path: Path, mesh, geometry: dict[str, np.ndarray]
     """Map a terrain-following 2D structural-unit grid onto inversion mesh cells."""
 
     class_grid = np.asarray(np.load(path), dtype=np.int32)
-    return np.asarray(_grid2d_to_mesh_cells(class_grid, mesh, geometry), dtype=np.int32)
-
-
-def _grid2d_to_mesh_cells(values_2d: np.ndarray, mesh, geometry: dict[str, np.ndarray]) -> np.ndarray:
-    """Map a terrain-following ParFlow 2D grid onto inversion mesh cell centers."""
-
-    grid = np.asarray(values_2d)
-    x_nodes = np.asarray(geometry["x_nodes"], dtype=float).ravel()
-    z_top = np.asarray(geometry["z_top"], dtype=float).ravel()
-    layer_thickness = np.asarray(geometry["layer_thickness"], dtype=float).ravel()
-    expected_shape = (layer_thickness.size, x_nodes.size - 1)
-    if grid.shape != expected_shape:
-        raise ValueError(f"2D grid shape {grid.shape} does not match expected {expected_shape}")
-
-    nodes = np.asarray(mesh.nodes, dtype=float)
-    cells = np.asarray(mesh.cells, dtype=np.int32)
-    centers = nodes[cells].mean(axis=1)
-    x_center = centers[:, 0]
-    z_center = centers[:, 1]
-
-    column = np.searchsorted(x_nodes, x_center, side="right") - 1
-    column = np.clip(column, 0, x_nodes.size - 2)
-    surface_z = np.interp(x_center, x_nodes, z_top)
-    depth = np.maximum(surface_z - z_center, 0.0)
-    layer_top_to_bottom = np.searchsorted(np.cumsum(layer_thickness), depth, side="right")
-    layer_top_to_bottom = np.clip(layer_top_to_bottom, 0, layer_thickness.size - 1)
-
-    grid_top_to_bottom = grid[::-1, :]
-    return np.asarray(grid_top_to_bottom[layer_top_to_bottom, column])
-
-
-def _load_petrophysical_parameters(
-    parameter_dir: Path,
-    *,
-    y_index: int,
-    preset: str,
-    mesh,
-    geometry: dict[str, np.ndarray],
-) -> dict[str, np.ndarray]:
-    """Load and map saved 2D petrophysical parameter grids onto inversion cells."""
-
-    files = {
-        "rho_sat": parameter_dir / f"rho_sat2d_y{y_index}_base_{preset}.npy",
-        "rho_sat_s": parameter_dir / f"rho_sat_s2d_y{y_index}_base_{preset}.npy",
-        "n": parameter_dir / f"n2d_y{y_index}_base_{preset}.npy",
-        "phi": parameter_dir / f"phi2d_y{y_index}_base_{preset}.npy",
-    }
-    missing_required = [str(files[name]) for name in ("rho_sat", "n") if not files[name].exists()]
-    if missing_required:
-        raise FileNotFoundError(f"Missing petrophysical parameter files: {missing_required}")
-
-    mapped: dict[str, np.ndarray] = {}
-    for name, path in files.items():
-        if not path.exists():
-            continue
-        mapped[name] = np.asarray(_grid2d_to_mesh_cells(np.load(path), mesh, geometry), dtype=float)
-    return mapped
+    return np.asarray(grid2d_to_mesh_cells(class_grid, mesh, geometry), dtype=np.int32)
 
 
 def _load_terrain_forward_npz(path: Path) -> TerrainForwardData:
@@ -625,9 +560,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = Path(args.project_root).resolve() if args.project_root else Path(__file__).resolve().parents[2]
-    forward_dir = _resolve(root, args.forward_dir)
-    true_model_dir = _resolve(root, args.true_model_dir)
-    output_dir = _resolve(root, args.output_dir)
+    forward_dir = resolve(root, args.forward_dir)
+    true_model_dir = resolve(root, args.true_model_dir)
+    output_dir = resolve(root, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     pairs = _discover_forward_dat(
@@ -655,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
         data_std = float(np.log1p(args.relative_error))
         data_std_source = "relative_error_log1p"
 
-    mesh_file_path = None if args.mesh_file is None else _resolve(root, args.mesh_file)
+    mesh_file_path = None if args.mesh_file is None else resolve(root, args.mesh_file)
     case_data_file = pairs[0][1] if mesh_file_path is None else None
     elec_z_case = np.asarray(elec_z, dtype=float)
 
@@ -689,13 +624,13 @@ def main(argv: list[str] | None = None) -> int:
         forward_cell_parameter_ids=forward_cell_parameter_ids,
         linear_solver_backend=args.linear_solver_backend,
         normal_field_cache_max_entries=args.normal_field_cache_max_entries,
-        terrain_cache_dir=None if args.terrain_cache_dir is None else _resolve(root, args.terrain_cache_dir),
+        terrain_cache_dir=None if args.terrain_cache_dir is None else resolve(root, args.terrain_cache_dir),
     )
     default_structural_prior = (
         true_model_dir.parent / "parflow_models" / "petrophysical_models_2d" / f"class2d_y{args.y_index}.npy"
     )
     structural_prior_file = (
-        _resolve(root, args.structural_prior_file)
+        resolve(root, args.structural_prior_file)
         if args.structural_prior_file is not None
         else default_structural_prior
     )
@@ -715,13 +650,13 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     petrophysical_parameter_dir = (
-        _resolve(root, args.petrophysical_parameter_dir)
+        resolve(root, args.petrophysical_parameter_dir)
         if args.petrophysical_parameter_dir is not None
         else true_model_dir.parent / "parflow_models" / "petrophysical_models_2d"
     )
     petrophysical_parameters = None
     if str(args.petrophysical_transform).replace("-", "_") == "saturation":
-        petrophysical_parameters = _load_petrophysical_parameters(
+        petrophysical_parameters = load_petrophysical_parameters(
             petrophysical_parameter_dir,
             y_index=args.y_index,
             preset=args.petrophysical_preset,
@@ -844,7 +779,7 @@ def main(argv: list[str] | None = None) -> int:
             stream.write(str(path) + "\n")
 
     if result.window_reports:
-        _write_json(output_dir / "window_reports.json", result.window_reports)
+        write_json(output_dir / "window_reports.json", result.window_reports)
 
     plot_files: dict[str, str] = {}
     if not args.no_plot:
@@ -941,7 +876,7 @@ def main(argv: list[str] | None = None) -> int:
         "output_dir": str(output_dir),
         "forward_dir": str(forward_dir),
         "mesh_file": str(output_dir / "timelapse_inversion_mesh.npz"),
-        "input_mesh_file": None if args.mesh_file is None else str(_resolve(root, args.mesh_file)),
+        "input_mesh_file": None if args.mesh_file is None else str(resolve(root, args.mesh_file)),
         "inversion_mesh_quality": float(args.inversion_mesh_quality),
         "inversion_mesh_smoothing_iterations": int(args.inversion_mesh_smoothing_iterations),
         "torch_enable_float64": torch.get_default_dtype() == torch.float64,
@@ -950,7 +885,7 @@ def main(argv: list[str] | None = None) -> int:
         "plot_files": plot_files,
     }
     summary.update(run_meta)
-    _write_json(output_dir / "timelapsed_inversion_summary.json", summary)
+    write_json(output_dir / "timelapsed_inversion_summary.json", summary)
 
     print(json.dumps(summary, indent=2))
     return 0

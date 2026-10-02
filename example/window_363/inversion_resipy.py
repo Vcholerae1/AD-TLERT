@@ -12,7 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
-from common import discover_forward_files, write_json
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "single_time"))
+from common import discover_forward_files, write_json  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -128,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         case_dir.mkdir(parents=True, exist_ok=True)
         command = [
             sys.executable,
-            str(Path(__file__).with_name("resipy_runner.py")),
+            str(Path(__file__).resolve().parents[1] / "single_time" / "inversion_resipy.py"),
             "--project-root",
             str(root),
             "--forward-dir",

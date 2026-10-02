@@ -12,12 +12,12 @@ import time
 os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 import numpy as np
 
+from example.shared import load_petrophysical_parameters, resolve, write_json
 from adtlert.inversion import (
     ERTInversion,
     InversionConfig,
@@ -37,15 +37,6 @@ from adtlert.workflows import (
 
 # Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
 torch.set_default_dtype(torch.float64)
-
-
-def _resolve(root: Path, value: str | Path) -> Path:
-    path = Path(value)
-    return path if path.is_absolute() else root / path
-
-
-def _write_json(path: Path, value: object) -> None:
-    path.write_text(json.dumps(value, indent=2), encoding="utf-8")
 
 
 def _synchronize_gpu() -> None:
@@ -106,62 +97,6 @@ def _load_forward_dat(path: Path) -> dict[str, np.ndarray]:
     return loaded
 
 
-def _grid2d_to_mesh_cells(values_2d: np.ndarray, mesh, geometry: dict[str, np.ndarray]) -> np.ndarray:
-    """Map a terrain-following ParFlow 2D grid onto inversion mesh cell centers."""
-
-    grid = np.asarray(values_2d)
-    x_nodes = np.asarray(geometry["x_nodes"], dtype=float).ravel()
-    z_top = np.asarray(geometry["z_top"], dtype=float).ravel()
-    layer_thickness = np.asarray(geometry["layer_thickness"], dtype=float).ravel()
-    expected_shape = (layer_thickness.size, x_nodes.size - 1)
-    if grid.shape != expected_shape:
-        raise ValueError(f"2D grid shape {grid.shape} does not match expected {expected_shape}")
-
-    nodes = np.asarray(mesh.nodes, dtype=float)
-    cells = np.asarray(mesh.cells, dtype=np.int32)
-    centers = nodes[cells].mean(axis=1)
-    x_center = centers[:, 0]
-    z_center = centers[:, 1]
-
-    column = np.searchsorted(x_nodes, x_center, side="right") - 1
-    column = np.clip(column, 0, x_nodes.size - 2)
-    surface_z = np.interp(x_center, x_nodes, z_top)
-    depth = np.maximum(surface_z - z_center, 0.0)
-    layer_top_to_bottom = np.searchsorted(np.cumsum(layer_thickness), depth, side="right")
-    layer_top_to_bottom = np.clip(layer_top_to_bottom, 0, layer_thickness.size - 1)
-
-    grid_top_to_bottom = grid[::-1, :]
-    return np.asarray(grid_top_to_bottom[layer_top_to_bottom, column])
-
-
-def _load_petrophysical_parameters(
-    parameter_dir: Path,
-    *,
-    y_index: int,
-    preset: str,
-    mesh,
-    geometry: dict[str, np.ndarray],
-) -> dict[str, np.ndarray]:
-    """Load and map saved 2D petrophysical parameter grids onto inversion cells."""
-
-    files = {
-        "rho_sat": parameter_dir / f"rho_sat2d_y{y_index}_base_{preset}.npy",
-        "rho_sat_s": parameter_dir / f"rho_sat_s2d_y{y_index}_base_{preset}.npy",
-        "n": parameter_dir / f"n2d_y{y_index}_base_{preset}.npy",
-        "phi": parameter_dir / f"phi2d_y{y_index}_base_{preset}.npy",
-    }
-    missing_required = [str(files[name]) for name in ("rho_sat", "n") if not files[name].exists()]
-    if missing_required:
-        raise FileNotFoundError(f"Missing petrophysical parameter files: {missing_required}")
-
-    mapped: dict[str, np.ndarray] = {}
-    for name, path in files.items():
-        if not path.exists():
-            continue
-        mapped[name] = np.asarray(_grid2d_to_mesh_cells(np.load(path), mesh, geometry), dtype=float)
-    return mapped
-
-
 def _resolve_data_std(args: argparse.Namespace, forward_data: dict[str, np.ndarray]) -> tuple[float | np.ndarray, str]:
     if args.data_std is not None:
         return float(args.data_std), "cli"
@@ -214,8 +149,6 @@ def _plot_comparison(
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import LogNorm
 
-    nx = len(case.x_nodes) - 1
-    nz = len(case.layer_thickness)
     true_top = np.asarray(true_rho_2d, dtype=float)[::-1, :]
     inverted = np.asarray(final_model, dtype=float).ravel()
     coverage_array = np.asarray(coverage, dtype=float).ravel()
@@ -396,11 +329,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = Path(args.project_root).resolve() if args.project_root else Path(__file__).resolve().parents[2]
-    forward_npz = _resolve(root, args.forward_npz)
-    forward_dat = _resolve(root, args.forward_dat) if args.forward_dat else None
-    true_model_file = _resolve(root, args.true_model)
-    mesh_reference = _resolve(root, args.inversion_mesh_reference) if args.inversion_mesh_reference else None
-    output_dir = _resolve(root, args.output_dir)
+    forward_npz = resolve(root, args.forward_npz)
+    forward_dat = resolve(root, args.forward_dat) if args.forward_dat else None
+    true_model_file = resolve(root, args.true_model)
+    mesh_reference = resolve(root, args.inversion_mesh_reference) if args.inversion_mesh_reference else None
+    output_dir = resolve(root, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     y_index, step = parse_resistivity_slice_name(true_model_file)
@@ -441,16 +374,16 @@ def main(argv: list[str] | None = None) -> int:
         case.parameter_cell_ids,
         regularization_mesh=case.mesh,
         linear_solver_backend=args.linear_solver_backend,
-        terrain_cache_dir=None if args.terrain_cache_dir is None else _resolve(root, args.terrain_cache_dir),
+        terrain_cache_dir=None if args.terrain_cache_dir is None else resolve(root, args.terrain_cache_dir),
     )
     petrophysical_parameter_dir = (
-        _resolve(root, args.petrophysical_parameter_dir)
+        resolve(root, args.petrophysical_parameter_dir)
         if args.petrophysical_parameter_dir is not None
         else true_model_file.parent.parent / "parflow_models" / "petrophysical_models_2d"
     )
     petrophysical_parameters = None
     if str(args.petrophysical_transform).replace("-", "_") == "saturation":
-        petrophysical_parameters = _load_petrophysical_parameters(
+        petrophysical_parameters = load_petrophysical_parameters(
             petrophysical_parameter_dir,
             y_index=y_index,
             preset=args.petrophysical_preset,
@@ -589,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
         "coverage_source": coverage_source,
         "coverage_threshold": coverage_threshold,
     }
-    _write_json(output_dir / "inversion_summary.json", summary)
+    write_json(output_dir / "inversion_summary.json", summary)
 
     if not args.no_plot:
         _plot_comparison(
