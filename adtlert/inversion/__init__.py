@@ -1,12 +1,13 @@
 """Native log-space inversion routines for differentiable ERT."""
 
-from adtlert.inversion.core import (
-    ERTInversion,
+from adtlert.inversion.config import (
     ERTInversionResult,
     InversionConfig,
-    ParameterizedERTForward2p5D,
-    TimeLapseERTInversion,
     TimeLapseERTInversionResult,
+)
+from adtlert.inversion.core import (
+    ERTInversion,
+    TimeLapseERTInversion,
     WindowedTimeLapseERTInversion,
     invert_single_log_resistivity,
     invert_timelapse_log_resistivity,
@@ -28,6 +29,7 @@ from adtlert.inversion.optimizers import (
     build_linearized_optimizer,
     build_optimization_algorithm,
 )
+from adtlert.inversion.parameterized import ParameterizedERTForward2p5D
 from adtlert.inversion.petrophysics import (
     LogConductivityTransform,
     LogResistivityTransform,

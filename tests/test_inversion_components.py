@@ -19,7 +19,8 @@ from adtlert.inversion import (
     build_spatial_regularization,
     build_temporal_regularization,
 )
-from adtlert.inversion.core import _check_config, _window_start_indices
+from adtlert.inversion.config import _check_config
+from adtlert.inversion.core import _window_start_indices
 from adtlert.inversion.optimizers import (
     first_order_step,
     linearized_step,

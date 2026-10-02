@@ -12,7 +12,7 @@ from adtlert.inversion import (
     TimeLapseERTInversion,
     WindowedTimeLapseERTInversion,
 )
-from adtlert.inversion.core import _normal_log_response_vjp_series
+from adtlert.inversion.matrix_free import _normal_log_response_vjp_series
 from tests.conftest import quad_case
 
 pytestmark = pytest.mark.gpu

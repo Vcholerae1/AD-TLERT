@@ -15,7 +15,7 @@ import torch
 
 from adtlert.forward import ERTForward2p5D, ERTForwardModeling
 from adtlert.forward.autograd import apparent_resistivity_autograd
-from adtlert.inversion.core import ParameterizedERTForward2p5D
+from adtlert.inversion.parameterized import ParameterizedERTForward2p5D
 
 
 def forward_operator(forward: Any) -> ERTForward2p5D:
