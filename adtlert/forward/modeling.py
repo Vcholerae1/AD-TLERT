@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from adtlert.utils.torch_runtime import torch_np
 import numpy as np
+import torch
 
 from adtlert.forward.ert2p5d import ERTForward2p5D
 from adtlert.forward.ert3d import ERTForward3D
 from adtlert.mesh import Mesh, Mesh3D
 from adtlert.survey import Survey
 from adtlert.utils.dtypes import FLOAT_DTYPE
+
+
+def _call(value: Any) -> Any:
+    return value() if callable(value) else value
 
 
 def _point_coordinates(point: Any, *, dimension: int | None = None) -> list[float]:
@@ -23,22 +27,15 @@ def _point_coordinates(point: Any, *, dimension: int | None = None) -> list[floa
         coordinate_count = len(point)
     except TypeError:
         coordinate_count = 3 if hasattr(point, "z") else 2
-    if dimension == 2:
-        return [float(point[0]), float(point[1])]
-    if dimension == 3 or coordinate_count >= 3:
-        return [float(point[0]), float(point[1]), float(point[2])]
-    return [float(point[0]), float(point[1])]
+    width = dimension or (3 if coordinate_count >= 3 else 2)
+    return [float(point[index]) for index in range(width)]
 
 
 def _cell_node_ids(cell: Any) -> list[int]:
     if hasattr(cell, "nodeCount") and hasattr(cell, "node"):
-        node_count = int(cell.nodeCount())
-        if node_count < 3:
-            raise ValueError("mesh cells must have at least three nodes")
-        if node_count > 4:
-            raise ValueError("only triangular and quadrilateral cells are supported")
-        return [int(cell.node(local_id).id()) for local_id in range(node_count)]
-    node_ids = [int(node_id) for node_id in cell]
+        node_ids = [int(cell.node(local_id).id()) for local_id in range(int(cell.nodeCount()))]
+    else:
+        node_ids = [int(node_id) for node_id in cell]
     if len(node_ids) < 3:
         raise ValueError("mesh cells must have at least three nodes")
     if len(node_ids) > 4:
@@ -46,106 +43,86 @@ def _cell_node_ids(cell: Any) -> list[int]:
     return node_ids
 
 
-def mesh_to_adtlert(mesh: Any) -> Mesh | Mesh3D:
-    """Convert common mesh-like objects into :class:`adtlert.mesh.Mesh`.
+def _mesh_from_arrays(nodes, cells) -> Mesh | Mesh3D:
+    nodes = np.asarray(nodes)
+    return (Mesh3D if nodes.ndim == 2 and nodes.shape[1] == 3 else Mesh).from_arrays(nodes, cells)
 
-    Supported inputs are already-built ``Mesh`` instances, ``(nodes, cells)``
-    tuples, objects with ``nodes``/``cells`` arrays, meshio meshes, and
-    objects exposing ``nodes()``/``cells()``. The conversion uses duck typing
-    and never imports external modelling packages.
+
+def mesh_to_adtlert(mesh: Any) -> Mesh | Mesh3D:
+    """Convert common mesh-like objects into :class:`adtlert.mesh.Mesh` or :class:`Mesh3D`.
+
+    Supported inputs are ``Mesh``/``Mesh3D`` instances, ``(nodes, cells)`` tuples, meshio
+    meshes, and objects exposing ``nodes``/``cells`` arrays or methods (duck typing only).
     """
 
     if isinstance(mesh, (Mesh, Mesh3D)):
         return mesh
     if isinstance(mesh, tuple) and len(mesh) == 2:
-        nodes = np.asarray(mesh[0])
-        if nodes.ndim == 2 and nodes.shape[1] == 3:
-            return Mesh3D.from_arrays(nodes=nodes, cells=mesh[1])
-        return Mesh.from_arrays(nodes=nodes, cells=mesh[1])
+        return _mesh_from_arrays(*mesh)
     if hasattr(mesh, "cells_dict"):
-        if "tetra" in mesh.cells_dict:
-            return Mesh3D.from_meshio(mesh)
-        return Mesh.from_meshio(mesh)
-
-    nodes_attr = getattr(mesh, "nodes", None)
-    cells_attr = getattr(mesh, "cells", None)
-    if nodes_attr is None or cells_attr is None:
+        return (Mesh3D if "tetra" in mesh.cells_dict else Mesh).from_meshio(mesh)
+    if getattr(mesh, "nodes", None) is None or getattr(mesh, "cells", None) is None:
         raise TypeError("mesh must be a Mesh, (nodes, cells), meshio mesh, or mesh-like object")
-
-    raw_nodes = nodes_attr() if callable(nodes_attr) else nodes_attr
-    raw_cells = cells_attr() if callable(cells_attr) else cells_attr
-    dimension_attr = getattr(mesh, "dimension", None)
-    if dimension_attr is None:
-        dimension_attr = getattr(mesh, "dim", None)
-    mesh_dimension = int(dimension_attr() if callable(dimension_attr) else dimension_attr) if dimension_attr is not None else None
-    nodes = np.asarray([_point_coordinates(node, dimension=mesh_dimension) for node in raw_nodes], dtype=float)
-    cells = np.asarray([_cell_node_ids(cell) for cell in raw_cells], dtype=np.int32)
-    if nodes.shape[1] == 3:
-        return Mesh3D.from_arrays(torch_np.asarray(nodes), torch_np.asarray(cells))
-    return Mesh.from_arrays(torch_np.asarray(nodes), torch_np.asarray(cells))
+    dimension = _call(getattr(mesh, "dimension", getattr(mesh, "dim", None)))
+    dimension = None if dimension is None else int(dimension)
+    nodes = np.asarray([_point_coordinates(node, dimension=dimension) for node in _call(mesh.nodes)], dtype=float)
+    cells = np.asarray([_cell_node_ids(cell) for cell in _call(mesh.cells)], dtype=np.int32)
+    return _mesh_from_arrays(nodes, cells)
 
 
 def survey_to_adtlert(data: Any, *, dimension: int | None = None) -> Survey:
     """Convert common survey/data-like objects into :class:`adtlert.survey.Survey`.
 
-    Supported inputs are ``Survey`` instances, ``(electrodes, abmn)`` tuples,
-    objects with ``electrode_positions``/``measurements`` arrays, and
-    DataContainer-like objects exposing ``sensors()`` or ``sensorPositions()``
-    plus ``a/b/m/n`` fields.
+    Supported inputs are ``Survey`` instances, ``(electrodes, abmn)`` tuples, objects with
+    ``electrode_positions``/``measurements``, and DataContainer-like objects exposing
+    ``sensors()`` or ``sensorPositions()`` plus ``a/b/m/n`` fields.
     """
 
     if isinstance(data, Survey):
         return data
     if isinstance(data, tuple) and len(data) == 2:
-        positions = np.asarray(data[0], dtype=float)
-        if dimension is not None:
-            positions = positions[:, :dimension]
-        return Survey.from_arrays(electrode_positions=positions, measurements=data[1])
-    if hasattr(data, "electrode_positions") and hasattr(data, "measurements"):
-        positions = np.asarray(data.electrode_positions, dtype=float)
-        if dimension is not None:
-            positions = positions[:, :dimension]
-        return Survey.from_arrays(positions, data.measurements)
-
-    sensors_attr = getattr(data, "sensors", None)
-    if sensors_attr is None:
-        sensors_attr = getattr(data, "sensorPositions", None)
-    if sensors_attr is None:
-        raise TypeError("data must be a Survey, (electrodes, abmn), or data-like object")
-
-    sensors = sensors_attr() if callable(sensors_attr) else sensors_attr
-    electrodes = np.asarray(
-        [_point_coordinates(sensor, dimension=dimension) for sensor in sensors],
-        dtype=float,
-    )
-    measurements = np.column_stack(
-        (
-            np.asarray(data["a"], dtype=np.int32),
-            np.asarray(data["b"], dtype=np.int32),
-            np.asarray(data["m"], dtype=np.int32),
-            np.asarray(data["n"], dtype=np.int32),
-        )
-    )
-    return Survey.from_arrays(torch_np.asarray(electrodes), torch_np.asarray(measurements))
+        positions, measurements = data
+    elif hasattr(data, "electrode_positions") and hasattr(data, "measurements"):
+        positions, measurements = data.electrode_positions, data.measurements
+    else:
+        sensors = getattr(data, "sensors", None)
+        sensors = getattr(data, "sensorPositions", None) if sensors is None else sensors
+        if sensors is None:
+            raise TypeError("data must be a Survey, (electrodes, abmn), or data-like object")
+        electrodes = [_point_coordinates(sensor, dimension=dimension) for sensor in _call(sensors)]
+        measurements = np.column_stack([np.asarray(data[key], dtype=np.int32) for key in "abmn"])
+        return Survey.from_arrays(np.asarray(electrodes, dtype=float), measurements)
+    positions = np.asarray(positions, dtype=float)
+    return Survey.from_arrays(positions if dimension is None else positions[:, :dimension], measurements)
 
 
-def _prepare_resistivity_model(resistivity_model: Any, *, log_transform: bool, expected_size: int) -> np.ndarray:
-    values = np.asarray(resistivity_model, dtype=float).ravel()
+def _resistivity(model: Any, *, log_transform: bool, expected_size: int) -> np.ndarray:
+    values = np.asarray(model, dtype=float).ravel()
     if log_transform:
         if not np.all(np.isfinite(values)):
             raise ValueError("resistivity_model contains non-finite log-resistivity values")
         values = np.exp(values)
-
     if values.shape != (expected_size,):
         raise ValueError(f"resistivity_model must have shape ({expected_size},)")
     if not np.all(np.isfinite(values)):
         raise ValueError("resistivity_model contains non-finite resistivity values")
     if np.any(values <= 0.0):
-        raise ValueError(
-            "resistivity_model must contain positive resistivity values "
-            f"(min={float(np.min(values)):.6e})"
-        )
+        raise ValueError(f"resistivity_model must contain positive resistivity values (min={float(np.min(values)):.6e})")
     return values
+
+
+def log_response_and_jacobian(operator, conductivity, *, chain=None, **solve_kwargs) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``log(rhoa)`` and ``d log(rhoa) / d log(rho)`` from an explicit resistance Jacobian.
+
+    ``chain`` is the conductivity of each Jacobian column (defaults to ``conductivity``),
+    which differs when the operator aggregates columns into inversion parameters.
+    """
+
+    response, resistance_jacobian = operator.solve_with_jacobian(conductivity, **solve_kwargs)
+    apparent_jacobian = torch.abs(torch.as_tensor(operator._geometric_factors()))[:, None] * resistance_jacobian
+    chain = conductivity if chain is None else torch.as_tensor(chain, dtype=apparent_jacobian.dtype)
+    jacobian = apparent_jacobian * (-chain[None, :]) / response.apparent_resistivity[:, None]
+    return np.log(np.asarray(response.apparent_resistivity, dtype=float)), np.asarray(jacobian, dtype=float)
 
 
 @dataclass
@@ -175,26 +152,15 @@ class ERTForwardModeling:
     def set_data(self, data: Any) -> None:
         """Set the ERT survey/data object."""
 
-        self.data = data
-        self._survey = None
-        self._forward = None
-
-    def setData(self, data: Any) -> None:  # noqa: N802 - compatibility with common ERT APIs
-        """Alias for :meth:`set_data`."""
-
-        self.set_data(data)
+        self.data, self._survey, self._forward = data, None, None
 
     def set_mesh(self, mesh: Any) -> None:
         """Set the forward mesh."""
 
-        self.mesh = mesh
-        self._mesh = None
-        self._forward = None
+        self.mesh, self._mesh, self._forward = mesh, None, None
 
-    def setMesh(self, mesh: Any) -> None:  # noqa: N802 - compatibility with common ERT APIs
-        """Alias for :meth:`set_mesh`."""
-
-        self.set_mesh(mesh)
+    setData = set_data  # noqa: N815 - compatibility with common ERT APIs
+    setMesh = set_mesh  # noqa: N815
 
     def _resolved_mesh(self) -> Mesh | Mesh3D:
         if self.mesh is None:
@@ -207,8 +173,7 @@ class ERTForwardModeling:
         if self.data is None:
             raise ValueError("data has not been set")
         if self._survey is None:
-            mesh = self._resolved_mesh()
-            self._survey = survey_to_adtlert(self.data, dimension=3 if isinstance(mesh, Mesh3D) else 2)
+            self._survey = survey_to_adtlert(self.data, dimension=3 if isinstance(self._resolved_mesh(), Mesh3D) else 2)
         return self._survey
 
     @property
@@ -218,8 +183,7 @@ class ERTForwardModeling:
     @property
     def forward_operator(self) -> ERTForward2p5D | ERTForward3D:
         if self._forward is None:
-            mesh = self._resolved_mesh()
-            survey = self._resolved_survey()
+            mesh, survey = self._resolved_mesh(), self._resolved_survey()
             if isinstance(mesh, Mesh3D):
                 self._forward = ERTForward3D.from_mesh_survey(
                     mesh,
@@ -243,40 +207,21 @@ class ERTForwardModeling:
                 )
         return self._forward
 
-    def prepare(
-        self,
-        resistivity_model: Any | None = None,
-        log_transform: bool = True,
-        *,
-        include_solver_state: bool = True,
-    ) -> None:
+    def _conductivity(self, model: Any, log_transform: bool) -> torch.Tensor:
+        return torch.as_tensor(1.0 / _resistivity(model, log_transform=log_transform, expected_size=self.cell_count), dtype=FLOAT_DTYPE)
+
+    def prepare(self, resistivity_model: Any | None = None, log_transform: bool = True, *, include_solver_state: bool = True) -> None:
         """Warm geometry, cache, and optional solver state."""
 
-        if resistivity_model is None:
-            self.forward_operator.prepare(None, include_solver_state=include_solver_state)
-            return
-
-        resistivity = _prepare_resistivity_model(
-            resistivity_model,
-            log_transform=log_transform,
-            expected_size=self.cell_count,
-        )
-        conductivity = torch_np.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
+        conductivity = None if resistivity_model is None else self._conductivity(resistivity_model, log_transform)
         self.forward_operator.prepare(conductivity, include_solver_state=include_solver_state)
 
     def forward(self, resistivity_model: Any, log_transform: bool = True) -> np.ndarray:
-        """Compute apparent resistivity for the current mesh and survey."""
+        """Compute apparent resistivity (its log when ``log_transform``) for the current mesh and survey."""
 
-        resistivity = _prepare_resistivity_model(
-            resistivity_model,
-            log_transform=log_transform,
-            expected_size=self.cell_count,
-        )
-        conductivity = torch_np.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
+        conductivity = self._conductivity(resistivity_model, log_transform)
         values = np.asarray(self.forward_operator.apparent_resistivity_values(conductivity), dtype=float)
-        if log_transform:
-            return np.log(values)
-        return values
+        return np.log(values) if log_transform else values
 
     def response(self, resistivity_model: Any) -> np.ndarray:
         """Return non-log apparent resistivity values."""
@@ -291,51 +236,39 @@ class ERTForwardModeling:
         include_robin_boundary_derivative: bool | None = None,
         normal_sensitivity: bool | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Compute apparent-resistivity response and a cellwise Jacobian.
+        """Compute apparent resistivity and its cellwise Jacobian.
 
-        For ``log_transform=True``, the input model and returned response are
-        logarithmic and the Jacobian is ``d log(rhoa) / d log(rho)``. For
-        ``log_transform=False``, the Jacobian is ``d rhoa / d rho``.
-        The facade defaults to the normal-quadrupole sensitivity convention, which
-        omits the mixed Robin boundary derivative.
+        With ``log_transform=True`` the model and response are logarithmic and the Jacobian
+        is ``d log(rhoa) / d log(rho)``; otherwise it is ``d rhoa / d rho``. The default
+        normal-quadrupole sensitivity omits the mixed Robin boundary derivative.
         """
 
-        resistivity = _prepare_resistivity_model(
-            resistivity_model,
-            log_transform=log_transform,
-            expected_size=self.cell_count,
-        )
-        conductivity = torch_np.asarray(1.0 / resistivity, dtype=FLOAT_DTYPE)
+        conductivity = self._conductivity(resistivity_model, log_transform)
         forward = self.forward_operator
-        if include_robin_boundary_derivative is None:
-            include_robin_boundary_derivative = self.include_robin_boundary_derivative
-        if normal_sensitivity is None:
-            normal_sensitivity = self.normal_sensitivity
-        solve_kwargs = {
-            "include_robin_boundary_derivative": include_robin_boundary_derivative,
-            "normal_sensitivity": normal_sensitivity,
+        options = {
+            "include_robin_boundary_derivative": self.include_robin_boundary_derivative
+            if include_robin_boundary_derivative is None
+            else include_robin_boundary_derivative,
+            "normal_sensitivity": self.normal_sensitivity if normal_sensitivity is None else normal_sensitivity,
         }
         if isinstance(forward, ERTForward3D):
-            solve_kwargs["include_fields"] = False
-        response, resistance_jacobian = forward.solve_with_jacobian(conductivity, **solve_kwargs)
-        apparent_jacobian_sigma = torch_np.abs(forward._geometric_factors())[:, None] * resistance_jacobian
-
+            options["include_fields"] = False
         if log_transform:
-            jacobian = apparent_jacobian_sigma * (-conductivity[None, :])
-            jacobian = jacobian / response.apparent_resistivity[:, None]
-            return np.log(np.asarray(response.apparent_resistivity, dtype=float)), np.asarray(jacobian, dtype=float)
-
-        jacobian = apparent_jacobian_sigma * (-(conductivity**2)[None, :])
+            return log_response_and_jacobian(forward, conductivity, **options)
+        response, resistance_jacobian = forward.solve_with_jacobian(conductivity, **options)
+        jacobian = torch.abs(torch.as_tensor(forward._geometric_factors()))[:, None] * resistance_jacobian
+        jacobian = jacobian * (-(conductivity**2)[None, :])
         return np.asarray(response.apparent_resistivity, dtype=float), np.asarray(jacobian, dtype=float)
+
+
+_MODELING_OPTIONS = tuple(item.name for item in fields(ERTForwardModeling) if item.name not in ("mesh", "data"))
 
 
 @dataclass
 class MappedERTForwardModeling:
-    """Forward facade for inversions whose parameters cover only active cells.
+    """Forward facade whose model vector covers only ``active_cell_ids`` of the forward mesh.
 
-    The forward solve is evaluated on ``mesh`` while the public model vector is
-    restricted to ``active_cell_ids``. Cells outside that active set are kept at
-    ``inactive_resistivity``.
+    Cells outside the active set are kept at ``inactive_resistivity``.
     """
 
     mesh: Any
@@ -358,21 +291,9 @@ class MappedERTForwardModeling:
 
     def __post_init__(self) -> None:
         self._forward_modeling = ERTForwardModeling(
-            mesh=self.mesh,
-            data=self.data,
-            quadrature_order=self.quadrature_order,
-            numerical_h2_refined=self.numerical_h2_refined,
-            numerical_p2_refined=self.numerical_p2_refined,
-            topographic_geometric_factor_mode=self.topographic_geometric_factor_mode,
-            linear_solver_backend=self.linear_solver_backend,
-            terrain_cache_dir=self.terrain_cache_dir,
-            include_robin_boundary_derivative=self.include_robin_boundary_derivative,
-            normal_sensitivity=self.normal_sensitivity,
-            boundary_mode_3d=self.boundary_mode_3d,
-            singularity_removal_3d=self.singularity_removal_3d,
-            element_order_3d=self.element_order_3d,
-            geometric_factor_mode_3d=self.geometric_factor_mode_3d,
+            mesh=self.mesh, data=self.data, **{name: getattr(self, name) for name in _MODELING_OPTIONS}
         )
+        full_cell_count = self._forward_modeling.cell_count
         active = np.asarray(self.active_cell_ids, dtype=np.int32).ravel()
         if active.size == 0:
             raise ValueError("active_cell_ids must be non-empty")
@@ -380,22 +301,17 @@ class MappedERTForwardModeling:
             raise ValueError("active_cell_ids contains negative indices")
         if np.unique(active).size != active.size:
             raise ValueError("active_cell_ids must be unique")
-        full_cell_count = self._forward_modeling.cell_count
         if np.any(active >= full_cell_count):
             raise ValueError("active_cell_ids references cells outside the forward mesh")
         self._active_cell_ids = active
 
         inactive = np.asarray(self.inactive_resistivity, dtype=float)
-        if inactive.ndim == 0:
-            inactive = np.full(full_cell_count, float(inactive), dtype=float)
-        else:
-            inactive = inactive.ravel().astype(float, copy=True)
-            if inactive.shape != (full_cell_count,):
-                raise ValueError(f"inactive_resistivity must be scalar or shape ({full_cell_count},)")
+        inactive = np.full(full_cell_count, float(inactive)) if inactive.ndim == 0 else inactive.ravel().copy()
+        if inactive.shape != (full_cell_count,):
+            raise ValueError(f"inactive_resistivity must be scalar or shape ({full_cell_count},)")
         if not np.all(np.isfinite(inactive)) or np.any(inactive <= 0.0):
             raise ValueError("inactive_resistivity must contain positive finite values")
         self._inactive_resistivity = inactive
-
         if self.regularization_mesh is not None:
             self.regularization_mesh = mesh_to_adtlert(self.regularization_mesh)
 
@@ -411,41 +327,20 @@ class MappedERTForwardModeling:
     def active_cell_ids_array(self) -> np.ndarray:
         return self._active_cell_ids.copy()
 
-    def _expand_resistivity(self, resistivity_model: Any, *, log_transform: bool) -> np.ndarray:
-        active_resistivity = _prepare_resistivity_model(
-            resistivity_model,
-            log_transform=log_transform,
-            expected_size=self.cell_count,
-        )
+    def _expand(self, resistivity_model: Any, log_transform: bool) -> np.ndarray:
         full = self._inactive_resistivity.copy()
-        full[self._active_cell_ids] = active_resistivity
+        full[self._active_cell_ids] = _resistivity(resistivity_model, log_transform=log_transform, expected_size=self.cell_count)
         return full
 
-    def prepare(
-        self,
-        resistivity_model: Any | None = None,
-        log_transform: bool = True,
-        *,
-        include_solver_state: bool = True,
-    ) -> None:
+    def prepare(self, resistivity_model: Any | None = None, log_transform: bool = True, *, include_solver_state: bool = True) -> None:
         """Warm geometry, cache, and optional solver state."""
 
-        if resistivity_model is None:
-            self._forward_modeling.prepare(None, include_solver_state=include_solver_state)
-            return
-        full_resistivity = self._expand_resistivity(resistivity_model, log_transform=log_transform)
-        self._forward_modeling.prepare(
-            full_resistivity,
-            log_transform=False,
-            include_solver_state=include_solver_state,
-        )
+        full = None if resistivity_model is None else self._expand(resistivity_model, log_transform)
+        self._forward_modeling.prepare(full, log_transform=False, include_solver_state=include_solver_state)
 
     def forward(self, resistivity_model: Any, log_transform: bool = True) -> np.ndarray:
-        full_resistivity = self._expand_resistivity(resistivity_model, log_transform=log_transform)
-        values = self._forward_modeling.forward(full_resistivity, log_transform=False)
-        if log_transform:
-            return np.log(values)
-        return values
+        values = self._forward_modeling.forward(self._expand(resistivity_model, log_transform), log_transform=False)
+        return np.log(values) if log_transform else values
 
     def response(self, resistivity_model: Any) -> np.ndarray:
         return self.forward(resistivity_model, log_transform=False)
@@ -458,12 +353,11 @@ class MappedERTForwardModeling:
         include_robin_boundary_derivative: bool | None = None,
         normal_sensitivity: bool | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        full_resistivity = self._expand_resistivity(resistivity_model, log_transform=log_transform)
-        full_model = np.log(full_resistivity) if log_transform else full_resistivity
-        response, full_jacobian = self._forward_modeling.forward_and_jacobian(
-            full_model,
+        full = self._expand(resistivity_model, log_transform)
+        response, jacobian = self._forward_modeling.forward_and_jacobian(
+            np.log(full) if log_transform else full,
             log_transform=log_transform,
             include_robin_boundary_derivative=include_robin_boundary_derivative,
             normal_sensitivity=normal_sensitivity,
         )
-        return response, np.asarray(full_jacobian[:, self._active_cell_ids], dtype=float)
+        return response, np.asarray(jacobian[:, self._active_cell_ids], dtype=float)
