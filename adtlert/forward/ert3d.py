@@ -8,8 +8,9 @@ import logging
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+import torch
 
-from adtlert.fem.tet_p1 import (
+from adtlert.fem.tetrahedron import (
     build_tetrahedron_p1_data,
     build_tetrahedron_p2_data,
     p2_tetrahedron_shape_values,
@@ -18,7 +19,6 @@ from adtlert.fem.tet_p1 import (
 from adtlert.mesh import Mesh3D
 from adtlert.survey import Survey
 from adtlert.utils.dtypes import FLOAT_DTYPE
-from adtlert.utils.torch_runtime import Array, torch_np
 
 
 _VALID_BOUNDARY_MODES = frozenset({"mixed", "dirichlet"})
@@ -32,10 +32,10 @@ _CUDSS_LOGGER.setLevel(logging.ERROR)
 class ForwardResponse3D:
     """Result of a true 3D DC ERT solve."""
 
-    apparent_resistivity: Array
-    resistance: Array
-    electrode_potentials: Array
-    node_potentials: Array
+    apparent_resistivity: torch.Tensor
+    resistance: torch.Tensor
+    electrode_potentials: torch.Tensor
+    node_potentials: torch.Tensor
 
 
 def _interpolation_matrix(
@@ -104,7 +104,7 @@ class ERTForward3D:
     _cached_factorization: object | None = field(default=None, init=False, repr=False)
     _cached_node_fields: np.ndarray | None = field(default=None, init=False, repr=False)
     _cached_receiver_fields: np.ndarray | None = field(default=None, init=False, repr=False)
-    _cached_geometric_factors: Array | None = field(default=None, init=False, repr=False)
+    _cached_geometric_factors: torch.Tensor | None = field(default=None, init=False, repr=False)
     _cudss_state: dict[str, object] = field(default_factory=dict, init=False, repr=False)
 
     @classmethod
@@ -381,7 +381,7 @@ class ERTForward3D:
         solution = solver.solve()
         return np.asarray(cp.asnumpy(solution.T), dtype=np.float64)
 
-    def _solve_node_fields(self, conductivity: Array | float) -> np.ndarray:
+    def _solve_node_fields(self, conductivity: torch.Tensor | float) -> np.ndarray:
         values = np.asarray(conductivity, dtype=np.float64)
         if values.ndim == 0:
             values = np.full(self.mesh.cell_count, float(values), dtype=np.float64)
@@ -424,7 +424,7 @@ class ERTForward3D:
         full_electrode_potentials[self._current_electrode_ids] = electrode_potentials
         return full_node_fields, full_electrode_potentials
 
-    def _geometric_factors(self) -> Array:
+    def _geometric_factors(self) -> torch.Tensor:
         use_numerical = self.geometric_factor_mode == "numerical" or (
             self.geometric_factor_mode == "auto" and not self.mesh.is_flat_surface
         )
@@ -435,13 +435,13 @@ class ERTForward3D:
             _, unit_resistance = self._measurement_values(unit_fields)
             if np.any(np.abs(unit_resistance) <= np.finfo(float).tiny):
                 raise ValueError("numerical geometric-factor solve produced zero resistance")
-            self._cached_geometric_factors = torch_np.asarray(1.0 / unit_resistance, dtype=FLOAT_DTYPE)
+            self._cached_geometric_factors = torch.as_tensor(1.0 / unit_resistance, dtype=FLOAT_DTYPE)
         return self._cached_geometric_factors
 
     def _response_from_fields(
         self,
         node_fields: np.ndarray,
-        currents: Array | float,
+        currents: torch.Tensor | float,
         *,
         include_fields: bool,
     ) -> ForwardResponse3D:
@@ -458,25 +458,25 @@ class ERTForward3D:
         geometric_factors = np.abs(np.asarray(self._geometric_factors(), dtype=float))
         apparent = geometric_factors * resistance / current_array
         return ForwardResponse3D(
-            apparent_resistivity=torch_np.asarray(apparent, dtype=FLOAT_DTYPE),
-            resistance=torch_np.asarray(resistance, dtype=FLOAT_DTYPE),
-            electrode_potentials=torch_np.asarray(response_electrode_potentials, dtype=FLOAT_DTYPE),
-            node_potentials=torch_np.asarray(response_node_fields, dtype=FLOAT_DTYPE),
+            apparent_resistivity=torch.as_tensor(apparent, dtype=FLOAT_DTYPE),
+            resistance=torch.as_tensor(resistance, dtype=FLOAT_DTYPE),
+            electrode_potentials=torch.as_tensor(response_electrode_potentials, dtype=FLOAT_DTYPE),
+            node_potentials=torch.as_tensor(response_node_fields, dtype=FLOAT_DTYPE),
         )
 
-    def solve(self, conductivity: Array | float, currents: Array | float = 1.0) -> ForwardResponse3D:
+    def solve(self, conductivity: torch.Tensor | float, currents: torch.Tensor | float = 1.0) -> ForwardResponse3D:
         return self._response_from_fields(self._solve_node_fields(conductivity), currents, include_fields=True)
 
-    def resistance(self, conductivity: Array | float) -> Array:
+    def resistance(self, conductivity: torch.Tensor | float) -> torch.Tensor:
         _, resistance = self._measurement_values(self._solve_node_fields(conductivity))
-        return torch_np.asarray(resistance, dtype=FLOAT_DTYPE)
+        return torch.as_tensor(resistance, dtype=FLOAT_DTYPE)
 
-    def apparent_resistivity_values(self, conductivity: Array | float, currents: Array | float = 1.0) -> Array:
+    def apparent_resistivity_values(self, conductivity: torch.Tensor | float, currents: torch.Tensor | float = 1.0) -> torch.Tensor:
         resistance = np.asarray(self.resistance(conductivity), dtype=float)
         factors = np.abs(np.asarray(self._geometric_factors(), dtype=float))
-        return torch_np.asarray(factors * resistance / np.asarray(currents, dtype=float), dtype=FLOAT_DTYPE)
+        return torch.as_tensor(factors * resistance / np.asarray(currents, dtype=float), dtype=FLOAT_DTYPE)
 
-    def apparent_resistivity_series(self, conductivities: Array, currents: Array | float = 1.0) -> Array:
+    def apparent_resistivity_series(self, conductivities: torch.Tensor, currents: torch.Tensor | float = 1.0) -> torch.Tensor:
         values = np.asarray(conductivities, dtype=float)
         if values.ndim != 2 or values.shape[1] != self.mesh.cell_count:
             raise ValueError(f"conductivities must have shape (n_steps, {self.mesh.cell_count})")
@@ -485,17 +485,17 @@ class ERTForward3D:
         for index, model in enumerate(values):
             step_currents = currents_np[index] if currents_np.ndim == 2 else currents_np
             rows.append(self.apparent_resistivity_values(model, currents=step_currents))
-        return torch_np.stack(rows, axis=0)
+        return torch.stack(rows)
 
     def jacobian(
         self,
-        conductivity: Array | float,
+        conductivity: torch.Tensor | float,
         *,
         batch_size: int | None = None,
         cell_batch_size: int | None = None,
         include_robin_boundary_derivative: bool = False,
         normal_sensitivity: bool = True,
-    ) -> Array:
+    ) -> torch.Tensor:
         del normal_sensitivity
         fields = self._solve_node_fields(conductivity)
         if self._cached_receiver_fields is None:
@@ -559,12 +559,12 @@ class ERTForward3D:
                     templates[cell_start:cell_stop],
                     receiver_local,
                 )
-        return torch_np.asarray(result, dtype=FLOAT_DTYPE)
+        return torch.as_tensor(result, dtype=FLOAT_DTYPE)
 
     def solve_with_jacobian(
         self,
-        conductivity: Array | float,
-        currents: Array | float = 1.0,
+        conductivity: torch.Tensor | float,
+        currents: torch.Tensor | float = 1.0,
         *,
         batch_size: int | None = None,
         cell_batch_size: int | None = None,
@@ -572,7 +572,7 @@ class ERTForward3D:
         normal_sensitivity: bool = True,
         include_fields: bool = True,
         **_: object,
-    ) -> tuple[ForwardResponse3D, Array]:
+    ) -> tuple[ForwardResponse3D, torch.Tensor]:
         fields = self._solve_node_fields(conductivity)
         response = self._response_from_fields(fields, currents, include_fields=include_fields)
         jacobian = self.jacobian(
@@ -584,7 +584,7 @@ class ERTForward3D:
         )
         return response, jacobian
 
-    def prepare(self, conductivity: Array | None = None, *, include_solver_state: bool = True) -> None:
+    def prepare(self, conductivity: torch.Tensor | None = None, *, include_solver_state: bool = True) -> None:
         if conductivity is not None and include_solver_state:
             self._operator_and_factorization(np.asarray(conductivity, dtype=float))
 

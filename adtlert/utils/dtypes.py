@@ -1,22 +1,15 @@
-"""Shared dtype definitions for Torch arrays."""
+"""Default floating-point precision (``ADTLERT_ENABLE_FLOAT64=1`` selects float64 at import)."""
 
 from __future__ import annotations
 
 import os
+
 import numpy as np
 import torch
 
-from adtlert.utils.torch_runtime import torch_runtime, torch_np
+if os.environ.get("ADTLERT_ENABLE_FLOAT64", "").strip().lower() not in {"", "0", "false", "no", "off"}:
+    torch.set_default_dtype(torch.float64)
 
-
-def _env_truthy(name: str) -> bool:
-    value = os.environ.get(name)
-    return value is not None and value.strip().lower() not in {"", "0", "false", "no", "off"}
-
-
-if _env_truthy("ADTLERT_ENABLE_FLOAT64"):
-    torch_runtime.config.update("torch_enable_float64", True)
-
-FLOAT_DTYPE = torch_np.float64 if torch_runtime.config.torch_enable_float64 else torch_np.float32
-NP_FLOAT_DTYPE = np.float64 if torch_runtime.config.torch_enable_float64 else np.float32
+FLOAT_DTYPE = torch.float64 if torch.get_default_dtype() == torch.float64 else torch.float32
+NP_FLOAT_DTYPE = np.float64 if FLOAT_DTYPE == torch.float64 else np.float32
 INT_DTYPE = torch.int32

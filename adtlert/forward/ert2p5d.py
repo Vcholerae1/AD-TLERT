@@ -292,7 +292,7 @@ def _structured_quads(mesh: Mesh) -> Mesh | None:
 def _refine_quads(mesh: Mesh) -> tuple[Mesh, np.ndarray]:
     """Split every quad into four through edge midpoints and the center."""
 
-    nodes, midpoint = edge_midpoint_builder(mesh.nodes)
+    nodes, midpoint, _ = edge_midpoint_builder(mesh.nodes)
     cells, parents = [], []
     for parent, (bl, br, tr, tl) in enumerate(np.asarray(mesh.cells).tolist()):
         b, r, t, l = midpoint(bl, br), midpoint(br, tr), midpoint(tr, tl), midpoint(tl, bl)
@@ -309,7 +309,7 @@ def _refine_quads(mesh: Mesh) -> tuple[Mesh, np.ndarray]:
 
 
 def _serendipity_topology(mesh: Mesh) -> tuple[Tensor, Tensor, Tensor]:
-    nodes, midpoint = edge_midpoint_builder(mesh.nodes)
+    nodes, midpoint, _ = edge_midpoint_builder(mesh.nodes)
     cells = [
         [bl, br, tr, tl, midpoint(bl, br), midpoint(br, tr), midpoint(tr, tl), midpoint(tl, bl)]
         for bl, br, tr, tl in np.asarray(mesh.cells).tolist()

@@ -1,8 +1,8 @@
-"""Data-misfit interfaces for ADTLERT inversions.
+"""Data-misfit terms in the (already log-transformed) apparent-resistivity domain.
 
-The first implementation intentionally mirrors the historical ADTLERT
-weighted L2 objective in transformed-data space.  In the current inversion
-core, the transformed data are log apparent resistivities.
+Robust misfits are linearized by iteratively reweighted least squares (IRLS): each
+residual is scaled by ``sqrt(w(r))`` so that the Gauss-Newton system minimizes the
+robust objective locally.
 """
 
 from __future__ import annotations
@@ -27,21 +27,10 @@ class DataMisfit(Protocol):
     def weighted_jacobian(self, jacobian: np.ndarray, weights: np.ndarray) -> np.ndarray:
         """Apply data weights to a Jacobian block."""
 
-    def linearized_system(
-        self,
-        predicted: np.ndarray,
-        observed: np.ndarray,
-        weights: np.ndarray,
-        jacobian: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def linearized_system(self, predicted, observed, weights, jacobian) -> tuple[np.ndarray, np.ndarray]:
         """Return ``(A, b)`` for the current linearized data term."""
 
-    def linearized_cotangent(
-        self,
-        predicted: np.ndarray,
-        observed: np.ndarray,
-        weights: np.ndarray,
-    ) -> np.ndarray:
+    def linearized_cotangent(self, predicted, observed, weights) -> np.ndarray:
         """Return the data-space cotangent whose VJP is the model gradient."""
 
     def phi(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> float:
@@ -51,230 +40,136 @@ class DataMisfit(Protocol):
         """Return the mean squared weighted residual."""
 
 
-@dataclass(frozen=True)
-class WeightedLogL2Misfit:
-    """Weighted L2 misfit in the already-log-transformed data domain."""
+def l1_irls_weight(residual: np.ndarray, epsilon: float) -> np.ndarray:
+    """``sqrt`` of the smoothed-L1 IRLS weight ``(r^2 + eps^2)^(-1/2)``."""
 
-    name: str = "weighted_log_l2"
+    eps = max(float(epsilon), np.finfo(float).eps)
+    return np.power(residual**2 + eps**2, -0.25)
 
-    def residual(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> np.ndarray:
-        predicted_array = np.asarray(predicted, dtype=float)
-        observed_array = np.asarray(observed, dtype=float)
-        weight_array = np.asarray(weights, dtype=float)
-        return (predicted_array - observed_array) * weight_array
 
-    def linearized_rhs(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> np.ndarray:
+def huber_irls_weight(residual: np.ndarray, delta: float, epsilon: float) -> np.ndarray:
+    """``sqrt`` of the Huber IRLS weight ``min(1, delta / |r|)``."""
+
+    delta = max(float(delta), np.finfo(float).eps)
+    absolute = np.abs(residual)
+    weight_sq = np.ones_like(absolute, dtype=float)
+    outliers = absolute > delta
+    weight_sq[outliers] = delta / np.maximum(absolute[outliers], max(float(epsilon), np.finfo(float).eps))
+    return np.sqrt(weight_sq)
+
+
+class _LogMisfit:
+    """Shared weighted-residual machinery; subclasses override ``_irls`` and ``phi``."""
+
+    def _irls(self, residual: np.ndarray) -> np.ndarray | None:
+        return None
+
+    def residual(self, predicted, observed, weights) -> np.ndarray:
+        return (np.asarray(predicted, dtype=float) - np.asarray(observed, dtype=float)) * np.asarray(weights, dtype=float)
+
+    def linearized_rhs(self, predicted, observed, weights) -> np.ndarray:
         return -self.residual(predicted, observed, weights)
 
-    def weighted_jacobian(self, jacobian: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    def weighted_jacobian(self, jacobian, weights) -> np.ndarray:
         matrix = np.asarray(jacobian, dtype=float)
-        weight_array = np.asarray(weights, dtype=float).reshape(-1)
+        weights = np.asarray(weights, dtype=float).reshape(-1)
         if matrix.ndim != 2:
             raise ValueError("jacobian must be a 2D array")
-        if weight_array.shape != (matrix.shape[0],):
-            raise ValueError(
-                "weights must have one value per Jacobian row "
-                f"({weight_array.shape} != ({matrix.shape[0]},))"
-            )
-        return matrix * weight_array[:, None]
+        if weights.shape != (matrix.shape[0],):
+            raise ValueError(f"weights must have one value per Jacobian row ({weights.shape} != ({matrix.shape[0]},))")
+        return matrix * weights[:, None]
 
-    def linearized_system(
-        self,
-        predicted: np.ndarray,
-        observed: np.ndarray,
-        weights: np.ndarray,
-        jacobian: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        return self.weighted_jacobian(jacobian, weights), self.linearized_rhs(predicted, observed, weights)
-
-    def linearized_cotangent(
-        self,
-        predicted: np.ndarray,
-        observed: np.ndarray,
-        weights: np.ndarray,
-    ) -> np.ndarray:
+    def linearized_system(self, predicted, observed, weights, jacobian) -> tuple[np.ndarray, np.ndarray]:
         residual = self.residual(predicted, observed, weights)
-        return np.asarray(weights, dtype=float) * residual
+        scale = self._irls(residual)
+        if scale is None:
+            return self.weighted_jacobian(jacobian, weights), -residual
+        return self.weighted_jacobian(jacobian, weights) * scale.reshape(-1)[:, None], -scale * residual
 
-    def phi(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> float:
+    def linearized_cotangent(self, predicted, observed, weights) -> np.ndarray:
+        residual = self.residual(predicted, observed, weights)
+        scale = self._irls(residual)
+        weights = np.asarray(weights, dtype=float)
+        return weights * residual if scale is None else weights * (scale**2) * residual
+
+    def phi(self, predicted, observed, weights) -> float:
         residual = self.residual(predicted, observed, weights).reshape(-1)
         return float(np.dot(residual, residual))
 
-    def chi2(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> float:
-        residual = self.residual(predicted, observed, weights)
-        return float(np.mean(residual**2))
+    def chi2(self, predicted, observed, weights) -> float:
+        return float(np.mean(self.residual(predicted, observed, weights) ** 2))
 
 
 @dataclass(frozen=True)
-class WeightedLogL1Misfit:
-    """IRLS-smoothed L1 misfit in the already-log-transformed data domain."""
+class WeightedLogL2Misfit(_LogMisfit):
+    """Weighted L2 misfit."""
+
+    name: str = "weighted_log_l2"
+
+
+@dataclass(frozen=True)
+class WeightedLogL1Misfit(_LogMisfit):
+    """IRLS-smoothed L1 misfit ``sum 2 (sqrt(r^2 + eps^2) - eps)``."""
 
     epsilon: float = 1.0e-3
     name: str = "weighted_log_l1"
 
-    def residual(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> np.ndarray:
-        predicted_array = np.asarray(predicted, dtype=float)
-        observed_array = np.asarray(observed, dtype=float)
-        weight_array = np.asarray(weights, dtype=float)
-        return (predicted_array - observed_array) * weight_array
+    def _irls(self, residual):
+        return l1_irls_weight(residual, self.epsilon)
 
-    def _sqrt_irls_weight(self, residual: np.ndarray) -> np.ndarray:
-        eps = max(float(self.epsilon), np.finfo(float).eps)
-        return np.power(residual**2 + eps**2, -0.25)
-
-    def linearized_rhs(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> np.ndarray:
-        return -self.residual(predicted, observed, weights)
-
-    def weighted_jacobian(self, jacobian: np.ndarray, weights: np.ndarray) -> np.ndarray:
-        return WeightedLogL2Misfit().weighted_jacobian(jacobian, weights)
-
-    def linearized_system(
-        self,
-        predicted: np.ndarray,
-        observed: np.ndarray,
-        weights: np.ndarray,
-        jacobian: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        residual = self.residual(predicted, observed, weights)
-        sqrt_weight = self._sqrt_irls_weight(residual)
-        return (
-            self.weighted_jacobian(jacobian, weights) * sqrt_weight.reshape(-1)[:, None],
-            -sqrt_weight * residual,
-        )
-
-    def linearized_cotangent(
-        self,
-        predicted: np.ndarray,
-        observed: np.ndarray,
-        weights: np.ndarray,
-    ) -> np.ndarray:
-        residual = self.residual(predicted, observed, weights)
-        sqrt_weight = self._sqrt_irls_weight(residual)
-        return np.asarray(weights, dtype=float) * (sqrt_weight**2) * residual
-
-    def phi(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> float:
+    def phi(self, predicted, observed, weights) -> float:
         residual = self.residual(predicted, observed, weights).reshape(-1)
         eps = max(float(self.epsilon), np.finfo(float).eps)
         return float(np.sum(2.0 * (np.sqrt(residual**2 + eps**2) - eps)))
 
-    def chi2(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> float:
-        residual = self.residual(predicted, observed, weights)
-        return float(np.mean(residual**2))
-
 
 @dataclass(frozen=True)
-class WeightedLogHuberMisfit:
-    """Huber robust misfit in the already-log-transformed data domain."""
+class WeightedLogHuberMisfit(_LogMisfit):
+    """Huber robust misfit."""
 
     delta: float = 1.0
     epsilon: float = 1.0e-12
     name: str = "weighted_log_huber"
 
-    def residual(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> np.ndarray:
-        predicted_array = np.asarray(predicted, dtype=float)
-        observed_array = np.asarray(observed, dtype=float)
-        weight_array = np.asarray(weights, dtype=float)
-        return (predicted_array - observed_array) * weight_array
+    def _irls(self, residual):
+        return huber_irls_weight(residual, self.delta, self.epsilon)
 
-    def _sqrt_irls_weight(self, residual: np.ndarray) -> np.ndarray:
+    def phi(self, predicted, observed, weights) -> float:
+        residual = np.abs(self.residual(predicted, observed, weights).reshape(-1))
         delta = max(float(self.delta), np.finfo(float).eps)
-        eps = max(float(self.epsilon), np.finfo(float).eps)
-        abs_residual = np.abs(residual)
-        weight_sq = np.ones_like(abs_residual, dtype=float)
-        mask = abs_residual > delta
-        weight_sq[mask] = delta / np.maximum(abs_residual[mask], eps)
-        return np.sqrt(weight_sq)
-
-    def linearized_rhs(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> np.ndarray:
-        return -self.residual(predicted, observed, weights)
-
-    def weighted_jacobian(self, jacobian: np.ndarray, weights: np.ndarray) -> np.ndarray:
-        return WeightedLogL2Misfit().weighted_jacobian(jacobian, weights)
-
-    def linearized_system(
-        self,
-        predicted: np.ndarray,
-        observed: np.ndarray,
-        weights: np.ndarray,
-        jacobian: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        residual = self.residual(predicted, observed, weights)
-        sqrt_weight = self._sqrt_irls_weight(residual)
-        return (
-            self.weighted_jacobian(jacobian, weights) * sqrt_weight.reshape(-1)[:, None],
-            -sqrt_weight * residual,
-        )
-
-    def linearized_cotangent(
-        self,
-        predicted: np.ndarray,
-        observed: np.ndarray,
-        weights: np.ndarray,
-    ) -> np.ndarray:
-        residual = self.residual(predicted, observed, weights)
-        sqrt_weight = self._sqrt_irls_weight(residual)
-        return np.asarray(weights, dtype=float) * (sqrt_weight**2) * residual
-
-    def phi(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> float:
-        residual = self.residual(predicted, observed, weights).reshape(-1)
-        delta = max(float(self.delta), np.finfo(float).eps)
-        abs_residual = np.abs(residual)
-        values = np.where(abs_residual <= delta, residual**2, 2.0 * delta * abs_residual - delta**2)
-        return float(np.sum(values))
-
-    def chi2(self, predicted: np.ndarray, observed: np.ndarray, weights: np.ndarray) -> float:
-        residual = self.residual(predicted, observed, weights)
-        return float(np.mean(residual**2))
+        return float(np.sum(np.where(residual <= delta, residual**2, 2.0 * delta * residual - delta**2)))
 
 
 @dataclass(frozen=True)
 class LogDataDifferenceL2Misfit(WeightedLogL2Misfit):
-    """L2 data-difference misfit for time-lapse log apparent resistivities.
+    """L2 misfit of time-lapse changes ``log(d_t) - log(d_0)``.
 
-    In a time-lapse inversion this is evaluated as differences to a reference
-    survey, i.e. ``log(d_t) - log(d_ref)``.  The vector methods inherit the
-    weighted L2 behavior so the name can still be resolved by the generic
-    registry; the coupled time-lapse assembly lives in ``core.py``.
+    The vector methods are those of the weighted L2 misfit; the coupled time-lapse
+    assembly lives in ``core.py``.
     """
 
     name: str = "log_data_difference_l2"
 
 
-_DATA_MISFITS: dict[str, DataMisfit] = {
-    "weighted_log_l2": WeightedLogL2Misfit(),
-    "weighted_l2": WeightedLogL2Misfit(),
-    "l2": WeightedLogL2Misfit(),
-    "log_l2": WeightedLogL2Misfit(),
-    "weighted_log_l1": WeightedLogL1Misfit(),
-    "log_l1": WeightedLogL1Misfit(),
-    "l1": WeightedLogL1Misfit(),
-    "weighted_log_huber": WeightedLogHuberMisfit(),
-    "log_huber": WeightedLogHuberMisfit(),
-    "huber": WeightedLogHuberMisfit(),
-    "smooth_l1": WeightedLogHuberMisfit(),
-    "log_data_difference_l2": LogDataDifferenceL2Misfit(),
-    "data_difference_l2": LogDataDifferenceL2Misfit(),
-    "difference_log_l2": LogDataDifferenceL2Misfit(),
-    "ratio_log_l2": LogDataDifferenceL2Misfit(),
-    "time_lapse_difference_l2": LogDataDifferenceL2Misfit(),
+_ALIASES = {
+    WeightedLogL2Misfit(): ("weighted_log_l2", "weighted_l2", "l2", "log_l2"),
+    WeightedLogL1Misfit(): ("weighted_log_l1", "log_l1", "l1"),
+    WeightedLogHuberMisfit(): ("weighted_log_huber", "log_huber", "huber", "smooth_l1"),
+    LogDataDifferenceL2Misfit(): (
+        "log_data_difference_l2",
+        "data_difference_l2",
+        "difference_log_l2",
+        "ratio_log_l2",
+        "time_lapse_difference_l2",
+    ),
 }
-
-_PUBLIC_DATA_MISFITS = (
-    "weighted_log_l2",
-    "weighted_log_l1",
-    "weighted_log_huber",
-    "log_data_difference_l2",
-)
-
-
-def _normalize_name(name: str) -> str:
-    return str(name).strip().lower().replace("-", "_")
+_DATA_MISFITS: dict[str, DataMisfit] = {alias: misfit for misfit, aliases in _ALIASES.items() for alias in aliases}
 
 
 def available_data_misfits() -> tuple[str, ...]:
     """Return canonical data-misfit names for user-facing configuration."""
 
-    return tuple(_PUBLIC_DATA_MISFITS)
+    return tuple(misfit.name for misfit in _ALIASES)
 
 
 def build_data_misfit(name: str | DataMisfit) -> DataMisfit:
@@ -282,9 +177,7 @@ def build_data_misfit(name: str | DataMisfit) -> DataMisfit:
 
     if hasattr(name, "residual") and hasattr(name, "linearized_rhs"):
         return name  # type: ignore[return-value]
-    key = _normalize_name(str(name))
     try:
-        return _DATA_MISFITS[key]
+        return _DATA_MISFITS[str(name).strip().lower().replace("-", "_")]
     except KeyError as exc:
-        choices = ", ".join(available_data_misfits())
-        raise ValueError(f"unknown data_misfit={name!r}; available choices: {choices}") from exc
+        raise ValueError(f"unknown data_misfit={name!r}; available choices: {', '.join(available_data_misfits())}") from exc
