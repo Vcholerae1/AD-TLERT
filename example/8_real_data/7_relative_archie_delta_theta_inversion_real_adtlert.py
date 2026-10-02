@@ -22,12 +22,10 @@ import time
 
 os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 
-from adtlert.utils.torch_runtime import torch_runtime
+import torch
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-
-torch_runtime.config.update("torch_enable_float64", True)
 
 from adtlert.inversion import (  # noqa: E402
     InversionConfig,
@@ -55,6 +53,9 @@ from _real_data_common import (  # noqa: E402
     save_mesh_npz,
     write_json,
 )
+
+# Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
+torch.set_default_dtype(torch.float64)
 
 
 def _check_same_layout(first, current) -> None:
@@ -1011,7 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
         "elapsed_sec": float(elapsed_sec),
         "elapsed_min": float(elapsed_sec / 60.0),
         "plot_files": plot_files,
-        "torch_enable_float64": bool(torch_runtime.config.torch_enable_float64),
+        "torch_enable_float64": torch.get_default_dtype() == torch.float64,
         "temperature_note": (
             "Temperature correction is included in the petrophysical chain: "
             "relative Archie maps theta to rho at Tref, then rho_field = rho_Tref / C_T for forward prediction."

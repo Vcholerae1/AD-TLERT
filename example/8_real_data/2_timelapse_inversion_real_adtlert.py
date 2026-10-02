@@ -11,10 +11,8 @@ import time
 
 os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 
-from adtlert.utils.torch_runtime import torch_runtime
+import torch
 import numpy as np
-
-torch_runtime.config.update("torch_enable_float64", True)
 
 from adtlert.inversion import (
     InversionConfig,
@@ -43,6 +41,9 @@ from _real_data_common import (
     save_mesh_npz,
     write_json,
 )
+
+# Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
+torch.set_default_dtype(torch.float64)
 
 
 def _check_same_layout(first, current) -> None:
@@ -353,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
         "elapsed_sec": float(elapsed_sec),
         "elapsed_min": float(elapsed_sec / 60.0),
         "plot_files": plot_files,
-        "torch_enable_float64": bool(torch_runtime.config.torch_enable_float64),
+        "torch_enable_float64": torch.get_default_dtype() == torch.float64,
     }
     summary.update(run_meta)
     write_json(output_dir / "timelapse_real_inversion_summary.json", summary)

@@ -14,10 +14,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from adtlert.utils.torch_runtime import torch_runtime
+import torch
 import numpy as np
-
-torch_runtime.config.update("torch_enable_float64", True)
 
 from adtlert.workflows import (
     build_terrain_forward_case,
@@ -28,6 +26,9 @@ from adtlert.workflows import (
     save_terrain_forward_dat,
     save_terrain_forward_npz,
 )
+
+# Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
+torch.set_default_dtype(torch.float64)
 
 
 def _resolve(root: Path, value: str | Path) -> Path:

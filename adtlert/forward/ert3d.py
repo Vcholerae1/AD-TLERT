@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import logging
 
 import numpy as np
@@ -21,9 +21,6 @@ from adtlert.survey import Survey
 from adtlert.utils.dtypes import FLOAT_DTYPE
 
 
-_VALID_BOUNDARY_MODES = frozenset({"mixed", "dirichlet"})
-_VALID_SOLVER_BACKENDS = frozenset({"auto", "cudss", "scipy"})
-_VALID_GEOMETRIC_FACTOR_MODES = frozenset({"auto", "analytic", "numerical"})
 _CUDSS_LOGGER = logging.getLogger("adtlert.cudss")
 _CUDSS_LOGGER.setLevel(logging.ERROR)
 
@@ -82,30 +79,6 @@ class ERTForward3D:
     linear_solver_backend: str = "auto"
     element_order: int = 1
     geometric_factor_mode: str = "auto"
-    _dof_nodes: np.ndarray = field(init=False, repr=False)
-    _cell_connectivity: np.ndarray = field(init=False, repr=False)
-    _boundary_connectivity: np.ndarray = field(init=False, repr=False)
-    _current_electrode_ids: np.ndarray = field(init=False, repr=False)
-    _receiver_electrode_ids: np.ndarray = field(init=False, repr=False)
-    _current_electrode_map: np.ndarray = field(init=False, repr=False)
-    _receiver_electrode_map: np.ndarray = field(init=False, repr=False)
-    _rhs_capacity: int = field(init=False, repr=False)
-    _flat_templates: np.ndarray = field(init=False, repr=False)
-    _assembly_inverse: np.ndarray = field(init=False, repr=False)
-    _csr_indices: np.ndarray = field(init=False, repr=False)
-    _csr_indptr: np.ndarray = field(init=False, repr=False)
-    _cell_templates: np.ndarray = field(init=False, repr=False)
-    _volume_templates: np.ndarray = field(init=False, repr=False)
-    _electrode_matrix: sp.csr_matrix = field(init=False, repr=False)
-    _unit_operator: sp.csr_matrix = field(init=False, repr=False)
-    _source_rhs: np.ndarray = field(init=False, repr=False)
-    _cached_conductivity: np.ndarray | None = field(default=None, init=False, repr=False)
-    _cached_operator: sp.csr_matrix | None = field(default=None, init=False, repr=False)
-    _cached_factorization: object | None = field(default=None, init=False, repr=False)
-    _cached_node_fields: np.ndarray | None = field(default=None, init=False, repr=False)
-    _cached_receiver_fields: np.ndarray | None = field(default=None, init=False, repr=False)
-    _cached_geometric_factors: torch.Tensor | None = field(default=None, init=False, repr=False)
-    _cudss_state: dict[str, object] = field(default_factory=dict, init=False, repr=False)
 
     @classmethod
     def from_mesh_survey(
@@ -131,19 +104,22 @@ class ERTForward3D:
         )
 
     def __post_init__(self) -> None:
-        self.boundary_mode = str(self.boundary_mode).lower()
-        if self.boundary_mode not in _VALID_BOUNDARY_MODES:
-            raise ValueError(f"boundary_mode must be one of: {sorted(_VALID_BOUNDARY_MODES)}")
-        self.linear_solver_backend = str(self.linear_solver_backend).lower()
-        if self.linear_solver_backend not in _VALID_SOLVER_BACKENDS:
-            raise ValueError("3D linear_solver_backend must be 'auto', 'cudss', or 'scipy'")
+        def choice(name: str, options: tuple[str, ...]) -> str:
+            value = str(getattr(self, name)).lower()
+            if value not in options:
+                raise ValueError(f"{name} must be one of: {sorted(options)}")
+            return value
+
+        self.boundary_mode = choice("boundary_mode", ("mixed", "dirichlet"))
+        self.linear_solver_backend = choice("linear_solver_backend", ("auto", "cudss", "scipy"))
+        self.geometric_factor_mode = choice("geometric_factor_mode", ("auto", "analytic", "numerical"))
         if self.element_order not in (1, 2):
             raise ValueError("element_order must be 1 or 2")
-        self.geometric_factor_mode = str(self.geometric_factor_mode).lower()
-        if self.geometric_factor_mode not in _VALID_GEOMETRIC_FACTOR_MODES:
-            raise ValueError(f"geometric_factor_mode must be one of: {sorted(_VALID_GEOMETRIC_FACTOR_MODES)}")
         if self.survey.dimension != 3:
             raise ValueError("ERTForward3D requires three-coordinate electrode positions")
+        self._cudss_state: dict[str, object] = {}
+        self._cached_geometric_factors: torch.Tensor | None = None
+        self._reset_solution_cache()
         electrodes = np.asarray(self.survey.electrode_positions, dtype=float)
         quads = np.asarray(self.survey.measurements, dtype=np.int32)
         self._current_electrode_ids = np.unique(quads[:, :2]).astype(np.int32)
@@ -588,16 +564,16 @@ class ERTForward3D:
         if conductivity is not None and include_solver_state:
             self._operator_and_factorization(np.asarray(conductivity, dtype=float))
 
+    def _reset_solution_cache(self) -> None:
+        self._cached_conductivity = self._cached_operator = self._cached_factorization = None
+        self._cached_node_fields = self._cached_receiver_fields = None
+
     def close(self) -> None:
         solver = self._cudss_state.get("solver")
         if solver is not None:
             try:
-                solver.close()
-            except Exception:
+                solver.free()
+            except Exception:  # best-effort release during teardown
                 pass
         self._cudss_state.clear()
-        self._cached_conductivity = None
-        self._cached_operator = None
-        self._cached_factorization = None
-        self._cached_node_fields = None
-        self._cached_receiver_fields = None
+        self._reset_solution_cache()

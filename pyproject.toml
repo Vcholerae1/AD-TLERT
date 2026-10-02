@@ -74,7 +74,6 @@ packages = ["adtlert"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/adtlert",
-    "/tests",
     "/LICENSE",
     "/README.md",
     "/pyproject.toml",

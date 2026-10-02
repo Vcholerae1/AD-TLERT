@@ -12,10 +12,8 @@ from pathlib import Path
 
 os.environ.setdefault("ADTLERT_ENABLE_FLOAT64", "1")
 
-from adtlert.utils.torch_runtime import torch_runtime
+import torch
 import numpy as np
-
-torch_runtime.config.update("torch_enable_float64", True)
 
 from adtlert.workflows import (
     build_terrain_forward_case,
@@ -25,6 +23,9 @@ from adtlert.workflows import (
     read_slope_x,
     run_terrain_forward_series,
 )
+
+# Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
+torch.set_default_dtype(torch.float64)
 
 
 def _resolve(root: Path, value: str | Path) -> Path:

@@ -15,10 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from adtlert.utils.torch_runtime import torch_runtime
+import torch
 import numpy as np
-
-torch_runtime.config.update("torch_enable_float64", True)
 
 from adtlert.inversion import (
     ERTInversion,
@@ -36,6 +34,9 @@ from adtlert.workflows import (
     load_terrain_forward_dat,
     parse_resistivity_slice_name,
 )
+
+# Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
+torch.set_default_dtype(torch.float64)
 
 
 def _resolve(root: Path, value: str | Path) -> Path:
@@ -583,7 +584,7 @@ def main(argv: list[str] | None = None) -> int:
         "line_search": True,
         "max_log_step": None if args.max_log_step is None else float(args.max_log_step),
         "target_chi2": None if args.target_chi2 is None else float(args.target_chi2),
-        "torch_enable_float64": bool(torch_runtime.config.torch_enable_float64),
+        "torch_enable_float64": torch.get_default_dtype() == torch.float64,
         "coverage_percentile": float(args.coverage_percentile),
         "coverage_source": coverage_source,
         "coverage_threshold": coverage_threshold,

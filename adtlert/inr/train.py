@@ -358,11 +358,21 @@ def _fit(
     extra_penalty_history: list[float] = []
     full_chi2_iterations: list[int] = []
     full_chi2_history: list[float] = []
-    best_chi2 = float("inf")
-    best_iteration = 0
-    best_model: torch.Tensor | None = None
-    best_prediction: torch.Tensor | None = None
-    best_state: dict[str, torch.Tensor] | None = None
+    best: dict[str, Any] = {"chi2": float("inf"), "iteration": 0}
+
+    def remember(iteration: int, chi2_value: float, model: torch.Tensor, prediction: torch.Tensor) -> None:
+        """Record a full-data chi-square; keep the best model, prediction, and network state."""
+
+        full_chi2_iterations.append(iteration)
+        full_chi2_history.append(chi2_value)
+        if chi2_value < best["chi2"]:
+            best.update(
+                chi2=chi2_value,
+                iteration=iteration,
+                model=model.detach().clone(),
+                prediction=prediction.detach().clone(),
+                state={name: value.detach().clone() for name, value in network.state_dict().items()},
+            )
     stop_reason = "max_iterations"
     forward_seconds = 0.0
     backward_seconds = 0.0
@@ -399,14 +409,7 @@ def _fit(
                     (100.0 * torch.sqrt(torch.mean(torch.expm1(full_prediction - observed_log).square()))).item()
                 )
             physics_forward_timesteps += n_times
-            full_chi2_iterations.append(iteration)
-            full_chi2_history.append(full_chi2)
-            if full_chi2 < best_chi2:
-                best_chi2 = full_chi2
-                best_iteration = iteration
-                best_model = log_model.detach().clone()
-                best_prediction = full_prediction.detach().clone()
-                best_state = {name: value.detach().clone() for name, value in network.state_dict().items()}
+            remember(iteration, full_chi2, log_model, full_prediction)
         if windowed:
             cycle, position = divmod(iteration, len(windows))
             schedule_position = len(windows) - 1 - position if config.alternate_window_direction and cycle % 2 else position
@@ -472,14 +475,7 @@ def _fit(
             full_prediction = predicted_log
             full_chi2 = chi2
             full_rms = rms
-            full_chi2_iterations.append(iteration)
-            full_chi2_history.append(full_chi2)
-            if full_chi2 < best_chi2:
-                best_chi2 = full_chi2
-                best_iteration = iteration
-                best_model = log_model.detach().clone()
-                best_prediction = full_prediction.detach().clone()
-                best_state = {name: value.detach().clone() for name, value in network.state_dict().items()}
+            remember(iteration, full_chi2, log_model, full_prediction)
 
         target_reached = config.target_chi2 is not None and full_chi2 is not None and full_chi2 <= config.target_chi2
         if iteration % config.log_every == 0 or target_reached or iteration == config.max_iterations:
@@ -534,11 +530,11 @@ def _fit(
 
     _synchronize(device)
     elapsed = time.perf_counter() - started
-    if best_model is None or best_prediction is None or best_state is None:
+    if "model" not in best:
         raise RuntimeError("INR optimization did not evaluate a model")
-    network.load_state_dict(best_state)
-    log_model_np = best_model.to(device="cpu", dtype=torch.float64).numpy()
-    predicted_np = best_prediction.to(device="cpu", dtype=torch.float64).numpy()
+    network.load_state_dict(best["state"])
+    log_model_np = best["model"].to(device="cpu", dtype=torch.float64).numpy()
+    predicted_np = best["prediction"].to(device="cpu", dtype=torch.float64).numpy()
     return INRResult(
         log_resistivity=log_model_np,
         resistivity=np.exp(log_model_np),
@@ -547,8 +543,8 @@ def _fit(
         chi2_history=np.asarray(chi2_history, dtype=float),
         rms_history=np.asarray(rms_history, dtype=float),
         iterations=len(chi2_history) - 1,
-        best_iteration=int(best_iteration),
-        best_chi2=float(best_chi2),
+        best_iteration=int(best["iteration"]),
+        best_chi2=float(best["chi2"]),
         stop_reason=stop_reason,
         elapsed_seconds=float(elapsed),
         forward_seconds=float(forward_seconds),

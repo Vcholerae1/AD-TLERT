@@ -17,10 +17,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from adtlert.utils.torch_runtime import torch_runtime
+import torch
 import numpy as np
-
-torch_runtime.config.update("torch_enable_float64", True)
 
 from adtlert.inversion import (
     InversionConfig,
@@ -40,6 +38,9 @@ from adtlert.workflows import (
     build_source_position_triangle_inversion_case,
     load_terrain_forward_dat,
 )
+
+# Switch Torch to float64 after adtlert fixed FLOAT_DTYPE at import, as before.
+torch.set_default_dtype(torch.float64)
 
 
 def _resolve(root: Path, value: str | Path) -> Path:
@@ -943,7 +944,7 @@ def main(argv: list[str] | None = None) -> int:
         "input_mesh_file": None if args.mesh_file is None else str(_resolve(root, args.mesh_file)),
         "inversion_mesh_quality": float(args.inversion_mesh_quality),
         "inversion_mesh_smoothing_iterations": int(args.inversion_mesh_smoothing_iterations),
-        "torch_enable_float64": bool(torch_runtime.config.torch_enable_float64),
+        "torch_enable_float64": torch.get_default_dtype() == torch.float64,
         "elapsed_sec": float(elapsed_sec),
         "elapsed_min": float(elapsed_sec / 60.0),
         "plot_files": plot_files,

@@ -11,7 +11,6 @@ from torch.autograd.function import once_differentiable
 from adtlert.forward import ERTForward2p5D, ERTForwardModeling
 from adtlert.inversion.core import (
     ParameterizedERTForward2p5D,
-    _forward_log_response,
     _forward_log_response_series,
 )
 from adtlert.utils.dtypes import FLOAT_DTYPE
@@ -127,81 +126,37 @@ def _exact_log_response_vjp(
     return full_gradient_log_rho
 
 
-def _exact_log_response_vjp_series(
-    forward: Any,
-    log_resistivity: np.ndarray,
-    predicted_log: np.ndarray,
-    cotangents: np.ndarray,
-) -> np.ndarray:
-    """Apply exact per-timestep VJPs while reusing the forward field cache."""
-
-    models = np.asarray(log_resistivity, dtype=float)
-    predicted = np.asarray(predicted_log, dtype=float)
-    weights = np.asarray(cotangents, dtype=float)
-    if models.ndim != 2 or predicted.ndim != 2 or weights.shape != predicted.shape:
-        raise ValueError("matrix-free VJP series inputs must be compatible 2D arrays")
-    return np.vstack(
-        [
-            _exact_log_response_vjp(forward, model, response, weight)
-            for model, response, weight in zip(models, predicted, weights, strict=True)
-        ]
-    )
-
-
-class _MatrixFreeLogRhoa(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx: Any, log_resistivity: torch.Tensor, forward: Any) -> torch.Tensor:
-        parameter_log = log_resistivity.detach().to(device="cpu", dtype=torch.float64).numpy()
-        predicted = np.asarray(_forward_log_response(forward, parameter_log), dtype=float)
-        ctx.forward_model = forward
-        ctx.input_device = log_resistivity.device
-        ctx.input_dtype = log_resistivity.dtype
-        ctx.parameter_log = parameter_log
-        ctx.predicted = predicted
-        return torch.as_tensor(predicted, device=log_resistivity.device, dtype=log_resistivity.dtype)
-
-    @staticmethod
-    @once_differentiable
-    def backward(ctx: Any, output_cotangent: torch.Tensor) -> tuple[torch.Tensor, None]:
-        cotangent = output_cotangent.detach().to(device="cpu", dtype=torch.float64).numpy()
-        gradient = _exact_log_response_vjp(
-            ctx.forward_model,
-            ctx.parameter_log,
-            ctx.predicted,
-            cotangent,
-        )
-        return torch.as_tensor(gradient, device=ctx.input_device, dtype=ctx.input_dtype), None
-
-
 class _MatrixFreeLogRhoaSeries(torch.autograd.Function):
+    """``(n_steps, n_cells)`` log-resistivity -> ``(n_steps, n_data)`` log apparent resistivity.
+
+    The backward pass applies the exact per-step VJP, reusing the forward fields cached
+    by the operator during the forward pass.
+    """
+
     @staticmethod
     def forward(ctx: Any, log_resistivity: torch.Tensor, forward: Any) -> torch.Tensor:
         parameter_log = log_resistivity.detach().to(device="cpu", dtype=torch.float64).numpy()
         predicted = np.asarray(_forward_log_response_series(forward, parameter_log), dtype=float)
-        ctx.forward_model = forward
-        ctx.input_device = log_resistivity.device
-        ctx.input_dtype = log_resistivity.dtype
-        ctx.parameter_log = parameter_log
-        ctx.predicted = predicted
+        ctx.forward_model, ctx.parameter_log, ctx.predicted = forward, parameter_log, predicted
         return torch.as_tensor(predicted, device=log_resistivity.device, dtype=log_resistivity.dtype)
 
     @staticmethod
     @once_differentiable
     def backward(ctx: Any, output_cotangent: torch.Tensor) -> tuple[torch.Tensor, None]:
         cotangent = output_cotangent.detach().to(device="cpu", dtype=torch.float64).numpy()
-        gradient = _exact_log_response_vjp_series(
-            ctx.forward_model,
-            ctx.parameter_log,
-            ctx.predicted,
-            cotangent,
+        gradient = np.vstack(
+            [
+                _exact_log_response_vjp(ctx.forward_model, model, response, weight)
+                for model, response, weight in zip(ctx.parameter_log, ctx.predicted, cotangent, strict=True)
+            ]
         )
-        return torch.as_tensor(gradient, device=ctx.input_device, dtype=ctx.input_dtype), None
+        return torch.as_tensor(gradient, device=output_cotangent.device, dtype=output_cotangent.dtype), None
 
 
 def matrix_free_log_rhoa(log_resistivity: torch.Tensor, forward: Any) -> torch.Tensor:
-    """Differentiable log apparent resistivity without a dense Jacobian."""
+    """Differentiable log apparent resistivity of one model without a dense Jacobian."""
 
-    return _MatrixFreeLogRhoa.apply(log_resistivity, forward)
+    return _MatrixFreeLogRhoaSeries.apply(log_resistivity[None, :], forward)[0]
 
 
 def matrix_free_log_rhoa_series(log_resistivity: torch.Tensor, forward: Any) -> torch.Tensor:
