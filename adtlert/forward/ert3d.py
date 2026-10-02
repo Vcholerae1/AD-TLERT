@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -15,12 +14,10 @@ from adtlert.fem.tetrahedron import (
     p2_tetrahedron_shape_values,
     p2_triangle_mass_template,
 )
+from adtlert.forward.cudss import BatchedSolver, CsrStructure
 from adtlert.mesh import Mesh3D
 from adtlert.survey import Survey
 from adtlert.utils.dtypes import FLOAT_DTYPE
-
-_CUDSS_LOGGER = logging.getLogger("adtlert.cudss")
-_CUDSS_LOGGER.setLevel(logging.ERROR)
 
 
 @dataclass(frozen=True)
@@ -119,7 +116,7 @@ class ERTForward3D:
             raise ValueError(
                 "ERTForward3D requires three-coordinate electrode positions"
             )
-        self._cudss_state: dict[str, object] = {}
+        self._solver = BatchedSolver()
         self._cached_geometric_factors: torch.Tensor | None = None
         self._reset_solution_cache()
         electrodes = np.asarray(self.survey.electrode_positions, dtype=float)
@@ -328,54 +325,17 @@ class ERTForward3D:
         return self._cached_operator
 
     def _solve_cudss_rhs(
-        self, operator: sp.csr_matrix, rhs: np.ndarray, *, factorize: bool, rhs_key: str
+        self, operator: sp.csr_matrix, rhs: np.ndarray, *, factorize: bool
     ) -> np.ndarray:
-        """Solve the rows of ``rhs`` with cuDSS; the plan and matrix buffers are reused across models."""
+        """Solve ``operator x = b`` for every row ``b`` of ``rhs`` (plan and buffers are reused)."""
 
-        from nvmath.sparse.advanced import (
-            DirectSolver,
-            DirectSolverMatrixType,
-            DirectSolverOptions,
+        structure = CsrStructure(operator.indptr, operator.indices, operator.shape)
+        values = torch.as_tensor(operator.data)[None]
+        rows = torch.as_tensor(np.asarray(rhs, dtype=operator.dtype))[None]
+        solution = self._solver.solve(
+            "3d", structure, values, rows, spd=True, refactorize=factorize
         )
-
-        cuda = torch.device("cuda")
-        matrix = self._cudss_state.get("matrix")
-        if matrix is None:
-            matrix = torch.sparse_csr_tensor(
-                *(
-                    torch.as_tensor(x, device=cuda)
-                    for x in (operator.indptr, operator.indices, operator.data)
-                ),
-                size=operator.shape,
-            )
-            self._cudss_state["matrix"] = matrix
-        elif matrix.values().numel() != operator.data.size:
-            raise RuntimeError("cuDSS operator sparsity changed after planning")
-        else:
-            matrix.values().copy_(torch.as_tensor(operator.data, device=cuda))
-        rhs_gpu = self._cudss_state.get(f"rhs_{rhs_key}")
-        if rhs_gpu is None:  # fixed right-hand sides, stored column-major
-            rhs_gpu = torch.as_tensor(
-                np.asarray(rhs, dtype=operator.dtype), device=cuda
-            ).T
-            self._cudss_state[f"rhs_{rhs_key}"] = rhs_gpu
-        solver = self._cudss_state.get("solver")
-        if solver is None:
-            options = DirectSolverOptions(
-                sparse_system_type=DirectSolverMatrixType.SPD,
-                logger=_CUDSS_LOGGER,
-                blocking=True,
-            )
-            solver = self._cudss_state["solver"] = DirectSolver(
-                matrix, rhs_gpu, options=options
-            )
-            solver.plan()
-            factorize = True
-        else:
-            solver.reset_operands(b=rhs_gpu)
-        if factorize:
-            solver.factorize()
-        return solver.solve().T.cpu().numpy().astype(np.float64)
+        return solution[0].numpy().astype(np.float64)
 
     def _solve_node_fields(self, conductivity: torch.Tensor | float) -> np.ndarray:
         values = np.asarray(conductivity, dtype=np.float64)
@@ -385,7 +345,7 @@ class ERTForward3D:
         operator = self._operator(values)
         if self._cached_node_fields is None:
             self._cached_node_fields = self._solve_cudss_rhs(
-                operator, self._source_rhs, factorize=True, rhs_key="sources"
+                operator, self._source_rhs, factorize=True
             )
         return self._cached_node_fields[: len(self._current_electrode_ids)]
 
@@ -537,10 +497,7 @@ class ERTForward3D:
                 if self.boundary_mode == "dirichlet":
                     receiver_rhs[:, self._dirichlet_node_ids()] = 0.0
                 receiver_fields = self._solve_cudss_rhs(
-                    self._cached_operator,
-                    receiver_rhs,
-                    factorize=False,
-                    rhs_key="receivers",
+                    self._cached_operator, receiver_rhs, factorize=False
                 )
                 self._cached_receiver_fields = receiver_fields[
                     : len(self._receiver_electrode_ids)
@@ -637,11 +594,5 @@ class ERTForward3D:
         self._cached_node_fields = self._cached_receiver_fields = None
 
     def close(self) -> None:
-        solver = self._cudss_state.get("solver")
-        if solver is not None:
-            try:
-                solver.free()
-            except Exception:  # best-effort release during teardown
-                pass
-        self._cudss_state.clear()
+        self._solver.close()
         self._reset_solution_cache()
