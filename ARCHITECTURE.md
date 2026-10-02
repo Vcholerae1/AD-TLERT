@@ -51,7 +51,7 @@ trainers check that the cache holds at least one batch of timesteps.
 
 ## Tests
 
-`uv run pytest` runs everything the machine supports; `-m "not gpu"` runs the CPU-only subset
-(this is what CI runs). The GPU suite checks adjoint consistency (dot tests), the exact Jacobian
+`uv run pytest` runs everything the machine supports; `-m "not gpu"` runs the CPU-only subset.
+The GPU suite checks adjoint consistency (dot tests), the exact Jacobian
 against finite differences and the resistivity-scaling identity, the Triton kernel against an
 einsum reference, deterministic reductions, the inversion loops and INR training.

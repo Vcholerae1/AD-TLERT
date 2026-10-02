@@ -23,7 +23,7 @@ ADTLERT is now a CUDA library. 0.1.x had a CPU/SciPy build; the two are differen
   `DualNetworkINR`) trained through the matrix-free physics, with windowed time-lapse training.
 - `ParameterizedERTForward2p5D.log_model_to_full`: differentiable background extension.
 - `parameter_max_cell_area` for `build_source_position_triangle_inversion_case`.
-- A pytest suite (`tests/`, GPU tests are skipped without a GPU) and CI for lint and CPU tests.
+- A pytest suite (`tests/`; GPU tests are skipped without a GPU).
 
 ### Changed
 
