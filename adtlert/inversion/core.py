@@ -168,14 +168,14 @@ def _invert(
             return _forward_log_response_series(forward, logs.T), []
         rows, jacobians = [], []
         for t, factor in enumerate(chain_factors(states)):
-            progress = dict(
-                iteration=iteration,
-                max_iterations=config.max_iterations,
-                stage=stage,
-                time_index=t,
-                time_number=t + 1,
-                n_times=n_times,
-            )
+            progress = {
+                "iteration": iteration,
+                "max_iterations": config.max_iterations,
+                "stage": stage,
+                "time_index": t,
+                "time_number": t + 1,
+                "n_times": n_times,
+            }
             if not single:
                 _emit(config, "timelapse_time_start", **progress)
             predicted, jacobian = _cached_forward_and_jacobian(
@@ -524,12 +524,12 @@ def invert_windowed_timelapse_log_resistivity(
     )
     for window_index, start in enumerate(starts, start=1):
         end = start + window_size
-        window = dict(
-            window_index=window_index,
-            n_windows=len(starts),
-            start_idx=start,
-            end_idx=end - 1,
-        )
+        window = {
+            "window_index": window_index,
+            "n_windows": len(starts),
+            "start_idx": start,
+            "end_idx": end - 1,
+        }
         _emit(
             config,
             "window_start",

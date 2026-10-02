@@ -19,5 +19,5 @@ if os.environ.get("ADTLERT_ENABLE_FLOAT64", "").strip().lower() not in {
 FLOAT_DTYPE = (
     torch.float64 if torch.get_default_dtype() == torch.float64 else torch.float32
 )
-NP_FLOAT_DTYPE = np.float64 if FLOAT_DTYPE == torch.float64 else np.float32
+NP_FLOAT_DTYPE = np.float64 if FLOAT_DTYPE is torch.float64 else np.float32
 INT_DTYPE = torch.int32

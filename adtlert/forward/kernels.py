@@ -169,10 +169,10 @@ def normal_sensitivity(
     a, b, m, n = (index.to(torch.int32).contiguous() for index in (a, b, m, n))
     (W, E, N), (C, K), D = phi.shape, cells.shape, a.shape[0]
     out = torch.empty((D, C), dtype=phi.dtype, device=phi.device)
-    grid = lambda meta: (
-        triton.cdiv(D, meta["BLOCK_D"]),
-        triton.cdiv(C, meta["BLOCK_C"]),
-    )  # noqa: E731
+
+    def grid(meta):
+        return triton.cdiv(D, meta["BLOCK_D"]), triton.cdiv(C, meta["BLOCK_C"])
+
     _normal_sensitivity_kernel[grid](
         phi,
         a,

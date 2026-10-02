@@ -113,9 +113,10 @@ def build_p1_element_data(mesh, quadrature_order: int = 2) -> P1ElementData:
     cell_gradients = np.einsum(
         "eij,nj->eni", np.linalg.inv(jacobians).transpose((0, 2, 1)), reference
     )
-    as_tensor = lambda array: torch.as_tensor(
-        np.ascontiguousarray(array), dtype=FLOAT_DTYPE
-    )
+
+    def as_tensor(array) -> Tensor:
+        return torch.as_tensor(np.ascontiguousarray(array), dtype=FLOAT_DTYPE)
+
     return P1ElementData(
         quadrature_points=as_tensor(points),
         quadrature_weights=as_tensor(weights),

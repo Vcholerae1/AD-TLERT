@@ -165,7 +165,7 @@ def _lbfgs_direction(
     s_last, y_last, _ = history[-1]
     yy = float(np.dot(y_last, y_last))
     r = (float(np.dot(s_last, y_last) / yy) if yy > 0.0 else 1.0) * q
-    for (s_vec, y_vec, rho), alpha in zip(history, reversed(alphas)):
+    for (s_vec, y_vec, rho), alpha in zip(history, reversed(alphas), strict=True):
         r += s_vec * (alpha - float(rho * np.dot(y_vec, r)))
     return -r
 

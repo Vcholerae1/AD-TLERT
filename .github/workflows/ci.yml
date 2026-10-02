@@ -1,0 +1,26 @@
+---
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-cpu-tests:
+    name: Lint and CPU tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install
+        run: uv sync --extra terrain --group dev
+      - name: Lint
+        run: |
+          uv run ruff check adtlert tests example --extend-exclude '*.ipynb'
+          uv run ruff format --check adtlert tests
+      - name: Tests (no GPU on hosted runners; GPU tests are skipped)
+        run: uv run pytest -m "not gpu" -q

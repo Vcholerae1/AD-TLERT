@@ -303,13 +303,13 @@ def test_time_lapse_fit_windowed_and_full(small_case):
         cell_centers(small_case.mesh), np.arange(4.0)
     )
     snapshots = []
-    common = dict(
-        max_iterations=12,
-        learning_rate=1e-2,
-        target_chi2=None,
-        temporal_regularization=0.01,
-        log_every=100,
-    )
+    common = {
+        "max_iterations": 12,
+        "learning_rate": 1e-2,
+        "target_chi2": None,
+        "temporal_regularization": 0.01,
+        "log_every": 100,
+    }
     torch.manual_seed(0)
     full = fit_timelapse_inr(
         forward,

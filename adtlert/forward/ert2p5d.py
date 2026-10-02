@@ -12,6 +12,7 @@ Both cases share one code path parameterized by :class:`Discretization`.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 from collections import OrderedDict
@@ -1086,10 +1087,10 @@ class ERTForward2p5D:
         self._solver.close()
 
     def __del__(self) -> None:
-        try:
+        with contextlib.suppress(
+            Exception
+        ):  # interpreter shutdown may have torn things down
             self.close()
-        except Exception:
-            pass
 
 
 def _terrain_cache_dir(cache_dir: str | Path | None) -> Path | None:

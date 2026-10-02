@@ -7,6 +7,7 @@ shape, and later solves refresh the matrix values and right-hand sides in place.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import warnings
 from dataclasses import dataclass
@@ -115,8 +116,6 @@ class BatchedSolver:
         """Release the solvers (best effort)."""
 
         for plan in self._plans.values():
-            try:
+            with contextlib.suppress(Exception):  # teardown must not raise
                 plan["solver"].free()
-            except Exception:  # teardown must not raise
-                pass
         self._plans.clear()

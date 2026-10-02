@@ -392,7 +392,10 @@ def load_terrain_forward_dat(path: str | Path) -> TerrainForwardData:
 
 def _geometric_factors(electrodes: np.ndarray, measurements: np.ndarray) -> np.ndarray:
     a, b, m, n = (electrodes[measurements[:, index]] for index in range(4))
-    distance = lambda p, q: np.linalg.norm(p - q, axis=-1)
+
+    def distance(p, q):
+        return np.linalg.norm(p - q, axis=-1)
+
     return (
         2.0
         * np.pi
@@ -645,9 +648,10 @@ def _load_mesh_npz(path: str | Path):
             raise KeyError(f"{path} missing required mesh arrays: {sorted(missing)}")
         nodes = np.asarray(data["nodes"], dtype=float)
         cells = np.asarray(data["cells"], dtype=np.int32)
-        get = lambda key, default, dtype: (
-            np.asarray(data[key], dtype=dtype) if key in data.files else default
-        )
+
+        def get(key, default, dtype):
+            return np.asarray(data[key], dtype=dtype) if key in data.files else default
+
         full_cells = get("forward_cells", cells, np.int32)
         return (
             nodes,

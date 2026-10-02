@@ -190,9 +190,10 @@ class _BoundedLogResistivity(nn.Module):
             else tuple(float(v) for v in resistivity_bounds)
         )
         self.bounded_output = resistivity_bounds is not None
-        buffer = lambda name, value: self.register_buffer(
-            name, torch.tensor(value, dtype=torch.float32)
-        )
+
+        def buffer(name: str, value: float) -> None:
+            self.register_buffer(name, torch.tensor(value, dtype=torch.float32))
+
         buffer("initial_log_resistivity", math.log(initial_resistivity))
         if resistivity_bounds is None:
             log_lower = log_upper = float("nan")

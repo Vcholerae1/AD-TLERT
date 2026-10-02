@@ -55,7 +55,10 @@ class Survey:
         """Analytic half-space geometric factors ``2 pi / (1/AM - 1/AN - 1/BM + 1/BN)``."""
 
         a, b, m, n = self.electrode_positions[self.measurements.long()].unbind(dim=1)
-        distance = lambda p, q: torch.linalg.norm(p - q, dim=-1)
+
+        def distance(p, q):
+            return torch.linalg.norm(p - q, dim=-1)
+
         return (
             2.0
             * math.pi

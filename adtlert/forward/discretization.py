@@ -318,7 +318,7 @@ def _refine_quads(mesh: Mesh) -> tuple[Mesh, np.ndarray]:
     nodes, midpoint, _ = edge_midpoint_builder(mesh.nodes)
     cells, parents = [], []
     for parent, (bl, br, tr, tl) in enumerate(np.asarray(mesh.cells).tolist()):
-        b, r, t, l = (
+        b, r, t, left = (
             midpoint(bl, br),
             midpoint(br, tr),
             midpoint(tr, tl),
@@ -327,10 +327,10 @@ def _refine_quads(mesh: Mesh) -> tuple[Mesh, np.ndarray]:
         center = len(nodes)
         nodes.append(0.25 * (nodes[bl] + nodes[br] + nodes[tr] + nodes[tl]))
         cells += [
-            [bl, b, center, l],
+            [bl, b, center, left],
             [b, br, r, center],
             [center, r, tr, t],
-            [l, center, t, tl],
+            [left, center, t, tl],
         ]
         parents += [parent] * 4
     surface = np.asarray(mesh.surface_node_ids).tolist()
