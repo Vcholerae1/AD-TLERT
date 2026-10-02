@@ -2819,6 +2819,7 @@ class ERTForward2p5D:
             volume_templates = discretization.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[
                 :, None, None, None
             ] * discretization.operator_templates.mass[None, :, :, :]
+            volume_templates = volume_templates.astype(phi_stack.dtype)
             phi_local = phi_stack[:, :, discretization.cell_connectivity]
             lambda_local = lambda_stack[:, :, discretization.cell_connectivity]
             auxiliary_gradient = -torch_np.einsum("wsci,wcij,wscj->c", lambda_local, volume_templates, phi_local)
@@ -2827,7 +2828,7 @@ class ERTForward2p5D:
                 boundary_templates = (
                     discretization.boundary_geometries[:, :, None, None]
                     * discretization.operator_templates.boundary_mass[None, :, :, :]
-                )
+                ).astype(phi_stack.dtype)
                 phi_boundary = phi_stack[:, :, discretization.boundary_connectivity]
                 lambda_boundary = lambda_stack[:, :, discretization.boundary_connectivity]
                 boundary_gradient = -torch_np.einsum("wsbi,wbij,wsbj->b", lambda_boundary, boundary_templates, phi_boundary)
@@ -2842,6 +2843,7 @@ class ERTForward2p5D:
         volume_templates = self.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[:, None, None, None] * (
             self.operator_templates.mass[None, :, :, :]
         )
+        volume_templates = volume_templates.astype(phi_stack.dtype)
         phi_local = phi_stack[:, :, self.mesh.cells]
         lambda_local = lambda_stack[:, :, self.mesh.cells]
         gradient = -torch_np.einsum("wsci,wcij,wscj->c", lambda_local, volume_templates, phi_local)
@@ -2849,7 +2851,9 @@ class ERTForward2p5D:
         if not include_robin_boundary_derivative:
             return gradient
 
-        boundary_templates = self.boundary_geometries[:, :, None, None] * self.operator_templates.boundary_mass[None, :, :, :]
+        boundary_templates = (
+            self.boundary_geometries[:, :, None, None] * self.operator_templates.boundary_mass[None, :, :, :]
+        ).astype(phi_stack.dtype)
         phi_boundary = phi_stack[:, :, self.mesh.boundary_edges]
         lambda_boundary = lambda_stack[:, :, self.mesh.boundary_edges]
         boundary_gradient = -torch_np.einsum("wsbi,wbij,wsbj->b", lambda_boundary, boundary_templates, phi_boundary)
@@ -2873,6 +2877,7 @@ class ERTForward2p5D:
             volume_templates = discretization.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[
                 :, None, None, None
             ] * discretization.operator_templates.mass[None, :, :, :]
+            volume_templates = volume_templates.astype(phi_stack.dtype)
             phi_local = phi_stack[:, :, discretization.cell_connectivity]
             lambda_local = lambda_stack[:, :, :, discretization.cell_connectivity]
             auxiliary_gradient = -torch_np.einsum("wqeci,wcij,wecj->qc", lambda_local, volume_templates, phi_local)
@@ -2881,7 +2886,7 @@ class ERTForward2p5D:
                 boundary_templates = (
                     discretization.boundary_geometries[:, :, None, None]
                     * discretization.operator_templates.boundary_mass[None, :, :, :]
-                )
+                ).astype(phi_stack.dtype)
                 phi_boundary = phi_stack[:, :, discretization.boundary_connectivity]
                 lambda_boundary = lambda_stack[:, :, :, discretization.boundary_connectivity]
                 boundary_gradient = -torch_np.einsum("wqeri,wrij,werj->qr", lambda_boundary, boundary_templates, phi_boundary)
@@ -2896,6 +2901,7 @@ class ERTForward2p5D:
         volume_templates = self.operator_templates.stiffness[None, :, :, :] + wavenumber_sq[:, None, None, None] * (
             self.operator_templates.mass[None, :, :, :]
         )
+        volume_templates = volume_templates.astype(phi_stack.dtype)
         phi_local = phi_stack[:, :, self.mesh.cells]
         lambda_local = lambda_stack[:, :, :, self.mesh.cells]
         gradient = -torch_np.einsum("wqeci,wcij,wecj->qc", lambda_local, volume_templates, phi_local)
@@ -2903,7 +2909,9 @@ class ERTForward2p5D:
         if not include_robin_boundary_derivative:
             return gradient
 
-        boundary_templates = self.boundary_geometries[:, :, None, None] * self.operator_templates.boundary_mass[None, :, :, :]
+        boundary_templates = (
+            self.boundary_geometries[:, :, None, None] * self.operator_templates.boundary_mass[None, :, :, :]
+        ).astype(phi_stack.dtype)
         phi_boundary = phi_stack[:, :, self.mesh.boundary_edges]
         lambda_boundary = lambda_stack[:, :, :, self.mesh.boundary_edges]
         boundary_gradient = -torch_np.einsum("wqeri,wrij,werj->qr", lambda_boundary, boundary_templates, phi_boundary)

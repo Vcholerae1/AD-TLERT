@@ -527,6 +527,7 @@ def _source_position_triangle_arrays(
     elec_z: np.ndarray,
     *,
     quality: float,
+    parameter_max_cell_area: float | None = None,
     smoothing_iterations: int = 10,
 ) -> _SourcePositionTriangleArrays:
     try:
@@ -540,6 +541,8 @@ def _source_position_triangle_arrays(
 
     if quality <= 0.0:
         raise ValueError("quality must be positive")
+    if parameter_max_cell_area is not None and parameter_max_cell_area <= 0.0:
+        raise ValueError("parameter_max_cell_area must be positive when provided")
 
     sensors = np.column_stack((elec_x, elec_z))
     electrode_spacing = float(np.linalg.norm(sensors[1] - sensors[0]))
@@ -584,7 +587,14 @@ def _source_position_triangle_arrays(
     add_segment(n1, n2)
     add_segment(n2, n3)
     add_segment(n3, n4)
-    regions.append([vertices[n2][0] + 1.0e-3, vertices[n2][1] + 1.0e-3, 2.0, 0.0])
+    regions.append(
+        [
+            vertices[n2][0] + 1.0e-3,
+            vertices[n2][1] + 1.0e-3,
+            2.0,
+            0.0 if parameter_max_cell_area is None else float(parameter_max_cell_area),
+        ]
+    )
 
     surface = [n1]
     for index, (x_coord, z_coord) in enumerate(sensors):
@@ -681,6 +691,7 @@ def build_source_position_triangle_inversion_case(
     y_index: int,
     depth_levels: int = 11,
     quality: float = 34.0,
+    parameter_max_cell_area: float | None = None,
     smoothing_iterations: int = 10,
     data_file: str | Path | None = None,
     mesh_file: str | Path | None = None,
@@ -747,6 +758,7 @@ def build_source_position_triangle_inversion_case(
             elec_x_array,
             elec_z_array,
             quality=float(quality),
+            parameter_max_cell_area=parameter_max_cell_area,
             smoothing_iterations=int(smoothing_iterations),
         )
         nodes = triangle_arrays.parameter_nodes
