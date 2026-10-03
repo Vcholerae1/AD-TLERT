@@ -241,14 +241,14 @@ def save_inr_result(
     np.save(output_dir / "chi2_by_time.npy", chi2_by_time)
     np.savez_compressed(
         output_dir / "training_history.npz",
-        chi2=result.chi2_history,
-        rms=result.rms_history,
-        objective=result.objective_history,
-        spatial_penalty=result.spatial_penalty_history,
-        temporal_penalty=result.temporal_penalty_history,
-        extra_penalty=result.extra_penalty_history,
-        full_chi2_iterations=result.full_chi2_iterations,
-        full_chi2=result.full_chi2_history,
+        chi2=result.history.chi2,
+        rms=result.history.rms,
+        objective=result.history.objective,
+        spatial_penalty=result.history.spatial_penalty,
+        temporal_penalty=result.history.temporal_penalty,
+        extra_penalty=result.history.extra_penalty,
+        full_chi2_iterations=result.history.full_iterations,
+        full_chi2=result.history.full_chi2,
     )
     np.savez_compressed(
         output_dir / "coordinate_transform.npz",
@@ -300,10 +300,10 @@ def save_inr_result(
         "mean_chi2": float(np.mean(chi2_by_time)),
         "median_chi2": float(np.median(chi2_by_time)),
         "max_chi2": float(np.max(chi2_by_time)),
-        "elapsed_seconds": float(result.elapsed_seconds),
-        "seconds_per_timestep": float(result.elapsed_seconds / data.steps.size),
-        "physics_forward_timesteps": int(result.physics_forward_timesteps),
-        "physics_vjp_timesteps": int(result.physics_vjp_timesteps),
+        "elapsed_seconds": float(result.timing.elapsed),
+        "seconds_per_timestep": float(result.timing.elapsed / data.steps.size),
+        "physics_forward_timesteps": int(result.timing.forward_timesteps),
+        "physics_vjp_timesteps": int(result.timing.vjp_timesteps),
         "stop_reason": result.stop_reason,
         "gpu": result.gpu_report,
     }

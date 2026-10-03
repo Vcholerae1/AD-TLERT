@@ -11,6 +11,10 @@ from adtlert.inr import (
     JointSpatioTemporalINR,
     MultiscaleFourierEncoder,
     MultiscaleINR,
+    Optimization,
+    Progressive,
+    Regularization,
+    Windows,
     cell_centers,
     fit_inr,
     fit_timelapse_inr,
@@ -133,7 +137,7 @@ def test_cell_centers():
 
 def test_window_schedule_covers_every_step_and_alternates_direction():
     schedule = _Schedule(
-        7, INRConfig(time_window_size=3, time_window_step=2), torch.device("cpu")
+        7, INRConfig(windows=Windows(size=3, step=2)), torch.device("cpu")
     )
     assert [window.tolist() for window in schedule.windows] == [
         [0, 1, 2],
@@ -148,18 +152,14 @@ def test_window_schedule_covers_every_step_and_alternates_direction():
     )
     plain = _Schedule(
         7,
-        INRConfig(
-            alternate_window_direction=False, time_window_size=3, time_window_step=2
-        ),
+        INRConfig(windows=Windows(size=3, step=2, alternate_direction=False)),
         torch.device("cpu"),
     )
     assert plain.window(3).tolist() == [0, 1, 2]
     full = _Schedule(5, INRConfig(), torch.device("cpu"))
     assert not full.windowed and full.batch_size == 5
     with pytest.raises(ValueError, match="cover every timestep"):
-        _Schedule(
-            10, INRConfig(time_window_size=2, time_window_step=3), torch.device("cpu")
-        )
+        _Schedule(10, INRConfig(windows=Windows(size=2, step=3)), torch.device("cpu"))
 
 
 def test_misfit_and_huber_helpers():
@@ -180,18 +180,44 @@ def test_misfit_and_huber_helpers():
 
 
 @pytest.mark.parametrize(
-    "overrides, message",
-    [({"max_iterations": 0}, "max_iterations"), ({"optimizer": "sgd"}, "optimizer"), ({"scheduler": "x"}, "scheduler"),
-     ({"learning_rate_milestones": (5, 5)}, "strictly increasing"), ({"minimum_learning_rate": 1.0}, "minimum_learning_rate"),
-     ({"time_window_size": 0}, "time_window_size"), ({"regularization_huber_delta": 0.0}, "huber")],
+    "config, message",
+    [(INRConfig(max_iterations=0), "max_iterations"), (INRConfig(optimization=Optimization(optimizer="sgd")), "optimizer"),
+     (INRConfig(optimization=Optimization(scheduler="x")), "scheduler"),
+     (INRConfig(optimization=Optimization(learning_rate_milestones=(5, 5))), "strictly increasing"),
+     (INRConfig(optimization=Optimization(minimum_learning_rate=1.0)), "minimum_learning_rate"),
+     (INRConfig(windows=Windows(size=0)), "window size"), (INRConfig(regularization=Regularization(huber_delta=0.0)), "huber"),
+     (INRConfig(progressive=Progressive(full_iteration=0)), "full_iteration")],
 )  # fmt: skip
-def test_config_validation(overrides, message):
+def test_config_validation(config, message):
     with pytest.raises(ValueError, match=message):
-        INRConfig(**overrides).validate()
+        config.validate()
     INRConfig().validate()
 
 
-# -- physics and training (GPU) ----------------------------------------------------------------------
+def test_progressive_schedule_unlocks_levels_of_every_encoder():
+    network = DualNetworkINR(spatial_levels=4, temporal_levels=3)
+    Progressive(
+        full_iteration=10, spatial_start_levels=1, temporal_start_levels=1
+    ).apply(network, 0)
+    assert network.spatial_encoder.spatial_level_weights.tolist() == [1, 0, 0, 0]
+    assert network.temporal_encoder.temporal_level_weights.tolist() == [1, 0, 0]
+    Progressive(full_iteration=10).apply(network, 10)
+    assert network.spatial_encoder.spatial_level_weights.min() == 1
+    assert network.temporal_encoder.temporal_level_weights.min() == 1
+    Progressive(enabled=False, full_iteration=10).apply(network, 0)
+    assert network.temporal_encoder.temporal_level_weights.min() == 1
+
+
+@pytest.mark.parametrize(
+    "network",
+    [MultiscaleINR(input_dimensions=3), JointSpatioTemporalINR(), DualNetworkINR()],
+)
+def test_networks_round_trip_through_their_configuration(network):  # fmt: skip
+    rebuilt = type(network).from_configuration(network.configuration())
+    assert rebuilt.configuration() == network.configuration()
+    rebuilt.load_state_dict(network.state_dict())
+    coordinates = torch.rand(3, 5, 3)
+    assert torch.equal(rebuilt(coordinates), network(coordinates))
 
 
 @pytest.fixture(scope="module")
@@ -255,10 +281,10 @@ def test_single_survey_fit_recovers_the_anomaly(small_case):
     events = []
     config = INRConfig(
         max_iterations=40,
-        learning_rate=1e-2,
         log_every=10,
         target_chi2=None,
-        spatial_regularization=0.01,
+        optimization=Optimization(learning_rate=1e-2),
+        regularization=Regularization(spatial=0.01),
         progress_callback=events.append,
     )
     torch.manual_seed(0)
@@ -266,16 +292,16 @@ def test_single_survey_fit_recovers_the_anomaly(small_case):
         forward, MultiscaleINR(), coordinates, observed, 0.02, config=config
     )
     assert (
-        result.chi2_history[-1] < 0.2 * result.chi2_history[0]
+        result.history.chi2[-1] < 0.2 * result.history.chi2[0]
         and result.iterations == 40
     )
-    assert result.best_chi2 == pytest.approx(result.chi2_history.min())
+    assert result.best_chi2 == pytest.approx(result.history.chi2.min())
     assert (
         result.log_resistivity.shape == (truth.size,)
         and result.predicted_data.shape == observed.shape
     )
     assert result.stop_reason == "max_iterations" and result.gpu_report["gpu_name"]
-    assert result.physics_forward_timesteps == 41 and result.physics_vjp_timesteps == 40
+    assert result.timing.forward_timesteps == 41 and result.timing.vjp_timesteps == 40
     assert [e["iteration"] for e in events if e["event"] == "iteration"] == [
         0,
         10,
@@ -283,7 +309,7 @@ def test_single_survey_fit_recovers_the_anomaly(small_case):
         30,
         40,
     ]
-    assert result.forward_seconds > 0 and result.backward_seconds > 0
+    assert result.timing.forward > 0 and result.timing.backward > 0
 
 
 @pytest.mark.gpu
@@ -305,9 +331,9 @@ def test_time_lapse_fit_windowed_and_full(small_case):
     snapshots = []
     common = {
         "max_iterations": 12,
-        "learning_rate": 1e-2,
         "target_chi2": None,
-        "temporal_regularization": 0.01,
+        "optimization": Optimization(learning_rate=1e-2),
+        "regularization": Regularization(temporal=0.01),
         "log_every": 100,
     }
     torch.manual_seed(0)
@@ -319,19 +345,15 @@ def test_time_lapse_fit_windowed_and_full(small_case):
         0.02,
         config=INRConfig(**common),
     )
+    assert full.log_resistivity.shape == (4, truth.size)
     assert (
-        full.log_resistivity.shape == (4, truth.size) and full.time_window_size is None
-    )
-    assert (
-        full.physics_forward_timesteps == 13 * 4
-        and full.full_chi2_iterations.tolist() == list(range(13))
+        full.timing.forward_timesteps == 13 * 4
+        and full.history.full_iterations.tolist() == list(range(13))
     )
     torch.manual_seed(0)
     config = INRConfig(
         **common,
-        time_window_size=2,
-        time_window_step=1,
-        full_evaluation_interval=5,
+        windows=Windows(size=2, step=1, full_evaluation_interval=5),
         snapshot_interval=6,
         progress_callback=lambda e: (
             snapshots.append(e) if e["event"] == "snapshot" else None
@@ -341,14 +363,14 @@ def test_time_lapse_fit_windowed_and_full(small_case):
         forward, DualNetworkINR(), coordinates, observed, 0.02, config=config
     )
     assert (
-        windowed.time_window_size == 2
-        and windowed.full_chi2_iterations.tolist() == [0, 5, 6, 10, 12]
+        windowed.config.windows.size == 2
+        and windowed.history.full_iterations.tolist() == [0, 5, 6, 10, 12]
     )
     assert [s["iteration"] for s in snapshots] == [6, 12] and snapshots[0][
         "log_resistivity"
     ].shape == (4, truth.size)
-    assert windowed.physics_vjp_timesteps == 12 * 2
-    assert windowed.best_chi2 == pytest.approx(windowed.full_chi2_history.min())
+    assert windowed.timing.vjp_timesteps == 12 * 2
+    assert windowed.best_chi2 == pytest.approx(windowed.history.full_chi2.min())
 
 
 @pytest.mark.gpu
@@ -374,7 +396,7 @@ def test_fit_validates_inputs_and_the_field_cache(small_case):
             coordinates,
             observed,
             0.02,
-            config=INRConfig(time_window_size=2),
+            config=INRConfig(windows=Windows(size=2)),
         )
     with pytest.raises(ValueError, match="cells"):
         fit_inr(

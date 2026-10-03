@@ -15,6 +15,9 @@ ADTLERT is now a CUDA library. 0.1.x had a CPU/SciPy build; the two are differen
   unused sparse-assembly API: `assemble_global_bcoo`, `assemble_helmholtz_operator`,
   `build_coo_routing*`, `build_boundary_routing*`, `assemble_boundary_bcoo`, `BCOO`, `CSR`.
 - `INRConfig.require_cuda` is gone (CUDA is always required); `prepare_cuda_forward` no longer takes it.
+- `INRConfig` groups its tunables into `Optimization`, `Progressive`, `Regularization` and `Windows`;
+  `INRResult` carries `history` (`History`), `timing` (`Timing`) and the `config` it ran with.
+  Networks rebuild from `configuration()` via `from_configuration`.
 - Examples switch Torch to float64 with `torch.set_default_dtype` after importing adtlert
   (`FLOAT_DTYPE` is fixed at import; set `ADTLERT_ENABLE_FLOAT64=1` for float64 throughout).
 

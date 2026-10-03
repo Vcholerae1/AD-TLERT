@@ -17,15 +17,32 @@ from adtlert.inr.physics import (
     matrix_free_log_rhoa_series,
     prepare_cuda_forward,
 )
-from adtlert.inr.train import INRConfig, INRResult, fit_inr, fit_timelapse_inr
+from adtlert.inr.train import (
+    History,
+    INRConfig,
+    INRResult,
+    Optimization,
+    Progressive,
+    Regularization,
+    Timing,
+    Windows,
+    fit_inr,
+    fit_timelapse_inr,
+)
 
 __all__ = [
     "DualNetworkINR",
+    "History",
     "INRConfig",
     "INRResult",
     "JointSpatioTemporalINR",
     "MultiscaleFourierEncoder",
     "MultiscaleINR",
+    "Optimization",
+    "Progressive",
+    "Regularization",
+    "Timing",
+    "Windows",
     "cell_centers",
     "fit_inr",
     "fit_timelapse_inr",

@@ -37,36 +37,115 @@ _OPTIMIZERS = {
 _SCHEDULERS = ("multistep", "plateau", "none")
 
 
-@dataclass(frozen=True)
-class INRConfig:
-    """Controls for matrix-free INR inversion."""
+def _check(*checks: tuple[bool, str]) -> None:
+    for valid, message in checks:
+        if not valid:
+            raise ValueError(message)
 
-    max_iterations: int = 300
-    learning_rate: float = 3.0e-3
+
+def _optional_positive(value) -> bool:
+    return value is None or value > 0
+
+
+@dataclass(frozen=True)
+class Optimization:
+    """Optimizer, learning-rate schedule and gradient clipping."""
+
     optimizer: str = "adam"
+    learning_rate: float = 3.0e-3
+    weight_decay: float = 0.0
+    gradient_clip_norm: float | None = 10.0
     scheduler: str = "multistep"
     learning_rate_milestones: tuple[int, ...] = (100, 200)
-    target_chi2: float | None = 1.0
-    device: str = "cuda"
-    gradient_clip_norm: float | None = 10.0
-    weight_decay: float = 0.0
     plateau_patience: int = 20
     plateau_factor: float = 0.5
     minimum_learning_rate: float = 1.0e-5
-    progressive_encoding: bool = True
-    progressive_full_iteration: int = 150
-    progressive_spatial_start_levels: int = 2
-    progressive_temporal_start_levels: int = 1
-    spatial_regularization: float = 0.0
-    temporal_regularization: float = 0.0
-    regularization_huber_delta: float = 0.1
+
+    def validate(self) -> None:
+        _check(
+            (self.optimizer in _OPTIMIZERS, "optimizer must be 'adam', 'adamw', or 'radam'"),
+            (self.scheduler in _SCHEDULERS, "scheduler must be 'multistep', 'plateau', or 'none'"),
+            (self.learning_rate > 0.0, "learning_rate must be positive"),
+            (self.weight_decay >= 0.0, "weight_decay must be non-negative"),
+            (_optional_positive(self.gradient_clip_norm), "gradient_clip_norm must be positive when set"),
+            (all(step >= 1 for step in self.learning_rate_milestones), "learning_rate_milestones must contain positive iterations"),
+            (tuple(sorted(set(self.learning_rate_milestones))) == self.learning_rate_milestones, "learning_rate_milestones must be strictly increasing"),
+            (self.plateau_patience >= 1, "plateau_patience must be >= 1"),
+            (0.0 < self.plateau_factor < 1.0, "plateau_factor must be in (0, 1)"),
+            (0.0 < self.minimum_learning_rate <= self.learning_rate, "minimum_learning_rate must be positive and <= learning_rate"),
+        )  # fmt: skip
+
+
+@dataclass(frozen=True)
+class Progressive:
+    """Coarse-to-fine unlocking of the Fourier levels over the first ``full_iteration`` steps."""
+
+    enabled: bool = True
+    full_iteration: int = 150
+    spatial_start_levels: int = 2
+    temporal_start_levels: int = 1
+
+    def apply(self, network: torch.nn.Module, iteration: int) -> None:
+        if self.enabled:
+            network.set_progressive_levels(
+                min(iteration / self.full_iteration, 1.0),
+                spatial_start_levels=self.spatial_start_levels,
+                temporal_start_levels=self.temporal_start_levels,
+            )
+
+    def validate(self) -> None:
+        _check(
+            (self.full_iteration >= 1, "progressive full_iteration must be >= 1"),
+            (self.spatial_start_levels >= 0 and self.temporal_start_levels >= 0, "progressive start levels must be non-negative"),
+        )  # fmt: skip
+
+
+@dataclass(frozen=True)
+class Regularization:
+    """Huber smoothness penalties on the log-resistivity model."""
+
+    spatial: float = 0.0
+    temporal: float = 0.0
+    huber_delta: float = 0.1
+
+    def validate(self) -> None:
+        _check(
+            (self.spatial >= 0.0 and self.temporal >= 0.0, "regularization strengths must be non-negative"),
+            (self.huber_delta > 0.0, "regularization huber_delta must be positive"),
+        )  # fmt: skip
+
+
+@dataclass(frozen=True)
+class Windows:
+    """Windowed physics loss for time series (``size=None`` uses every timestep per call)."""
+
+    size: int | None = None
+    step: int = 1
+    full_evaluation_interval: int = 25
+    alternate_direction: bool = True
+
+    def validate(self) -> None:
+        _check(
+            (_optional_positive(self.size), "time window size must be positive when set"),
+            (self.step >= 1, "time window step must be positive"),
+            (self.full_evaluation_interval >= 1, "full_evaluation_interval must be positive"),
+        )  # fmt: skip
+
+
+@dataclass(frozen=True)
+class INRConfig:
+    """Controls for matrix-free INR inversion; the tunables live in the grouped sub-configs."""
+
+    max_iterations: int = 300
+    target_chi2: float | None = 1.0
+    device: str = "cuda"
     log_every: int = 10
     prepare_solver: bool = True
-    time_window_size: int | None = None
-    time_window_step: int = 1
-    full_evaluation_interval: int = 25
-    alternate_window_direction: bool = True
     snapshot_interval: int | None = None
+    optimization: Optimization = field(default_factory=Optimization)
+    progressive: Progressive = field(default_factory=Progressive)
+    regularization: Regularization = field(default_factory=Regularization)
+    windows: Windows = field(default_factory=Windows)
     progress_callback: ProgressCallback | None = field(
         default=None, repr=False, compare=False
     )
@@ -76,85 +155,80 @@ class INRConfig:
     )
 
     def validate(self) -> None:
-        def optional_positive(value):
-            return value is None or value > 0
-
-        checks = (
+        _check(
             (self.max_iterations >= 1, "max_iterations must be >= 1"),
-            (self.learning_rate > 0.0, "learning_rate must be positive"),
-            (self.optimizer in _OPTIMIZERS, "optimizer must be 'adam', 'adamw', or 'radam'"),
-            (self.scheduler in _SCHEDULERS, "scheduler must be 'multistep', 'plateau', or 'none'"),
-            (all(step >= 1 for step in self.learning_rate_milestones), "learning_rate_milestones must contain positive iterations"),
-            (tuple(sorted(set(self.learning_rate_milestones))) == self.learning_rate_milestones, "learning_rate_milestones must be strictly increasing"),
-            (optional_positive(self.target_chi2), "target_chi2 must be positive"),
-            (optional_positive(self.gradient_clip_norm), "gradient_clip_norm must be positive when set"),
-            (self.weight_decay >= 0.0, "weight_decay must be non-negative"),
-            (self.plateau_patience >= 1, "plateau_patience must be >= 1"),
-            (0.0 < self.plateau_factor < 1.0, "plateau_factor must be in (0, 1)"),
-            (0.0 < self.minimum_learning_rate <= self.learning_rate, "minimum_learning_rate must be positive and <= learning_rate"),
+            (_optional_positive(self.target_chi2), "target_chi2 must be positive"),
             (self.log_every >= 1, "log_every must be >= 1"),
-            (self.progressive_full_iteration >= 1, "progressive_full_iteration must be >= 1"),
-            (self.progressive_spatial_start_levels >= 0 and self.progressive_temporal_start_levels >= 0, "progressive start levels must be non-negative"),
-            (self.spatial_regularization >= 0.0 and self.temporal_regularization >= 0.0, "regularization strengths must be non-negative"),
-            (self.regularization_huber_delta > 0.0, "regularization_huber_delta must be positive"),
-            (optional_positive(self.time_window_size), "time_window_size must be positive when set"),
-            (self.time_window_step >= 1, "time_window_step must be positive"),
-            (self.full_evaluation_interval >= 1, "full_evaluation_interval must be positive"),
-            (optional_positive(self.snapshot_interval), "snapshot_interval must be positive when set"),
+            (_optional_positive(self.snapshot_interval), "snapshot_interval must be positive when set"),
         )  # fmt: skip
-        for valid, message in checks:
-            if not valid:
-                raise ValueError(message)
+        for group in (
+            self.optimization,
+            self.progressive,
+            self.regularization,
+            self.windows,
+        ):
+            group.validate()
+
+
+@dataclass(frozen=True)
+class History:
+    """Per-iteration series (``full_*`` hold the all-timestep evaluations of windowed runs)."""
+
+    chi2: np.ndarray
+    rms: np.ndarray
+    objective: np.ndarray
+    spatial_penalty: np.ndarray
+    temporal_penalty: np.ndarray
+    extra_penalty: np.ndarray
+    full_iterations: np.ndarray
+    full_chi2: np.ndarray
+
+
+@dataclass(frozen=True)
+class Timing:
+    """Wall-clock seconds by phase and the number of timesteps the physics processed."""
+
+    elapsed: float
+    forward: float
+    backward: float
+    optimizer: float
+    forward_timesteps: int
+    vjp_timesteps: int
 
 
 @dataclass(frozen=True)
 class INRResult:
-    """Result and timing diagnostics for one INR optimization."""
+    """The best full-data model of one INR optimization, with its history and timing."""
 
     log_resistivity: np.ndarray
     resistivity: np.ndarray
     predicted_log_data: np.ndarray
     predicted_data: np.ndarray
-    chi2_history: np.ndarray
-    rms_history: np.ndarray
     iterations: int
     best_iteration: int
     best_chi2: float
     stop_reason: str
-    elapsed_seconds: float
-    forward_seconds: float
-    backward_seconds: float
-    optimizer_seconds: float
     device: str
     gpu_report: dict[str, Any]
-    optimizer: str
-    scheduler: str
-    objective_history: np.ndarray
-    spatial_penalty_history: np.ndarray
-    temporal_penalty_history: np.ndarray
-    extra_penalty_history: np.ndarray
-    full_chi2_iterations: np.ndarray
-    full_chi2_history: np.ndarray
-    time_window_size: int | None
-    time_window_step: int
-    physics_forward_timesteps: int
-    physics_vjp_timesteps: int
+    history: History
+    timing: Timing
+    config: INRConfig
 
 
 def _scheduler(config: INRConfig, optimizer: torch.optim.Optimizer):
-    if config.scheduler == "multistep":
+    if config.optimization.scheduler == "multistep":
         return torch.optim.lr_scheduler.MultiStepLR(
             optimizer,
-            milestones=list(config.learning_rate_milestones),
-            gamma=config.plateau_factor,
+            milestones=list(config.optimization.learning_rate_milestones),
+            gamma=config.optimization.plateau_factor,
         )
-    if config.scheduler == "plateau":
+    if config.optimization.scheduler == "plateau":
         return torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode="min",
-            factor=config.plateau_factor,
-            patience=config.plateau_patience,
-            min_lr=config.minimum_learning_rate,
+            factor=config.optimization.plateau_factor,
+            patience=config.optimization.plateau_patience,
+            min_lr=config.optimization.minimum_learning_rate,
         )
     return None
 
@@ -234,19 +308,19 @@ def _detach(encoded: Any) -> Any:
 class _Schedule:
     """Which timesteps enter each physics call.
 
-    Without windows every call uses all steps. With windows (``time_window_size`` below the
+    Without windows every call uses all steps. With windows (``windows.size`` below the
     number of steps) calls cycle through overlapping windows, optionally alternating
     direction each cycle; each step's loss is weighted by ``1 / (number of windows covering it)``.
     """
 
     def __init__(self, n_times: int, config: INRConfig, device: torch.device):
-        size = config.time_window_size
+        size = config.windows.size
         self.windowed = size is not None and size < n_times
-        self.alternate = config.alternate_window_direction
+        self.alternate = config.windows.alternate_direction
         self.device = device
         if self.windowed:
             size = min(int(size), n_times)
-            starts = list(range(0, max(n_times - size + 1, 1), config.time_window_step))
+            starts = list(range(0, max(n_times - size + 1, 1), config.windows.step))
             if starts[-1] != n_times - size:
                 starts.append(n_times - size)
             self.windows = [np.arange(start, start + size) for start in starts]
@@ -255,7 +329,7 @@ class _Schedule:
                 coverage[window] += 1
             if np.any(coverage == 0):
                 raise ValueError(
-                    "time windows do not cover every timestep; reduce time_window_step"
+                    "time windows do not cover every timestep; reduce windows.step"
                 )
         else:
             self.windows, coverage = (
@@ -358,20 +432,15 @@ def _prepare(
         raise ValueError(
             f"coordinates must have {expected_ndim} dimensions and end with {network.input_dimensions} features"
         )
-    if not series and config.time_window_size is not None:
-        raise ValueError("time_window_size is only valid for time-lapse inversion")
+    if not series and config.windows.size is not None:
+        raise ValueError("windows.size is only valid for time-lapse inversion")
     if np.ndim(observed_rhoa) != (2 if series else 1):
         raise ValueError(
             f"observed_rhoa must be {2 if series else 1}D for this training mode"
         )
 
     with torch.no_grad():
-        if config.progressive_encoding:
-            network.set_progressive_levels(
-                0.0,
-                spatial_start_levels=config.progressive_spatial_start_levels,
-                temporal_start_levels=config.progressive_temporal_start_levels,
-            )
+        config.progressive.apply(network, 0)
         encoded = _detach(network.encode(torch.as_tensor(coordinates, device=device)))
         initial_model = network.forward_encoded(encoded)
     model_shape = tuple(coordinates.shape[:-1])
@@ -413,7 +482,7 @@ def _prepare(
         )
     spatial = (
         _spatial_operator(forward, model_shape[-1], device)
-        if config.spatial_regularization > 0.0
+        if config.regularization.spatial > 0.0
         else None
     )
     return _Problem(forward, network, encoded, observed, std, schedule, series, spatial)
@@ -429,12 +498,12 @@ def _penalties(
     terms = {"spatial": zero, "temporal": zero, "extra": zero}
     if problem.spatial_operator is not None:
         differences = torch.sparse.mm(problem.spatial_operator, model.T)
-        terms["spatial"] = config.spatial_regularization * _huber_mean(
-            differences, config.regularization_huber_delta
+        terms["spatial"] = config.regularization.spatial * _huber_mean(
+            differences, config.regularization.huber_delta
         )
-    if problem.series and config.temporal_regularization > 0.0:
-        terms["temporal"] = config.temporal_regularization * _huber_mean(
-            model[1:] - model[:-1], config.regularization_huber_delta
+    if problem.series and config.regularization.temporal > 0.0:
+        terms["temporal"] = config.regularization.temporal * _huber_mean(
+            model[1:] - model[:-1], config.regularization.huber_delta
         )
     if config.extra_penalty is not None:
         terms["extra"] = config.extra_penalty(log_model, iteration)
@@ -458,8 +527,9 @@ def _fit(
         forward, network, coordinates, observed_rhoa, data_std, config, series, device
     )
     network, schedule = problem.network, problem.schedule
-    optimizer = _OPTIMIZERS[config.optimizer](
-        network.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
+    tuning = config.optimization
+    optimizer = _OPTIMIZERS[tuning.optimizer](
+        network.parameters(), lr=tuning.learning_rate, weight_decay=tuning.weight_decay
     )
     scheduler = _scheduler(config, optimizer)
     record = _Recorder(device)
@@ -469,12 +539,7 @@ def _fit(
     torch.cuda.synchronize(device)
     started = time.perf_counter()
     for iteration in range(config.max_iterations + 1):
-        if config.progressive_encoding:
-            network.set_progressive_levels(
-                min(iteration / config.progressive_full_iteration, 1.0),
-                spatial_start_levels=config.progressive_spatial_start_levels,
-                temporal_start_levels=config.progressive_temporal_start_levels,
-            )
+        config.progressive.apply(network, iteration)
         with record.timed("forward"):
             log_model = network.forward_encoded(problem.encoded)
             model = log_model.reshape(problem.n_times, -1)
@@ -488,7 +553,7 @@ def _fit(
             )
             if schedule.windowed and (
                 iteration in (0, config.max_iterations)
-                or iteration % config.full_evaluation_interval == 0
+                or iteration % config.windows.full_evaluation_interval == 0
                 or snapshot_due
             ):
                 with torch.no_grad():
@@ -583,9 +648,9 @@ def _fit(
             optimizer.zero_grad(set_to_none=True)
             objective.backward()
             record.timesteps["vjp"] += window.size
-            if config.gradient_clip_norm is not None:
+            if config.optimization.gradient_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(
-                    network.parameters(), config.gradient_clip_norm
+                    network.parameters(), config.optimization.gradient_clip_norm
                 )
         with record.timed("optimizer"):
             optimizer.step()
@@ -601,38 +666,41 @@ def _fit(
     log_model = best["model"].to(device="cpu", dtype=torch.float64).numpy()
     predicted = best["prediction"].to(device="cpu", dtype=torch.float64).numpy()
     predicted = predicted if series else predicted[0]
-    history = {
+    series = {
         name: np.asarray(values, dtype=float) for name, values in record.series.items()
     }
+    history = History(
+        chi2=series["chi2"],
+        rms=series["rms"],
+        objective=series["objective"],
+        spatial_penalty=series["spatial"],
+        temporal_penalty=series["temporal"],
+        extra_penalty=series["extra"],
+        full_iterations=np.asarray(record.full_iterations, dtype=np.int32),
+        full_chi2=np.asarray(record.full_chi2, dtype=float),
+    )
+    timing = Timing(
+        elapsed=float(elapsed),
+        forward=record.seconds["forward"],
+        backward=record.seconds["backward"],
+        optimizer=record.seconds["optimizer"],
+        forward_timesteps=record.timesteps["forward"],
+        vjp_timesteps=record.timesteps["vjp"],
+    )
     return INRResult(
         log_resistivity=log_model,
         resistivity=np.exp(log_model),
         predicted_log_data=predicted,
         predicted_data=np.exp(predicted),
-        chi2_history=history["chi2"],
-        rms_history=history["rms"],
-        iterations=len(history["chi2"]) - 1,
+        iterations=series["chi2"].size - 1,
         best_iteration=int(best["iteration"]),
         best_chi2=float(best["chi2"]),
         stop_reason=stop_reason,
-        elapsed_seconds=float(elapsed),
-        forward_seconds=record.seconds["forward"],
-        backward_seconds=record.seconds["backward"],
-        optimizer_seconds=record.seconds["optimizer"],
         device=str(device),
         gpu_report=gpu_report,
-        optimizer=config.optimizer,
-        scheduler=config.scheduler,
-        objective_history=history["objective"],
-        spatial_penalty_history=history["spatial"],
-        temporal_penalty_history=history["temporal"],
-        extra_penalty_history=history["extra"],
-        full_chi2_iterations=np.asarray(record.full_iterations, dtype=np.int32),
-        full_chi2_history=np.asarray(record.full_chi2, dtype=float),
-        time_window_size=int(config.time_window_size) if schedule.windowed else None,
-        time_window_step=int(config.time_window_step),
-        physics_forward_timesteps=record.timesteps["forward"],
-        physics_vjp_timesteps=record.timesteps["vjp"],
+        history=history,
+        timing=timing,
+        config=config,
     )
 
 
@@ -669,7 +737,7 @@ def fit_timelapse_inr(
 ) -> INRResult:
     """Invert a complete time series, optionally using a windowed physics loss.
 
-    ``INRConfig.time_window_size`` changes only which timesteps enter each forward/VJP call.
+    ``INRConfig.windows.size`` changes only which timesteps enter each forward/VJP call.
     The network, its global time coordinates, and the optimizer state persist for the run.
     """
 
@@ -686,4 +754,15 @@ def fit_timelapse_inr(
     )
 
 
-__all__ = ["INRConfig", "INRResult", "fit_inr", "fit_timelapse_inr"]
+__all__ = [
+    "History",
+    "INRConfig",
+    "INRResult",
+    "Optimization",
+    "Progressive",
+    "Regularization",
+    "Timing",
+    "Windows",
+    "fit_inr",
+    "fit_timelapse_inr",
+]

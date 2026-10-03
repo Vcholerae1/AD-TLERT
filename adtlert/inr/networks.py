@@ -120,6 +120,13 @@ class MultiscaleFourierEncoder(nn.Module):
             parts.extend((temporal, temporal))
         return torch.cat(parts)
 
+    def weigh(self, features: torch.Tensor) -> torch.Tensor:
+        """Scale encoded ``features`` by the current progressive level weights."""
+
+        return features * self.feature_mask(
+            dtype=features.dtype, device=features.device
+        )
+
     @staticmethod
     def _progressive_weights(
         levels: int, start_levels: int, progress: float
@@ -216,6 +223,31 @@ class _BoundedLogResistivity(nn.Module):
     def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
         return self.forward_encoded(self.encode(coordinates))
 
+    def _encoders(self) -> tuple[MultiscaleFourierEncoder, ...]:
+        raise NotImplementedError
+
+    def set_progressive_levels(
+        self,
+        progress: float,
+        *,
+        spatial_start_levels: int = 2,
+        temporal_start_levels: int = 1,
+    ) -> None:
+        """Unlock the Fourier levels of every encoder (levels an encoder lacks are ignored)."""
+
+        for encoder in self._encoders():
+            encoder.set_progressive_levels(
+                progress,
+                spatial_start_levels=spatial_start_levels,
+                temporal_start_levels=temporal_start_levels,
+            )
+
+    @classmethod
+    def from_configuration(cls, configuration: dict[str, object]):
+        """Rebuild a network from :meth:`configuration`; ``load_state_dict`` then restores it."""
+
+        return cls(**configuration)
+
     def _output(self, residual: torch.Tensor) -> torch.Tensor:
         if not self.bounded_output:
             return self.initial_log_resistivity + residual
@@ -273,18 +305,8 @@ class MultiscaleINR(_BoundedLogResistivity):
     def encode(self, coordinates: torch.Tensor) -> torch.Tensor:
         return self.encoder(coordinates)
 
-    def set_progressive_levels(
-        self,
-        progress: float,
-        *,
-        spatial_start_levels: int = 2,
-        temporal_start_levels: int = 1,
-    ) -> None:
-        self.encoder.set_progressive_levels(
-            progress,
-            spatial_start_levels=spatial_start_levels,
-            temporal_start_levels=temporal_start_levels,
-        )
+    def _encoders(self) -> tuple[MultiscaleFourierEncoder, ...]:
+        return (self.encoder,)
 
     def configuration(self) -> dict[str, object]:
         """Return the constructor settings required for a compatible checkpoint."""
@@ -301,10 +323,9 @@ class MultiscaleINR(_BoundedLogResistivity):
         }
 
     def forward_encoded(self, encoded_coordinates: torch.Tensor) -> torch.Tensor:
-        feature_mask = self.encoder.feature_mask(
-            dtype=encoded_coordinates.dtype, device=encoded_coordinates.device
+        return self._output(
+            self.mlp(self.encoder.weigh(encoded_coordinates)).squeeze(-1)
         )
-        return self._output(self.mlp(encoded_coordinates * feature_mask).squeeze(-1))
 
 
 class JointSpatioTemporalINR(MultiscaleINR):
@@ -394,23 +415,8 @@ class DualNetworkINR(_BoundedLogResistivity):
             temporal_coordinates
         )
 
-    def set_progressive_levels(
-        self,
-        progress: float,
-        *,
-        spatial_start_levels: int = 2,
-        temporal_start_levels: int = 1,
-    ) -> None:
-        self.spatial_encoder.set_progressive_levels(
-            progress,
-            spatial_start_levels=spatial_start_levels,
-            temporal_start_levels=0,
-        )
-        self.temporal_encoder.set_progressive_levels(
-            progress,
-            spatial_start_levels=0,
-            temporal_start_levels=temporal_start_levels,
-        )
+    def _encoders(self) -> tuple[MultiscaleFourierEncoder, ...]:
+        return self.spatial_encoder, self.temporal_encoder
 
     def configuration(self) -> dict[str, object]:
         return {
@@ -429,14 +435,8 @@ class DualNetworkINR(_BoundedLogResistivity):
         self, encoded_coordinates: tuple[torch.Tensor, torch.Tensor]
     ) -> torch.Tensor:
         spatial_encoded, temporal_encoded = encoded_coordinates
-        spatial_features = spatial_encoded * self.spatial_encoder.feature_mask(
-            dtype=spatial_encoded.dtype,
-            device=spatial_encoded.device,
-        )
-        temporal_features = temporal_encoded * self.temporal_encoder.feature_mask(
-            dtype=temporal_encoded.dtype,
-            device=temporal_encoded.device,
-        )
+        spatial_features = self.spatial_encoder.weigh(spatial_encoded)
+        temporal_features = self.temporal_encoder.weigh(temporal_encoded)
         spatial_mask = torch.sigmoid(self.spatial_mlp(spatial_features).squeeze(-1))
         temporal_amplitude = self.temporal_mlp(temporal_features).squeeze(-1)
         return self._output(temporal_amplitude[:, None] * spatial_mask[None, :])
