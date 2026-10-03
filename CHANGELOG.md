@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (planned 0.2.0)
+## 0.2.0 - 2026-10-03
 
 ADTLERT is now a CUDA library. 0.1.x had a CPU/SciPy build; the two are different products.
 
