@@ -112,18 +112,13 @@ def _halfspace_primary(
 
 @dataclass
 class _Fields:
-    """Assembled operator values and total fields for one conductivity model."""
+    """Assembled operator values and total fields for one conductivity model (on the GPU)."""
 
     values: Tensor
     total: Tensor
-    _device_copies: dict = field(default_factory=dict)
 
     def on(self, device: torch.device) -> Tensor:
-        if device.type == "cpu":
-            return self.total
-        if str(device) not in self._device_copies:
-            self._device_copies[str(device)] = self.total.to(device)
-        return self._device_copies[str(device)]
+        return self.total.to(device)
 
 
 @dataclass(frozen=True, eq=False)
@@ -254,7 +249,7 @@ class ERTForward2p5D:
 
     @property
     def _device(self) -> torch.device:
-        """Device of the dense adjoint contractions (fields are cached on the host)."""
+        """Device of the fields, assembly and measurement maps; only results return to the host."""
 
         return _CUDA
 
@@ -300,21 +295,44 @@ class ERTForward2p5D:
         return self._on(f"{d.name}.boundary_templates", build, torch.device(device))
 
     def _assemble(self, d: Discretization, conductivity: Tensor) -> Tensor:
-        """CSR values of ``A_w(conductivity)`` for every wavenumber, shape ``(W, nnz)``."""
+        """CSR values of ``A_w(conductivity)`` for every wavenumber, shape ``(W, nnz)``, on the GPU."""
 
-        sigma = conductivity.to(self.dtype)
-        volume = sigma[d.parent_cell_ids][None, :, None, None] * self._volume_templates(
-            d
+        sigma = conductivity.to(_CUDA, self.dtype)
+        parents = self._on(
+            f"{d.name}.parent_cell_ids", lambda: d.parent_cell_ids, _CUDA
         )
-        boundary = (
-            sigma[d.parent_cell_ids[d.boundary_cells]][None, :]
-            * d.boundary_geometries.to(self.dtype)
-        )[:, :, None, None] * d.boundary_mass.to(self.dtype)
+        boundary_parents = self._on(
+            f"{d.name}.boundary_parent_ids",
+            lambda: d.parent_cell_ids[d.boundary_cells],
+            _CUDA,
+        )
+        geometries, boundary_mass = (
+            self._on(f"{d.name}.{name}", lambda t=t: t.to(self.dtype), _CUDA)
+            for name, t in (
+                ("boundary_geometries", d.boundary_geometries),
+                ("boundary_mass", d.boundary_mass),
+            )
+        )
+        volume = sigma[parents][None, :, None, None] * self._volume_templates(d, _CUDA)
+        boundary = (sigma[boundary_parents][None, :] * geometries)[
+            :, :, None, None
+        ] * boundary_mass
         count = self.wavenumbers.shape[0]
-        values = torch.zeros((count, d.pattern.nnz), dtype=self.dtype)
-        values.index_add_(1, d.pattern.volume_inverse, volume.reshape(count, -1))
-        return values.index_add_(
-            1, d.pattern.boundary_inverse, boundary.reshape(count, -1)
+        assemble = self._cached(
+            (d.name, "assembly"),
+            lambda: GroupSum(
+                np.concatenate(
+                    (
+                        d.pattern.volume_inverse.numpy(),
+                        d.pattern.boundary_inverse.numpy(),
+                    )
+                ),
+                d.pattern.nnz,
+                _CUDA,
+            ),
+        )
+        return assemble(
+            torch.cat((volume.reshape(count, -1), boundary.reshape(count, -1)), dim=1)
         )
 
     def _sigma(self, conductivity) -> Tensor:
@@ -330,13 +348,13 @@ class ERTForward2p5D:
         *,
         refactorize: bool = True,
     ) -> Tensor:
-        """Batched sparse solve ``A_b X_b = rhs_b`` (plans are reused; see :class:`BatchedSolver`)."""
+        """Batched sparse solve ``A_b X_b = rhs_b`` on the GPU (plans are reused; see :class:`BatchedSolver`)."""
 
         return self._solver.solve(
             d.name,
             d.pattern,
-            values.to(self.dtype),
-            rhs.to(self.dtype),
+            values.to(_CUDA, self.dtype),
+            rhs.to(_CUDA, self.dtype),
             spd=d.spd,
             refactorize=refactorize,
         )
@@ -373,7 +391,7 @@ class ERTForward2p5D:
         return self.terrain_cache_dir / f"{digest.hexdigest()}.npz"
 
     def _disk_cached(self, name: str, d: Discretization, compute) -> Tensor:
-        """Memory- and (optionally) disk-cached unit potential stack of shape ``(W, E, dofs)``."""
+        """Host- and (optionally) disk-cached unit potential stack of shape ``(W, E, dofs)``."""
 
         def load_or_compute():
             path = self._disk_path(name, d)
@@ -392,7 +410,7 @@ class ERTForward2p5D:
                     Exception
                 ):  # corrupt or partial cache files are simply recomputed
                     pass
-            value = compute()
+            value = compute().cpu()
             if path is not None:
                 try:
                     path.parent.mkdir(parents=True, exist_ok=True)
@@ -420,8 +438,11 @@ class ERTForward2p5D:
         return self._disk_cached(f"{d.name}_sub_potentials", d, compute)
 
     def _unit_primary(self) -> Tensor:
-        """Unit-resistivity primary field ``u_p`` on the field discretization, ``(W, E, dofs)``."""
+        """Unit-resistivity primary field ``u_p`` on the field discretization, ``(W, E, dofs)``, on the GPU."""
 
+        return self._on("unit_primary", self._host_unit_primary, _CUDA)
+
+    def _host_unit_primary(self) -> Tensor:
         if self.use_numerical_primary:
             potential = self.primary_potential_discretization
 
@@ -434,7 +455,7 @@ class ERTForward2p5D:
             return self._disk_cached(
                 "auxiliary_sub_potentials", self.discretization, project
             )
-        return self._cached("analytic_primary", self._analytic_primary)
+        return self._analytic_primary()
 
     def _analytic_primary(self) -> Tensor:
         nodes = np.asarray(self.mesh.nodes, dtype=float)
@@ -491,15 +512,24 @@ class ERTForward2p5D:
                 if node >= 0:
                     mask = np.any(cells == node, axis=1)
                     weights[source, mask], counts[source] = 1.0, np.count_nonzero(mask)
-            return torch.as_tensor(weights), torch.as_tensor(counts)
+            return torch.as_tensor(weights, device=sigma.device), torch.as_tensor(
+                counts, device=sigma.device
+            )
 
-        weights, counts = self._cached("source_cell_weights", node_cell_weights)
+        weights, counts = self._cached(
+            ("source_cell_weights", str(sigma.device)), node_cell_weights
+        )
+        node_ids, cell_ids = (
+            self._on(name, lambda t=t: t, sigma.device)
+            for name, t in (
+                ("source_node_ids", self.source_node_ids),
+                ("source_cell_ids", self.source_cell_ids),
+            )
+        )
         node_rho = torch.exp(
             torch.einsum("ec,c->e", weights, -torch.log(sigma)) / counts
         )
-        return torch.where(
-            self.source_node_ids >= 0, node_rho, 1.0 / sigma[self.source_cell_ids]
-        )
+        return torch.where(node_ids >= 0, node_rho, 1.0 / sigma[cell_ids])
 
     # -- field solves -------------------------------------------------------
 
@@ -517,6 +547,7 @@ class ERTForward2p5D:
 
         sigma = self._sigma(conductivity)
         key = self._field_cache_key(sigma)
+        sigma = sigma.to(_CUDA)
         if key is not None:
             counter = "hits" if key in self._field_cache else "misses"
             self._cache[counter] = self._cache.get(counter, 0) + 1
@@ -551,25 +582,31 @@ class ERTForward2p5D:
     # -- measurement maps ---------------------------------------------------
 
     def _integrate(self, fields: Tensor) -> Tensor:
-        return torch.tensordot(self.weights.to(fields.dtype), fields, dims=([0], [0]))
+        return torch.tensordot(
+            self.weights.to(fields.device, fields.dtype), fields, dims=([0], [0])
+        )
 
     def _receivers(self) -> tuple[Tensor, Tensor]:
-        """Receiver rows ``E[M] - E[N]`` (normal) and ``E[A] - E[B]`` (reciprocal)."""
+        """Receiver rows ``E[M] - E[N]`` (normal) and ``E[A] - E[B]`` (reciprocal), on the GPU."""
 
         def build():
             a, b, m, n = self._abmn()
             electrodes = self.discretization.electrode_matrix
-            return (electrodes[m] - electrodes[n]).to(self.dtype), (
+            return (electrodes[m] - electrodes[n]).to(_CUDA, self.dtype), (
                 electrodes[a] - electrodes[b]
-            ).to(self.dtype)
+            ).to(_CUDA, self.dtype)
 
         return self._cached("receivers", build)
 
     def _normal_reciprocal(self, integrated: Tensor) -> tuple[Tensor, Tensor]:
         """Normal (AB source, MN receiver) and reciprocal (MN source, AB receiver) resistances."""
 
-        a, b, m, n = self._abmn()
-        rows = torch.arange(self.survey.measurement_count)
+        a, b, m, n = self._abmn(_CUDA)
+        rows = self._on(
+            "measurement_rows",
+            lambda: torch.arange(self.survey.measurement_count),
+            _CUDA,
+        )
         normal_receiver, current_receiver = self._receivers()
         normal = integrated @ normal_receiver.T
         reciprocal = integrated @ current_receiver.T
@@ -577,21 +614,33 @@ class ERTForward2p5D:
             n, rows
         ]
 
-    def _adjoint_rhs(self, cotangent: Tensor, *, reciprocal: bool = False) -> Tensor:
-        """Transpose of the (reciprocal) measurement map for ``(Q, D)`` cotangents → ``(W, Q*E, dofs)``."""
+    def _source_incidence(self, reciprocal: bool) -> Tensor:
+        """``(E, D)`` matrix with ``+1`` at each datum's positive and ``-1`` at its negative source."""
 
-        a, b, m, n = self._abmn()
+        def build():
+            a, b, m, n = (index.numpy() for index in self._abmn())
+            positive, negative = (m, n) if reciprocal else (a, b)
+            rows = np.arange(self.survey.measurement_count)
+            incidence = np.zeros((self.survey.electrode_count, rows.size))
+            incidence[positive, rows], incidence[negative, rows] = 1.0, -1.0
+            return torch.as_tensor(incidence, dtype=self.dtype, device=_CUDA)
+
+        return self._cached(("source_incidence", reciprocal), build)
+
+    def _adjoint_rhs(self, cotangent: Tensor, *, reciprocal: bool = False) -> Tensor:
+        """Transpose of the (reciprocal) measurement map for ``(Q, D)`` cotangents → ``(W, Q*E, dofs)``.
+
+        The scatter into source electrodes is a product with the incidence matrix, which is
+        deterministic on the GPU (``index_add_`` is not).
+        """
+
         normal_receiver, current_receiver = self._receivers()
-        positive, negative, receiver = (
-            (m, n, current_receiver) if reciprocal else (a, b, normal_receiver)
-        )
-        weighted = cotangent.to(self.dtype)[:, :, None] * receiver[None]
-        sources = torch.zeros(
-            (cotangent.shape[0], self.survey.electrode_count, receiver.shape[1]),
-            dtype=self.dtype,
-        )
-        sources.index_add_(1, positive, weighted).index_add_(1, negative, -weighted)
-        rhs = self.weights.to(self.dtype)[:, None, None, None] * sources[None]
+        receiver = current_receiver if reciprocal else normal_receiver
+        sources = (
+            self._source_incidence(reciprocal)[None]
+            * cotangent.to(_CUDA, self.dtype)[:, None, :]
+        ) @ receiver
+        rhs = self.weights.to(_CUDA, self.dtype)[:, None, None, None] * sources[None]
         return rhs.reshape(self.wavenumbers.shape[0], -1, receiver.shape[1])
 
     @staticmethod
@@ -622,6 +671,9 @@ class ERTForward2p5D:
     def _response(
         self, integrated: Tensor, normal: Tensor, reciprocal: Tensor, currents
     ) -> ForwardResponse:
+        integrated, normal, reciprocal = (
+            t.cpu() for t in (integrated, normal, reciprocal)
+        )
         resistance = self._combine(normal, reciprocal)
         current = torch.as_tensor(currents, dtype=FLOAT_DTYPE)
         electrode_matrix = self.discretization.electrode_matrix.to(integrated.dtype)
@@ -654,7 +706,7 @@ class ERTForward2p5D:
         """Return the reciprocal-averaged resistance of each measurement."""
 
         _, _, normal, reciprocal = self._measure(conductivity)
-        return self._combine(normal, reciprocal)
+        return self._combine(normal, reciprocal).cpu()
 
     def apparent_resistivity_values(self, conductivity, currents=1.0) -> Tensor:
         """Return apparent resistivity values without allocating a ForwardResponse."""
@@ -821,7 +873,9 @@ class ERTForward2p5D:
         sign, scale = self._combine_scale(normal, reciprocal)
         common = (
             0.5
-            * _measurement_vector(cotangent, self.survey.measurement_count, self.dtype)
+            * _measurement_vector(
+                cotangent, self.survey.measurement_count, self.dtype
+            ).to(_CUDA)
             * sign
             / scale
         )
@@ -848,7 +902,7 @@ class ERTForward2p5D:
         sign, scale = self._combine_scale(normal, reciprocal)
         return (
             0.5 * sign * (delta_normal * reciprocal + normal * delta_reciprocal) / scale
-        )
+        ).cpu()
 
     def normal_vjp(
         self, conductivity, cotangent, *, cell_parameter_ids=None, parameter_count=None
@@ -993,11 +1047,13 @@ class ERTForward2p5D:
 
         count = self.survey.measurement_count
         sign, scale = self._combine_scale(normal, reciprocal)
-        eye = torch.eye(count, dtype=normal.dtype)
+        eye = torch.eye(count, dtype=normal.dtype, device=normal.device)
         phi = fields.on(self._device)
         rows = []
         for start in range(0, count, batch_size):
-            cotangent = torch.zeros((batch_size, count), dtype=normal.dtype)
+            cotangent = torch.zeros(
+                (batch_size, count), dtype=normal.dtype, device=normal.device
+            )
             cotangent[: min(batch_size, count - start)] = eye[
                 start : start + batch_size
             ]

@@ -134,6 +134,73 @@ def test_sampled_products_match_dense_products_on_the_pattern():
 
 
 @pytest.mark.parametrize("slope", [0.0, 0.03])
+def test_gpu_assembly_and_measurement_maps_match_host_scatters(slope):
+    """Assembly, the operator product and the adjoint scatter run on the GPU without atomics:
+    they equal the host scatter-adds they replace and are bitwise repeatable."""
+
+    from tests.conftest import quad_case
+
+    case = quad_case(slope)
+    forward = ERTForward2p5D.from_mesh_survey(case.mesh, case.survey)
+    d, dtype = forward.discretization, forward.dtype
+    W, E, N = forward.wavenumbers.shape[0], case.survey.electrode_count, d.dof_count
+
+    def relative_error(actual, expected):
+        return float((actual.cpu() - expected).abs().max() / expected.abs().max())
+
+    sigma = conductivity(case).to(dtype)
+    volume = sigma[d.parent_cell_ids][None, :, None, None] * forward._volume_templates(
+        d
+    )
+    boundary = (
+        sigma[d.parent_cell_ids[d.boundary_cells]][None, :]
+        * d.boundary_geometries.to(dtype)
+    )[:, :, None, None] * d.boundary_mass.to(dtype)
+    expected = (
+        torch.zeros((W, d.pattern.nnz), dtype=dtype)
+        .index_add_(1, d.pattern.volume_inverse, volume.reshape(W, -1))
+        .index_add_(1, d.pattern.boundary_inverse, boundary.reshape(W, -1))
+    )
+    values = forward._assemble(d, sigma)
+    assert values.is_cuda and relative_error(values, expected) < 1e-13
+    fields = forward._fields(sigma)
+    assert fields.values.is_cuda and fields.total.is_cuda
+    assert not forward.vjp(sigma, 1.0).is_cuda  # results still return to the host
+
+    vectors = torch.randn(W, 3, N, dtype=dtype, device=CUDA)
+    indptr, indices = (
+        torch.as_tensor(x) for x in (d.pattern.indptr, d.pattern.indices)
+    )
+    dense = torch.stack(
+        [
+            torch.sparse_csr_tensor(indptr, indices, v, size=d.pattern.shape).to_dense()
+            for v in expected
+        ]
+    ).to(CUDA)
+    product = d.pattern.matvec(values, vectors)
+    assert relative_error(product, (vectors @ dense.transpose(1, 2)).cpu()) < 1e-12
+
+    cotangent = torch.randn(2, case.survey.measurement_count, dtype=dtype)
+    a, b, _, _ = forward._abmn()
+    weighted = cotangent[:, :, None] * forward._receivers()[0].cpu()[None]
+    sources = (
+        torch.zeros((2, E, N), dtype=dtype)
+        .index_add_(1, a, weighted)
+        .index_add_(1, b, -weighted)
+    )
+    rhs = forward._adjoint_rhs(cotangent)
+    expected_rhs = (
+        forward.weights.to(dtype)[:, None, None, None] * sources[None]
+    ).reshape(W, -1, N)
+    assert rhs.is_cuda and relative_error(rhs, expected_rhs) < 1e-13
+
+    for _ in range(5):
+        assert torch.equal(forward._assemble(d, sigma), values)
+        assert torch.equal(d.pattern.matvec(values, vectors), product)
+        assert torch.equal(forward._adjoint_rhs(cotangent), rhs)
+
+
+@pytest.mark.parametrize("slope", [0.0, 0.03])
 def test_cell_gradient_matches_the_gathered_einsum(slope):
     """The SDDMM adjoint gradient equals the direct gather/contract formula it replaces."""
 

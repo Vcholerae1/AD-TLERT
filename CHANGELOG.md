@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `ERTForward2p5D` keeps its fields on the GPU: assembly, the secondary-field right-hand side,
+  wavenumber integration, the measurement maps and the adjoint right-hand side run there, and
+  only per-datum or per-cell results return to the host. The field cache now holds GPU tensors
+  (one `(W, E, dofs)` field and the operator values per entry). Terrain INR step (1250 cells,
+  5151 DOFs, 17 wavenumbers, 48 electrodes, 3 timesteps forward + backward): 432 ms -> 175 ms;
+  host-device copies 76 ms -> 0.1 ms. Public return types and devices are unchanged.
+- GPU assembly and the operator product use fixed-order reductions (`GroupSum`, padded rows), and
+  the adjoint scatter is a product with a source incidence matrix, so all three are bitwise
+  repeatable. Results agree with 0.2.0 to within cuDSS run-to-run noise.
+
 ## 0.2.0 - 2026-10-03
 
 ADTLERT is now a CUDA library. 0.1.x had a CPU/SciPy build; the two are different products.

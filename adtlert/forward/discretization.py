@@ -8,7 +8,6 @@ meshes (bilinear quadrilateral strips or triangles, P1 or quadratic).
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -58,23 +57,39 @@ class SparsePattern:
             )
         return self._device_indices[key]
 
-    def matvec(self, values: Tensor, vectors: Tensor) -> Tensor:
-        """Apply ``A_b`` to ``vectors[b]`` for each operator ``b`` (rows are vectors)."""
+    def _padded_rows(self, device: torch.device) -> tuple[Tensor, Tensor]:
+        """Rows padded to the widest one (ELL): nonzero slots (``nnz`` pads) and their columns."""
 
-        indptr, indices = self._indices(values.device)
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore", message="Sparse (CSR tensor support|invariant checks)"
+        key = ("ell", str(device))
+        if key not in self._device_indices:
+            lengths = np.diff(self.indptr)
+            width = np.arange(int(lengths.max(initial=0)))
+            valid = width[None, :] < lengths[:, None]
+            slots = np.where(valid, self.indptr[:-1, None] + width[None, :], self.nnz)
+            columns = np.where(valid, self.indices[np.minimum(slots, self.nnz - 1)], 0)
+            self._device_indices[key] = tuple(
+                torch.as_tensor(x, dtype=torch.long, device=device)
+                for x in (slots, columns)
             )
-            return torch.stack(
-                [
-                    (
-                        torch.sparse_csr_tensor(indptr, indices, value, size=self.shape)
-                        @ vector.T
-                    ).T
-                    for value, vector in zip(values, vectors, strict=True)
-                ]
-            )
+        return self._device_indices[key]
+
+    def matvec(self, values: Tensor, vectors: Tensor) -> Tensor:
+        """Apply ``A_b`` to ``vectors[b]`` for each operator ``b`` (rows are vectors).
+
+        Each row is summed over its padded nonzeros in a fixed order, so results are
+        bitwise repeatable on the GPU (cuSPARSE SpMM is not).
+        """
+
+        slots, columns = self._padded_rows(values.device)
+        rows = torch.cat((values, values.new_zeros(values.shape[0], 1)), dim=1)[
+            :, slots
+        ]
+        return torch.stack(
+            [
+                (vector[:, columns] * row).sum(dim=-1)
+                for row, vector in zip(rows, vectors, strict=True)
+            ]
+        )
 
     def sample(self, left: Tensor, right: Tensor) -> Tensor:
         """``(left @ right)`` at the nonzeros, in CSR order (SDDMM)."""
