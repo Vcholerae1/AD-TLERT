@@ -28,8 +28,10 @@ with `u_p` the unit-resistivity primary field of every electrode. Flat surfaces 
 half-space primary on the input mesh. Terrain solves on a refined auxiliary discretization whose
 primary is computed numerically on a quadratic one. Both are the same code path, parameterized
 by a `Discretization`. Total fields are cached by conductivity (an LRU of
-`normal_field_cache_max_entries`), so a VJP right after a forward does not re-solve; the INR
-trainers check that the cache holds at least one batch of timesteps.
+`normal_field_cache_max_entries`) on the GPU, so a VJP right after a forward does not re-solve;
+the INR trainers check that the cache holds at least one batch of timesteps. Model series are
+solved `series_batch_steps` models per cuDSS batch, and each factorization is named by its models'
+cache keys: the operators are symmetric, so the adjoint solve of the same batch reuses it.
 
 ## Derivatives
 

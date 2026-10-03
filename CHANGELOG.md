@@ -2,17 +2,32 @@
 
 ## Unreleased
 
+### Added
+
+- `ERTForward2p5D.resistance_series` and `vjp_series`; `apparent_resistivity_autograd` accepts a
+  `(n_steps, n_cells)` series. Uncached models are solved together, up to `series_batch_steps`
+  (new constructor option, default 8) models per cuDSS batch of `steps * W` systems.
+- `BatchedSolver.solve(..., factorization=...)` names the factorized matrices. The adjoint (and
+  tangent) solve of a batch reuses the forward factorization when the solver still holds it;
+  any other solve in between invalidates it, so a stale factorization is never used.
+
 ### Changed
 
 - `ERTForward2p5D` keeps its fields on the GPU: assembly, the secondary-field right-hand side,
   wavenumber integration, the measurement maps and the adjoint right-hand side run there, and
   only per-datum or per-cell results return to the host. The field cache now holds GPU tensors
-  (one `(W, E, dofs)` field and the operator values per entry). Terrain INR step (1250 cells,
-  5151 DOFs, 17 wavenumbers, 48 electrodes, 3 timesteps forward + backward): 432 ms -> 175 ms;
-  host-device copies 76 ms -> 0.1 ms. Public return types and devices are unchanged.
-- GPU assembly and the operator product use fixed-order reductions (`GroupSum`, padded rows), and
-  the adjoint scatter is a product with a source incidence matrix, so all three are bitwise
-  repeatable. Results agree with 0.2.0 to within cuDSS run-to-run noise.
+  (one `(W, E, dofs)` field and the operator values per entry). Public return types and devices
+  are unchanged.
+- Transfer resistances are read from the `(E, E)` electrode potentials instead of contracting the
+  fields with `(D, dofs)` receiver rows (about `2D / E` times fewer FP64 flops); the adjoint
+  scatters cotangents onto electrode pairs with `GroupSum`.
+- `matrix_free_log_rhoa_series` (INR physics) solves the timesteps of a call as one series.
+- Terrain INR step (1250 cells, 5151 DOFs, 17 wavenumbers, 48 electrodes, 3 timesteps forward +
+  backward, RTX 4070): 400 ms -> 93 ms. Host-device copies 76 ms -> 0.1 ms; six numeric
+  factorizations (27 ms) -> one batched factorization (5 ms).
+- GPU assembly, the operator product and the measurement-map adjoint use fixed-order reductions
+  (`GroupSum`, padded rows), so they are bitwise repeatable. Results agree with 0.2.0 to within
+  cuDSS run-to-run noise.
 
 ## 0.2.0 - 2026-10-03
 

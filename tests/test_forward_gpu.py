@@ -215,6 +215,67 @@ def test_series_matches_individual_solves_and_uses_the_field_cache(
     assert flat_forward.normal_field_cache_info()["hits"] >= before + 3
 
 
+def count_factorizations(forward) -> list:
+    """Record every numeric factorization of the operator's current cuDSS plans."""
+
+    calls = []
+    for plan in forward._solver._plans.values():
+        factorize = plan["solver"].factorize
+        plan["solver"].factorize = lambda f=factorize: (calls.append(1), f())[1]
+    return calls
+
+
+@pytest.mark.parametrize("case_name", ["flat_case", "terrain_case"])
+def test_series_batches_reuse_forward_factorizations_only_while_valid(
+    case_name, request
+):
+    case = request.getfixturevalue(case_name)
+    reference = ERTForward2p5D.from_mesh_survey(case.mesh, case.survey)
+    # Three steps in batches of two and one: two plan shapes, both left holding a factorization.
+    forward = ERTForward2p5D.from_mesh_survey(
+        case.mesh, case.survey, series_batch_steps=2
+    )
+    sigma = conductivity(case)
+    series = torch.stack([sigma, sigma * 1.2, sigma * 0.8])
+    cotangents = torch.stack(
+        [random_like(case.survey.measurement_count) for _ in range(3)]
+    )
+    resistance = torch.stack([reference.resistance(model) for model in series])
+    gradient = torch.stack(
+        [reference.vjp(m, c) for m, c in zip(series, cotangents, strict=True)]
+    )
+
+    assert_close(forward.resistance_series(series), resistance)
+    plans = [
+        key for key in forward._solver._plans if key[0] == forward.discretization.name
+    ]
+    assert len(plans) == 2
+    calls = count_factorizations(forward)
+    assert_close(forward.vjp_series(series, cotangents), gradient)
+    assert not calls  # the adjoint batches reuse the forward factorizations
+
+    forward.resistance_series(series * 1.7)  # other models take over both plans
+    assert len(calls) == 2
+    assert_close(forward.vjp_series(series, cotangents), gradient)
+    assert len(calls) == 4  # stale factorizations are not reused
+    assert_close(forward.vjp(series[1], cotangents[1]), gradient[1])
+
+
+def test_autograd_bridge_batches_a_series(flat_case, flat_forward):
+    sigma = conductivity(flat_case)
+    series = torch.stack([sigma, sigma * 1.3]).requires_grad_()
+    weights = torch.stack([random_like(flat_case.survey.measurement_count)] * 2)
+    rhoa = apparent_resistivity_autograd(series, flat_forward)
+    assert rhoa.shape == (2, flat_case.survey.measurement_count)
+    (rhoa * weights).sum().backward()
+    for step in range(2):
+        single = series[step].detach().clone().requires_grad_()
+        value = apparent_resistivity_autograd(single, flat_forward)
+        (value * weights[step]).sum().backward()
+        assert_close(rhoa[step].detach(), value.detach())
+        assert_close(series.grad[step], single.grad)
+
+
 def test_reciprocity_of_the_normal_response(flat_case, flat_forward):
     sigma = conductivity(flat_case)
     survey = flat_case.survey

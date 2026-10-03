@@ -69,12 +69,18 @@ class BatchedSolver:
         *,
         spd: bool,
         refactorize: bool = True,
+        factorization=None,
     ) -> torch.Tensor:
         """Solve for ``rhs`` of shape ``(batch, n_rhs, n)`` given ``values`` of shape ``(batch, nnz)``.
 
         ``pattern`` provides ``indptr``, ``indices`` and ``shape``. ``key`` names the family of
         systems; plans are additionally keyed by the right-hand-side shape. The numeric
         factorization is redone unless ``refactorize=False`` (same matrices, new right-hand sides).
+
+        ``factorization`` optionally names the matrices (a hashable that changes whenever the
+        values do). When it equals the name recorded with the plan's current factorization, the
+        values are not copied and that factorization is reused. Any factorization without a
+        name forgets the recorded one, so an unrelated solve in between forces a refactorization.
         """
 
         origin = rhs.device
@@ -100,13 +106,20 @@ class BatchedSolver:
             plan["solver"] = create_solver(matrices, plan["view"], spd=spd)
             self._plans[(key, tuple(rhs.shape))] = plan
             refactorize = True
+        elif factorization is not None and plan["factorization"] == factorization:
+            refactorize = False
+            plan["rhs"].copy_(rhs)
+            plan["solver"].reset_operands(b=plan["view"])
         else:
             for matrix, value in zip(plan["matrices"], values, strict=True):
                 matrix.values().copy_(value)
+            # The stored values no longer match any named matrices.
+            plan["factorization"] = None
             plan["rhs"].copy_(rhs)
             plan["solver"].reset_operands(b=plan["view"])
         if refactorize:
             plan["solver"].factorize()
+            plan["factorization"] = factorization
         return plan["solver"].solve().transpose(1, 2).to(origin, copy=True).contiguous()
 
     def close(self) -> None:

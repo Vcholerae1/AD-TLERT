@@ -180,24 +180,34 @@ def test_gpu_assembly_and_measurement_maps_match_host_scatters(slope):
     product = d.pattern.matvec(values, vectors)
     assert relative_error(product, (vectors @ dense.transpose(1, 2)).cpu()) < 1e-12
 
-    cotangent = torch.randn(2, case.survey.measurement_count, dtype=dtype)
-    a, b, _, _ = forward._abmn()
-    weighted = cotangent[:, :, None] * forward._receivers()[0].cpu()[None]
-    sources = (
-        torch.zeros((2, E, N), dtype=dtype)
-        .index_add_(1, a, weighted)
-        .index_add_(1, b, -weighted)
-    )
-    rhs = forward._adjoint_rhs(cotangent)
-    expected_rhs = (
-        forward.weights.to(dtype)[:, None, None, None] * sources[None]
-    ).reshape(W, -1, N)
-    assert rhs.is_cuda and relative_error(rhs, expected_rhs) < 1e-13
+    # Resistances from the (E, E) electrode potentials equal the receiver-row formulation.
+    D = case.survey.measurement_count
+    integrated = torch.randn(2, E, N, dtype=dtype)
+    a, b, m, n = forward._abmn()
+    rows, electrodes = torch.arange(D), d.electrode_matrix.to(dtype)
+
+    def receiver_rows(source, sink, positive, negative):
+        per_source = integrated @ (electrodes[positive] - electrodes[negative]).T
+        return per_source[:, source, rows] - per_source[:, sink, rows]
+
+    normal, reciprocal = forward._normal_reciprocal(integrated.to(CUDA))
+    assert relative_error(normal, receiver_rows(a, b, m, n)) < 1e-12
+    assert relative_error(reciprocal, receiver_rows(m, n, a, b)) < 1e-12
+
+    # The adjoint right-hand side is the weighted transpose of that map (dot test).
+    g_normal, g_reciprocal = torch.randn(2, 2, D, dtype=dtype)
+    pairs = forward._pair_cotangent(g_normal, g_reciprocal)
+    rhs = forward._adjoint_rhs(pairs)
+    assert rhs.is_cuda and rhs.shape == (W, 2 * E, N)
+    measured = (g_normal * normal.cpu()).sum() + (g_reciprocal * reciprocal.cpu()).sum()
+    adjoint = (rhs[0].cpu() / forward.weights[0]).reshape(2, E, N)
+    assert abs(float((adjoint * integrated).sum() / measured) - 1.0) < 1e-12
 
     for _ in range(5):
         assert torch.equal(forward._assemble(d, sigma), values)
         assert torch.equal(d.pattern.matvec(values, vectors), product)
-        assert torch.equal(forward._adjoint_rhs(cotangent), rhs)
+        assert torch.equal(forward._pair_cotangent(g_normal, g_reciprocal), pairs)
+        assert torch.equal(forward._adjoint_rhs(pairs), rhs)
 
 
 @pytest.mark.parametrize("slope", [0.0, 0.03])

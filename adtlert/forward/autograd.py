@@ -24,12 +24,13 @@ def _validate_inputs(
     ):
         raise TypeError("conductivity must be a floating-point torch.Tensor")
     if (
-        conductivity.ndim != 1
-        or conductivity.numel() != forward_operator.mesh.cell_count
+        conductivity.ndim not in (1, 2)
+        or conductivity.shape[-1] != forward_operator.mesh.cell_count
     ):
         raise ValueError(
             "conductivity must have shape "
-            f"({forward_operator.mesh.cell_count},), got {tuple(conductivity.shape)}"
+            f"({forward_operator.mesh.cell_count},) or (n_steps, {forward_operator.mesh.cell_count}), "
+            f"got {tuple(conductivity.shape)}"
         )
     if not bool(torch.all(torch.isfinite(conductivity))) or bool(
         torch.any(conductivity <= 0.0)
@@ -60,7 +61,9 @@ def _reduce_current_gradient(gradient: torch.Tensor, shape: torch.Size) -> torch
 class ERT2p5DApparentResistivityFunction(torch.autograd.Function):
     """Expose the matrix-free 2.5D solver to PyTorch forward and reverse AD.
 
-    The primal computation returns apparent resistivity. Reverse-mode AD calls
+    The primal computation returns apparent resistivity of one model ``(n_cells,)`` or of a
+    series ``(n_steps, n_cells)``; a series is solved in batches whose factorizations the
+    backward pass reuses (:meth:`ERTForward2p5D.vjp_series`). Reverse-mode AD calls
     :meth:`ERTForward2p5D.vjp`; forward-mode AD calls
     :meth:`ERTForward2p5D.jvp`. Gradients are available for both cell
     conductivity and scalar/per-datum currents. The solver itself remains an
@@ -78,7 +81,9 @@ class ERT2p5DApparentResistivityFunction(torch.autograd.Function):
 
         conductivity_work = conductivity.detach().to(device="cpu", dtype=FLOAT_DTYPE)
         currents_work = currents.detach().to(device="cpu", dtype=FLOAT_DTYPE)
-        resistance = forward_operator.resistance(conductivity_work).detach()
+        resistance = forward_operator.resistance_series(
+            conductivity_work.reshape(-1, conductivity_work.shape[-1])
+        ).reshape(*conductivity_work.shape[:-1], -1)
         geometric_scale = forward_operator._geometric_factors().detach().abs()
         apparent_resistivity = geometric_scale * resistance / currents_work
 
@@ -113,9 +118,10 @@ class ERT2p5DApparentResistivityFunction(torch.autograd.Function):
         conductivity_gradient = None
         if ctx.needs_input_grad[0]:
             resistance_cotangent = output_cotangent * geometric_scale / currents
-            conductivity_gradient = ctx.forward_operator.vjp(
-                conductivity, resistance_cotangent
-            )
+            conductivity_gradient = ctx.forward_operator.vjp_series(
+                conductivity.reshape(-1, conductivity.shape[-1]),
+                resistance_cotangent.reshape(-1, resistance_cotangent.shape[-1]),
+            ).reshape(conductivity.shape)
             conductivity_gradient = conductivity_gradient.to(
                 device=ctx.conductivity_device,
                 dtype=ctx.conductivity_dtype,
@@ -125,7 +131,8 @@ class ERT2p5DApparentResistivityFunction(torch.autograd.Function):
         if ctx.needs_input_grad[1]:
             expanded_gradient = -output_cotangent * apparent_resistivity / currents
             currents_gradient = _reduce_current_gradient(
-                expanded_gradient, ctx.currents_shape
+                expanded_gradient.reshape(-1, expanded_gradient.shape[-1]).sum(0),
+                ctx.currents_shape,
             )
             currents_gradient = currents_gradient.to(
                 device=ctx.currents_device, dtype=ctx.currents_dtype
@@ -150,9 +157,16 @@ class ERT2p5DApparentResistivityFunction(torch.autograd.Function):
             conductivity_direction = conductivity_tangent.detach().to(
                 device="cpu", dtype=FLOAT_DTYPE
             )
-            resistance_tangent = ctx.forward_operator.jvp(
-                conductivity, conductivity_direction
-            )
+            resistance_tangent = torch.stack(
+                [
+                    ctx.forward_operator.jvp(model, direction)
+                    for model, direction in zip(
+                        conductivity.reshape(-1, conductivity.shape[-1]),
+                        conductivity_direction.reshape(-1, conductivity.shape[-1]),
+                        strict=True,
+                    )
+                ]
+            ).reshape(apparent_resistivity.shape)
             tangent = tangent + geometric_scale * resistance_tangent / currents
 
         if currents_tangent is not None:
@@ -171,7 +185,8 @@ def apparent_resistivity_autograd(
 ) -> torch.Tensor:
     """Compute differentiable 2.5D apparent resistivity.
 
-    ``conductivity`` determines the output device and dtype. ``currents`` may
+    ``conductivity`` is one model ``(n_cells,)`` or a series ``(n_steps, n_cells)`` (output
+    ``(n_data,)`` or ``(n_steps, n_data)``) and determines the output device and dtype. ``currents`` may
     be a scalar, a length-one tensor, or one value per survey datum.
     """
 

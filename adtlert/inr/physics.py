@@ -70,15 +70,14 @@ def matrix_free_log_rhoa_series(
 ) -> torch.Tensor:
     """``(n_steps, n_parameters)`` log-resistivity -> ``(n_steps, n_data)`` log apparent resistivity.
 
-    Backpropagation applies the exact per-step VJP, reusing the forward fields cached by
-    the operator (its field cache must hold at least ``n_steps`` entries).
+    The steps are solved in batches, and backpropagation applies the exact VJP of each
+    batch, reusing the forward fields cached by the operator (its field cache must hold at
+    least ``n_steps`` entries) and the batch's factorization.
     """
 
     operator = forward_operator(forward)
     conductivity = _conductivity(forward, log_resistivity)
-    rhoa = torch.stack(
-        [apparent_resistivity_autograd(step, operator) for step in conductivity]
-    )
+    rhoa = apparent_resistivity_autograd(conductivity, operator)
     return torch.log(rhoa).to(log_resistivity.dtype)
 
 

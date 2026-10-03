@@ -139,6 +139,7 @@ class ERTForward2p5D:
     topographic_geometric_factor_mode: str
     terrain_cache_dir: Path | None
     normal_field_cache_max_entries: int = 8
+    series_batch_steps: int = 8
     _cache: dict = field(default_factory=dict, init=False, repr=False)
     _solver: BatchedSolver = field(
         default_factory=BatchedSolver, init=False, repr=False
@@ -158,6 +159,7 @@ class ERTForward2p5D:
         topographic_geometric_factor_mode: str = "analytic",
         terrain_cache_dir: str | Path | None = None,
         normal_field_cache_max_entries: int = 8,
+        series_batch_steps: int = 8,
     ) -> ERTForward2p5D:
         if not torch.cuda.is_available():
             raise RuntimeError(
@@ -170,6 +172,8 @@ class ERTForward2p5D:
         )
         if int(normal_field_cache_max_entries) < 0:
             raise ValueError("normal_field_cache_max_entries must be non-negative")
+        if int(series_batch_steps) < 1:
+            raise ValueError("series_batch_steps must be >= 1")
         quadrature = build_inverse_cosine_weights(*survey_wavenumber_bounds(survey))
 
         def build(name, **options):
@@ -229,6 +233,7 @@ class ERTForward2p5D:
             topographic_geometric_factor_mode=gf_mode,
             terrain_cache_dir=_terrain_cache_dir(terrain_cache_dir),
             normal_field_cache_max_entries=int(normal_field_cache_max_entries),
+            series_batch_steps=int(series_batch_steps),
         )
 
     # -- configuration ------------------------------------------------------
@@ -347,6 +352,7 @@ class ERTForward2p5D:
         rhs: Tensor,
         *,
         refactorize: bool = True,
+        factorization=None,
     ) -> Tensor:
         """Batched sparse solve ``A_b X_b = rhs_b`` on the GPU (plans are reused; see :class:`BatchedSolver`)."""
 
@@ -357,6 +363,7 @@ class ERTForward2p5D:
             rhs.to(_CUDA, self.dtype),
             spd=d.spd,
             refactorize=refactorize,
+            factorization=factorization,
         )
 
     # -- primary fields and terrain caches ----------------------------------
@@ -545,29 +552,74 @@ class ERTForward2p5D:
     def _fields(self, conductivity) -> _Fields:
         """Total fields for a conductivity model, served from an LRU cache when possible."""
 
-        sigma = self._sigma(conductivity)
-        key = self._field_cache_key(sigma)
-        sigma = sigma.to(_CUDA)
-        if key is not None:
-            counter = "hits" if key in self._field_cache else "misses"
-            self._cache[counter] = self._cache.get(counter, 0) + 1
-            if key in self._field_cache:
-                self._field_cache.move_to_end(key)
-                return self._field_cache[key]
+        return self._fields_series(self._sigma(conductivity)[None])[0][0]
+
+    def _step_batches(self, steps) -> list[list[int]]:
+        """Split steps into near-equal batches of at most ``series_batch_steps``."""
+
+        steps = list(steps)
+        count = -(-len(steps) // self.series_batch_steps)
+        return (
+            [batch.tolist() for batch in np.array_split(steps, count)] if steps else []
+        )
+
+    @staticmethod
+    def _factorization(keys) -> tuple | None:
+        """Name of the operators of a batch of models (``None`` when the field cache is off)."""
+
+        return None if any(key is None for key in keys) else tuple(keys)
+
+    def _fields_series(
+        self, models: Tensor
+    ) -> tuple[list[_Fields], list[bytes | None]]:
+        """Fields and cache keys of every row of ``(n_steps, n_cells)`` conductivities.
+
+        Cache misses are solved together, up to ``series_batch_steps`` models per cuDSS batch of
+        ``steps * W`` systems. Each factorization is named by its models' cache keys, so the
+        adjoint solve of the same batch (:meth:`vjp_series`) reuses it.
+        """
+
+        keys = [self._field_cache_key(sigma) for sigma in models]
+        fields: list[_Fields | None] = []
+        for key in keys:
+            if key is not None:
+                hit = key in self._field_cache
+                counter = "hits" if hit else "misses"
+                self._cache[counter] = self._cache.get(counter, 0) + 1
+                if hit:
+                    self._field_cache.move_to_end(key)
+            fields.append(self._field_cache.get(key) if key is not None else None)
 
         d = self.discretization
-        values = self._assemble(d, sigma)
-        primary = (
-            self._unit_primary() * self._source_resistivities(sigma)[None, :, None]
-        )
-        rhs = self._reference_rhs() - d.pattern.matvec(values, primary)
-        fields = _Fields(values, self._solve(d, values, rhs) + primary)
-        _check_finite(fields.total, "total fields")
-        if key is not None:
-            self._field_cache[key] = fields
+        count = self.wavenumbers.shape[0]
+        missing = [step for step, found in enumerate(fields) if found is None]
+        for batch in self._step_batches(missing):
+            sigmas = models[batch].to(_CUDA)
+            values = [self._assemble(d, sigma) for sigma in sigmas]
+            primaries = [
+                self._unit_primary() * self._source_resistivities(sigma)[None, :, None]
+                for sigma in sigmas
+            ]
+            rhs = [
+                self._reference_rhs() - d.pattern.matvec(value, primary)
+                for value, primary in zip(values, primaries, strict=True)
+            ]
+            secondary = self._solve(
+                d,
+                torch.cat(values),
+                torch.cat(rhs),
+                factorization=self._factorization([keys[step] for step in batch]),
+            )
+            for i, step in enumerate(batch):
+                total = secondary[i * count : (i + 1) * count] + primaries[i]
+                _check_finite(total, "total fields")
+                fields[step] = _Fields(values[i], total)
+                if keys[step] is not None:
+                    self._field_cache[keys[step]] = fields[step]
+                    self._field_cache.move_to_end(keys[step])
             while len(self._field_cache) > self.normal_field_cache_max_entries:
                 self._field_cache.popitem(last=False)
-        return fields
+        return fields, keys
 
     def normal_field_cache_info(self) -> dict[str, int]:
         """Return LRU field-cache counters for profiling and regression tests."""
@@ -586,62 +638,80 @@ class ERTForward2p5D:
             self.weights.to(fields.device, fields.dtype), fields, dims=([0], [0])
         )
 
-    def _receivers(self) -> tuple[Tensor, Tensor]:
-        """Receiver rows ``E[M] - E[N]`` (normal) and ``E[A] - E[B]`` (reciprocal), on the GPU."""
+    def _electrodes(self) -> Tensor:
+        """Electrode interpolation rows of the field discretization, ``(E, dofs)``, on the GPU."""
+
+        return self._on(
+            "electrode_matrix",
+            lambda: self.discretization.electrode_matrix.to(self.dtype),
+            _CUDA,
+        )
+
+    def _normal_reciprocal(self, integrated: Tensor) -> tuple[Tensor, Tensor]:
+        """Normal (AB source, MN receiver) and reciprocal (MN source, AB receiver) resistances.
+
+        ``integrated`` is ``(..., E, dofs)``; the transfer resistances are read from the
+        ``(E, E)`` electrode potentials, so only ``E`` receiver rows are contracted per source.
+        """
+
+        a, b, m, n = self._abmn(_CUDA)
+        potentials = integrated @ self._electrodes().T
+
+        def transfer(source, sink, positive, negative):
+            return (
+                potentials[..., source, positive] - potentials[..., source, negative]
+            ) - (potentials[..., sink, positive] - potentials[..., sink, negative])
+
+        return transfer(a, b, m, n), transfer(m, n, a, b)
+
+    def _pair_cotangent(
+        self, normal: Tensor, reciprocal: Tensor | None = None
+    ) -> Tensor:
+        """Transpose of :meth:`_normal_reciprocal` onto the electrode potentials.
+
+        ``(Q, D)`` cotangents of the normal (and reciprocal) resistances → ``(Q, E, E)``. The
+        scatter is a deterministic :class:`GroupSum` (``index_add_`` on the GPU is not).
+        """
+
+        sources = self.survey.electrode_count
+        both = reciprocal is not None
 
         def build():
             a, b, m, n = self._abmn()
-            electrodes = self.discretization.electrode_matrix
-            return (electrodes[m] - electrodes[n]).to(_CUDA, self.dtype), (
-                electrodes[a] - electrodes[b]
-            ).to(_CUDA, self.dtype)
+            quads = [(a, b, m, n), (m, n, a, b)] if both else [(a, b, m, n)]
+            groups = torch.cat(
+                [
+                    torch.cat(
+                        (
+                            source * sources + positive,
+                            source * sources + negative,
+                            sink * sources + positive,
+                            sink * sources + negative,
+                        )
+                    )
+                    for source, sink, positive, negative in quads
+                ]
+            )
+            return GroupSum(groups.numpy(), sources * sources, _CUDA)
 
-        return self._cached("receivers", build)
-
-    def _normal_reciprocal(self, integrated: Tensor) -> tuple[Tensor, Tensor]:
-        """Normal (AB source, MN receiver) and reciprocal (MN source, AB receiver) resistances."""
-
-        a, b, m, n = self._abmn(_CUDA)
-        rows = self._on(
-            "measurement_rows",
-            lambda: torch.arange(self.survey.measurement_count),
-            _CUDA,
-        )
-        normal_receiver, current_receiver = self._receivers()
-        normal = integrated @ normal_receiver.T
-        reciprocal = integrated @ current_receiver.T
-        return normal[a, rows] - normal[b, rows], reciprocal[m, rows] - reciprocal[
-            n, rows
+        scatter = self._cached(("pair_scatter", both), build)
+        signed = [
+            torch.cat((g, -g, -g, g), dim=-1)
+            for g in (normal, reciprocal)
+            if g is not None
         ]
+        pairs = scatter(torch.cat(signed, dim=-1).to(_CUDA, self.dtype))
+        return pairs.reshape(*normal.shape[:-1], sources, sources)
 
-    def _source_incidence(self, reciprocal: bool) -> Tensor:
-        """``(E, D)`` matrix with ``+1`` at each datum's positive and ``-1`` at its negative source."""
+    def _adjoint_rhs(self, pairs: Tensor) -> Tensor:
+        """Adjoint right-hand sides of ``(Q, E, E)`` electrode-potential cotangents → ``(W, Q*E, dofs)``."""
 
-        def build():
-            a, b, m, n = (index.numpy() for index in self._abmn())
-            positive, negative = (m, n) if reciprocal else (a, b)
-            rows = np.arange(self.survey.measurement_count)
-            incidence = np.zeros((self.survey.electrode_count, rows.size))
-            incidence[positive, rows], incidence[negative, rows] = 1.0, -1.0
-            return torch.as_tensor(incidence, dtype=self.dtype, device=_CUDA)
-
-        return self._cached(("source_incidence", reciprocal), build)
-
-    def _adjoint_rhs(self, cotangent: Tensor, *, reciprocal: bool = False) -> Tensor:
-        """Transpose of the (reciprocal) measurement map for ``(Q, D)`` cotangents → ``(W, Q*E, dofs)``.
-
-        The scatter into source electrodes is a product with the incidence matrix, which is
-        deterministic on the GPU (``index_add_`` is not).
-        """
-
-        normal_receiver, current_receiver = self._receivers()
-        receiver = current_receiver if reciprocal else normal_receiver
-        sources = (
-            self._source_incidence(reciprocal)[None]
-            * cotangent.to(_CUDA, self.dtype)[:, None, :]
-        ) @ receiver
-        rhs = self.weights.to(_CUDA, self.dtype)[:, None, None, None] * sources[None]
-        return rhs.reshape(self.wavenumbers.shape[0], -1, receiver.shape[1])
+        electrodes = self._electrodes()
+        rhs = (
+            self.weights.to(_CUDA, self.dtype)[:, None, None, None]
+            * (pairs @ electrodes)[None]
+        )
+        return rhs.reshape(self.wavenumbers.shape[0], -1, electrodes.shape[1])
 
     @staticmethod
     def _combine(normal: Tensor, reciprocal: Tensor) -> Tensor:
@@ -718,18 +788,25 @@ class ERTForward2p5D:
             / current
         )
 
+    def resistance_series(self, conductivities) -> Tensor:
+        """Reciprocal-averaged resistances of a ``(n_steps, n_cells)`` model series, ``(n_steps, n_data)``.
+
+        Uncached models are solved together (see ``series_batch_steps``).
+        """
+
+        fields, _ = self._fields_series(self._series(conductivities))
+        integrated = torch.stack([self._integrate(f.total) for f in fields])
+        _check_finite(integrated, "integrated potentials")
+        return self._combine(*self._normal_reciprocal(integrated)).cpu()
+
     def apparent_resistivity_series(self, conductivities, currents=1.0) -> Tensor:
         """Apparent resistivity for a ``(n_steps, n_cells)`` model series (currents may be per step)."""
 
-        models = self._series(conductivities)
         current = torch.as_tensor(currents, dtype=FLOAT_DTYPE)
-        return torch.stack(
-            [
-                self.apparent_resistivity_values(
-                    model, current[step] if current.ndim == 2 else current
-                )
-                for step, model in enumerate(models)
-            ]
+        return (
+            torch.abs(self._geometric_factors())
+            * self.resistance_series(conductivities)
+            / current
         )
 
     def _series(self, conductivities) -> Tensor:
@@ -745,7 +822,7 @@ class ERTForward2p5D:
 
         self._unit_primary()
         self._reference_rhs()
-        self._receivers()
+        self._electrodes()
         self._geometric_factors()
         if include_solver_state:
             self._fields(
@@ -869,22 +946,49 @@ class ERTForward2p5D:
     def vjp(self, conductivity, cotangent) -> Tensor:
         """Apply the transposed resistance Jacobian to a measurement cotangent."""
 
-        fields, _, normal, reciprocal = self._measure(conductivity)
-        sign, scale = self._combine_scale(normal, reciprocal)
-        common = (
-            0.5
-            * _measurement_vector(
-                cotangent, self.survey.measurement_count, self.dtype
-            ).to(_CUDA)
-            * sign
-            / scale
+        cotangent = _measurement_vector(
+            cotangent, self.survey.measurement_count, FLOAT_DTYPE
         )
-        rhs = self._adjoint_rhs((common * reciprocal)[None]) + self._adjoint_rhs(
-            (common * normal)[None], reciprocal=True
-        )
-        lam = self._solve(self.discretization, fields.values, rhs)
-        _check_finite(lam, "adjoint fields")
-        gradient = self._cell_gradient(fields.on(self._device), lam)
+        return self.vjp_series(self._sigma(conductivity)[None], cotangent[None])[0]
+
+    def vjp_series(self, conductivities, cotangents) -> Tensor:
+        """Apply :meth:`vjp` to every step of a ``(n_steps, n_cells)`` model series.
+
+        Adjoint solves are batched like the forward fields. The operators are symmetric, so a
+        batch whose forward factorization the solver still holds (right after
+        :meth:`resistance_series` of the same models) is solved without refactorizing.
+        """
+
+        models = self._series(conductivities)
+        cotangents = torch.as_tensor(cotangents, dtype=FLOAT_DTYPE)
+        if tuple(cotangents.shape) != (models.shape[0], self.survey.measurement_count):
+            raise ValueError(
+                f"cotangents must have shape {(models.shape[0], self.survey.measurement_count)}"
+            )
+        fields, keys = self._fields_series(models)
+        d, count = self.discretization, self.wavenumbers.shape[0]
+        gradients: list[Tensor | None] = [None] * len(fields)
+        # The last forward batch's factorization is the one still held: solve it first.
+        for batch in reversed(self._step_batches(range(len(fields)))):
+            totals = [fields[step].total for step in batch]
+            normal, reciprocal = self._normal_reciprocal(
+                torch.stack([self._integrate(total) for total in totals])
+            )
+            sign, scale = self._combine_scale(normal, reciprocal)
+            common = 0.5 * cotangents[batch].to(_CUDA, self.dtype) * sign / scale
+            pairs = self._pair_cotangent(common * reciprocal, common * normal)
+            lam = self._solve(
+                d,
+                torch.cat([fields[step].values for step in batch]),
+                torch.cat([self._adjoint_rhs(pair[None]) for pair in pairs]),
+                factorization=self._factorization([keys[step] for step in batch]),
+            )
+            _check_finite(lam, "adjoint fields")
+            for i, step in enumerate(batch):
+                gradients[step] = self._cell_gradient(
+                    totals[i], lam[i * count : (i + 1) * count]
+                )
+        gradient = torch.stack(gradients)
         _check_finite(gradient, "conductivity gradient")
         return gradient
 
@@ -896,7 +1000,10 @@ class ERTForward2p5D:
         tangent_rhs = -d.pattern.matvec(
             self._assemble(d, self._sigma(delta_conductivity)), fields.total
         )
-        delta = self._solve(d, fields.values, tangent_rhs)
+        key = self._field_cache_key(self._sigma(conductivity))
+        delta = self._solve(
+            d, fields.values, tangent_rhs, factorization=self._factorization([key])
+        )
         _check_finite(delta, "tangent fields")
         delta_normal, delta_reciprocal = self._normal_reciprocal(self._integrate(delta))
         sign, scale = self._combine_scale(normal, reciprocal)
@@ -1058,12 +1165,13 @@ class ERTForward2p5D:
                 start : start + batch_size
             ]
             if normal_sensitivity:
-                rhs = self._adjoint_rhs(cotangent)
+                pairs = self._pair_cotangent(cotangent)
             else:
                 common = 0.5 * cotangent * sign[None, :] / scale[None, :]
-                rhs = self._adjoint_rhs(
-                    common * reciprocal[None, :]
-                ) + self._adjoint_rhs(common * normal[None, :], reciprocal=True)
+                pairs = self._pair_cotangent(
+                    common * reciprocal[None, :], common * normal[None, :]
+                )
+            rhs = self._adjoint_rhs(pairs)
             lam = self._solve(
                 self.discretization, fields.values, rhs, refactorize=start == 0
             )
