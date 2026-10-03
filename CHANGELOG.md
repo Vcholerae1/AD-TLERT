@@ -15,11 +15,36 @@ ADTLERT is now a CUDA library. 0.1.x had a CPU/SciPy build; the two are differen
   unused sparse-assembly API: `assemble_global_bcoo`, `assemble_helmholtz_operator`,
   `build_coo_routing*`, `build_boundary_routing*`, `assemble_boundary_bcoo`, `BCOO`, `CSR`.
 - `INRConfig.require_cuda` is gone (CUDA is always required); `prepare_cuda_forward` no longer takes it.
-- `INRConfig` groups its tunables into `Optimization`, `Progressive`, `Regularization` and `Windows`;
-  `INRResult` carries `history` (`History`), `timing` (`Timing`) and the `config` it ran with.
-  Networks rebuild from `configuration()` via `from_configuration`.
+- `INRConfig` and `INRResult` are grouped (see "Migrating INR code" below); the old flat keyword
+  arguments and result attributes are gone, with no compatibility aliases.
 - Examples switch Torch to float64 with `torch.set_default_dtype` after importing adtlert
   (`FLOAT_DTYPE` is fixed at import; set `ADTLERT_ENABLE_FLOAT64=1` for float64 throughout).
+
+### Migrating INR code
+
+`INRConfig` keeps `max_iterations`, `target_chi2`, `device`, `log_every`, `prepare_solver`,
+`snapshot_interval`, `progress_callback` and `extra_penalty`; every other option moved into a group.
+
+| Before (`INRConfig(...)`) | After |
+|---|---|
+| `optimizer`, `learning_rate`, `weight_decay`, `gradient_clip_norm`, `scheduler`, `learning_rate_milestones`, `plateau_patience`, `plateau_factor`, `minimum_learning_rate` | `optimization=Optimization(...)`, same names |
+| `progressive_encoding`, `progressive_full_iteration`, `progressive_spatial_start_levels`, `progressive_temporal_start_levels` | `progressive=Progressive(enabled, full_iteration, spatial_start_levels, temporal_start_levels)` |
+| `spatial_regularization`, `temporal_regularization`, `regularization_huber_delta` | `regularization=Regularization(spatial, temporal, huber_delta)` |
+| `time_window_size`, `time_window_step`, `full_evaluation_interval`, `alternate_window_direction` | `windows=Windows(size, step, full_evaluation_interval, alternate_direction)` |
+
+| Before (`INRResult`) | After |
+|---|---|
+| `chi2_history`, `rms_history`, `objective_history` | `history.chi2`, `history.rms`, `history.objective` |
+| `spatial_penalty_history`, `temporal_penalty_history`, `extra_penalty_history` | `history.spatial_penalty`, `history.temporal_penalty`, `history.extra_penalty` |
+| `full_chi2_iterations`, `full_chi2_history` | `history.full_iterations`, `history.full_chi2` |
+| `elapsed_seconds`, `forward_seconds`, `backward_seconds`, `optimizer_seconds` | `timing.elapsed`, `timing.forward`, `timing.backward`, `timing.optimizer` |
+| `physics_forward_timesteps`, `physics_vjp_timesteps` | `timing.forward_timesteps`, `timing.vjp_timesteps` |
+| `optimizer`, `scheduler`, `time_window_size`, `time_window_step` | `config.optimization.optimizer`, `config.optimization.scheduler`, `config.windows.size`, `config.windows.step` |
+
+`log_resistivity`, `resistivity`, `predicted_log_data`, `predicted_data`, `iterations`,
+`best_iteration`, `best_chi2`, `stop_reason`, `device` and `gpu_report` are unchanged. Training
+numerics are bitwise identical to the flat API. Networks can be rebuilt with
+`Network.from_configuration(network.configuration())` followed by `load_state_dict`.
 
 ### Added
 
