@@ -8,6 +8,7 @@ ADTLERT is now a CUDA library. 0.1.x had a CPU/SciPy build; the two are differen
 
 - Requires Linux and an NVIDIA GPU (CUDA 12). cuDSS and nvmath-python are regular dependencies;
   the `cuda12` extra and CuPy are gone (the fused sensitivity kernel is written in Triton).
+- nvmath-python >= 1.0 (cuDSS 0.8) is required; it solves terrain systems an order of magnitude faster than 0.8.
 - Removed the SciPy solver backend and the `linear_solver_backend` argument of `ERTForward2p5D`,
   `ERTForward3D`, `ERTForwardModeling`, `MappedERTForwardModeling` and the terrain workflows.
 - Removed `adtlert.utils.torch_runtime` (the JAX-port shim that patched `torch.Tensor`) and the

@@ -37,14 +37,10 @@ def create_solver(matrices, rhs, *, spd: bool):
         sparse_system_type=matrix_type, logger=LOGGER, blocking=True
     )
     solver = advanced.DirectSolver(matrices, rhs, options=options)
-    if not spd:  # reordering algorithm 1 (nested dissection); the option was renamed in nvmath-python 0.9
-        config = solver.plan_config
-        setting = (
-            "reordering_algorithm"
-            if hasattr(config, "reordering_algorithm")
-            else "algorithm"
+    if not spd:
+        solver.plan_config.reordering_algorithm = (
+            advanced.DirectSolverReorderingAlg.NESTED_DISSECTION
         )
-        setattr(config, setting, advanced.DirectSolverAlgType.ALG_1)
     solver.plan()
     return solver
 
