@@ -24,3 +24,6 @@ ProcessedData/
 
 # Local research workspace; publish curated scripts from example/ instead.
 paper/
+
+# Real-data examples stay local.
+/example/8_real_data/
