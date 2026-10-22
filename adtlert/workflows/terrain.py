@@ -383,24 +383,6 @@ def load_terrain_forward_dat(path: str | Path) -> TerrainForwardData:
     )
 
 
-def _geometric_factors(electrodes: np.ndarray, measurements: np.ndarray) -> np.ndarray:
-    a, b, m, n = (electrodes[measurements[:, index]] for index in range(4))
-
-    def distance(p, q):
-        return np.linalg.norm(p - q, axis=-1)
-
-    return (
-        2.0
-        * np.pi
-        / (
-            1.0 / distance(a, m)
-            - 1.0 / distance(a, n)
-            - 1.0 / distance(b, m)
-            + 1.0 / distance(b, n)
-        )
-    )
-
-
 def _checked_rhoa(case: TerrainForwardCase, rhoa) -> np.ndarray:
     rhoa = np.asarray(rhoa, dtype=float).ravel()
     if rhoa.shape != (case.survey.measurement_count,):
@@ -433,7 +415,7 @@ def save_terrain_forward_dat(
         f"{a + 1}\t{b + 1}\t{m + 1}\t{n + 1}\t{float(relative_error):.14e}\t{zero}\t{zero}\t{zero}\t{k:.14e}\t{zero}\t{value:.14e}\t{zero}\t1\n"
         for (a, b, m, n), k, value in zip(
             measurements.tolist(),
-            _geometric_factors(electrodes, measurements),
+            Survey.from_arrays(electrodes, measurements).geometric_factors().tolist(),
             rhoa,
             strict=True,
         )

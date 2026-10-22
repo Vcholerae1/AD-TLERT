@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Remote electrodes: an ABMN index of `REMOTE_ELECTRODE` (-1, pyGIMLi's convention for a
+  pole) places that electrode at infinity, so pole-dipole, dipole-pole and pole-pole surveys
+  run on the 2.5D (flat surface) and 3D operators, with analytic or numerical geometric
+  factors, all derivatives and the fused sensitivity kernel. Per-electrode arrays carry one
+  zero-potential slot (`Survey.measurement_slots`, `with_remote_slot`), so dipole rows are
+  unchanged.
+- The 2.5D terrain operator rejects remote electrodes: its auxiliary discretization has
+  natural outer boundaries, which do not resolve absolute potentials (a pole-pole reading
+  came out three orders of magnitude off). Use a flat-surface mesh or `ERTForward3D`.
+
 ## 0.2.3 - 2026-10-23
 
 ### Fixed

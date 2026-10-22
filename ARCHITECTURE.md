@@ -49,6 +49,9 @@ cache keys: the operators are symmetric, so the adjoint solve of the same batch 
   module changes Torch's default dtype.
 - Determinism: our own GPU reductions are bitwise repeatable (`GroupSum`, a fixed CUDA-kernel summation
   order). cuDSS is not by default; see the changelog.
+- ABMN index -1 (`REMOTE_ELECTRODE`) is an electrode at infinity. Operators map it to one extra
+  zero-potential slot after the last electrode (`Survey.measurement_slots`), and the
+  sensitivity kernel reads that row index as zero; 2.5D terrain rejects it.
 - Cell models are ordered like the mesh cells; time-lapse models are `(n_cells, n_times)`, data
   are `(n_times, n_measurements)`.
 

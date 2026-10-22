@@ -39,7 +39,7 @@ from adtlert.forward.inputs import (
 )
 from adtlert.forward.kernels import CellAggregation, GroupSum
 from adtlert.mesh import Mesh3D
-from adtlert.survey import Survey
+from adtlert.survey import Survey, with_remote_slot
 from adtlert.utils.dtypes import FLOAT_DTYPE
 
 Tensor = torch.Tensor
@@ -88,6 +88,22 @@ def _interpolation_matrix(
         (weights_np.reshape(-1), (rows, cell_nodes.reshape(-1))),
         shape=(points.shape[0], dof_count),
     ).tocsr()
+
+
+def _electrode_rows(
+    slots: np.ndarray, electrode_count: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Electrodes used in ``slots`` and the map from survey slot to their field row.
+
+    The remote slot ``electrode_count`` maps to one past the last row.
+    """
+
+    ids = np.unique(slots)
+    ids = ids[ids < electrode_count].astype(np.int32)
+    rows = np.full(electrode_count + 1, -1, dtype=np.int32)
+    rows[ids] = np.arange(len(ids))
+    rows[electrode_count] = len(ids)
+    return ids, rows
 
 
 def _local_face_indices(cell: np.ndarray, face: np.ndarray) -> np.ndarray:
@@ -150,23 +166,15 @@ class ERTForward3D:
         self._solver = BatchedSolver()
         self._cache: dict = {}
         electrodes = np.asarray(self.survey.electrode_positions, dtype=float)
-        quads = np.asarray(self.survey.measurements, dtype=np.int32)
-        self._current_electrode_ids = np.unique(quads[:, :2]).astype(np.int32)
-        self._receiver_electrode_ids = np.unique(quads[:, 2:]).astype(np.int32)
+        quads = self.survey.measurement_slots().numpy()
+        self._current_electrode_ids, self._current_electrode_map = _electrode_rows(
+            quads[:, :2], self.survey.electrode_count
+        )
+        self._receiver_electrode_ids, self._receiver_electrode_map = _electrode_rows(
+            quads[:, 2:], self.survey.electrode_count
+        )
         self._rhs_capacity = max(
             len(self._current_electrode_ids), len(self._receiver_electrode_ids)
-        )
-        self._current_electrode_map = np.full(
-            self.survey.electrode_count, -1, dtype=np.int32
-        )
-        self._receiver_electrode_map = np.full(
-            self.survey.electrode_count, -1, dtype=np.int32
-        )
-        self._current_electrode_map[self._current_electrode_ids] = np.arange(
-            len(self._current_electrode_ids)
-        )
-        self._receiver_electrode_map[self._receiver_electrode_ids] = np.arange(
-            len(self._receiver_electrode_ids)
         )
         if self.element_order == 2:
             element_data = build_tetrahedron_p2_data(self.mesh)
@@ -259,8 +267,7 @@ class ERTForward3D:
         self, device: torch.device | str = "cpu"
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         def build():
-            quads = np.asarray(self.survey.measurements, dtype=np.int32)
-            a, b, m, n = quads.T
+            a, b, m, n = self.survey.measurement_slots().numpy().T
             mapped = np.stack(
                 (
                     self._current_electrode_map[a],
@@ -550,7 +557,7 @@ class ERTForward3D:
         return self._field_cache.info()
 
     def _measurement_resistances(self, current_fields: Tensor) -> Tensor:
-        potentials = current_fields @ self._receiver_electrodes().T
+        potentials = with_remote_slot(current_fields @ self._receiver_electrodes().T)
         a, b, m, n = self._mapped_abmn(_CUDA)
         return (
             potentials[..., a, m]
@@ -683,23 +690,20 @@ class ERTForward3D:
 
         n_curr = len(self._current_electrode_ids)
         n_recv = len(self._receiver_electrode_ids)
+        width = n_recv + 1
 
         def build():
             a, b, m, n = self._mapped_abmn()
             groups = torch.cat(
-                (
-                    a * n_recv + m,
-                    a * n_recv + n,
-                    b * n_recv + m,
-                    b * n_recv + n,
-                )
+                (a * width + m, a * width + n, b * width + m, b * width + n)
             )
-            return GroupSum(groups.numpy(), n_curr * n_recv, _CUDA)
+            return GroupSum(groups.numpy(), (n_curr + 1) * width, _CUDA)
 
         scatter = self._cached("pair_scatter", build)
         g = cotangent.to(_CUDA, torch.float64)
         signed = torch.cat((g, -g, -g, g), dim=-1)
-        return scatter(signed).reshape(*g.shape[:-1], n_curr, n_recv)
+        pairs = scatter(signed).reshape(*g.shape[:-1], n_curr + 1, width)
+        return pairs[..., :n_curr, :n_recv]
 
     def _adjoint_rhs(self, pairs: Tensor) -> Tensor:
         """Adjoint right-hand sides of ``(B, n_curr, n_recv)`` pair cotangents."""
@@ -850,7 +854,9 @@ class ERTForward3D:
         fields, keys = self._fields_series(sigma[None])
         (receiver,) = self._receivers(fields, keys)
         tangent = self._assemble_homogeneous(delta_sigma[None], robin=False)
-        gram = -self._pattern.matvec(tangent, fields[0].current[None])[0] @ receiver.T
+        gram = with_remote_slot(
+            -self._pattern.matvec(tangent, fields[0].current[None])[0] @ receiver.T
+        )
         a, b, m, n = self._mapped_abmn(_CUDA)
         result = (gram[a, m] - gram[b, m] - gram[a, n] + gram[b, n]).to(
             device="cpu", dtype=FLOAT_DTYPE
@@ -897,6 +903,8 @@ class ERTForward3D:
             0,
         )
         a, b, m, n = self._mapped_abmn(_CUDA)
+        remote_row = phi.shape[1]
+        a, b = (torch.where(index == n_curr, remote_row, index) for index in (a, b))
         rows = [
             columns.columns(
                 kernels.normal_sensitivity(

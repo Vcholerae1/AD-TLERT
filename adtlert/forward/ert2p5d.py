@@ -51,7 +51,7 @@ from adtlert.forward.integration import (
 )
 from adtlert.forward.kernels import CellAggregation, GroupSum, normal_sensitivity
 from adtlert.mesh import Mesh
-from adtlert.survey import Survey
+from adtlert.survey import REMOTE_ELECTRODE, Survey, with_remote_slot
 from adtlert.utils.dtypes import FLOAT_DTYPE, NP_FLOAT_DTYPE
 
 Tensor = torch.Tensor
@@ -168,6 +168,12 @@ class ERTForward2p5D:
             )
 
         terrain = not mesh.is_flat_surface
+        if terrain and bool(torch.any(survey.measurements == REMOTE_ELECTRODE)):
+            raise ValueError(
+                "remote electrodes need absolute potentials, which the 2.5D terrain "
+                "discretization (natural outer boundaries) does not resolve; use a "
+                "flat-surface mesh or ERTForward3D"
+            )
         potential = geometric = None
         if terrain:
             discretization = build(
@@ -246,9 +252,7 @@ class ERTForward2p5D:
     def _abmn(
         self, device: torch.device | str = "cpu"
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        quads = self._on(
-            "abmn", lambda: self.survey.measurements.long(), torch.device(device)
-        )
+        quads = self._on("abmn", self.survey.measurement_slots, torch.device(device))
         return quads[:, 0], quads[:, 1], quads[:, 2], quads[:, 3]
 
     def _volume_templates(
@@ -581,7 +585,7 @@ class ERTForward2p5D:
         """
 
         a, b, m, n = self._abmn(_CUDA)
-        potentials = integrated @ self._electrodes().T
+        potentials = with_remote_slot(integrated @ self._electrodes().T)
 
         def transfer(source, sink, positive, negative):
             return (
@@ -600,6 +604,7 @@ class ERTForward2p5D:
         """
 
         sources = self.survey.electrode_count
+        slots = sources + 1
         both = reciprocal is not None
 
         def build():
@@ -609,16 +614,16 @@ class ERTForward2p5D:
                 [
                     torch.cat(
                         (
-                            source * sources + positive,
-                            source * sources + negative,
-                            sink * sources + positive,
-                            sink * sources + negative,
+                            source * slots + positive,
+                            source * slots + negative,
+                            sink * slots + positive,
+                            sink * slots + negative,
                         )
                     )
                     for source, sink, positive, negative in quads
                 ]
             )
-            return GroupSum(groups.numpy(), sources * sources, _CUDA)
+            return GroupSum(groups.numpy(), slots * slots, _CUDA)
 
         scatter = self._cached(("pair_scatter", both), build)
         signed = [
@@ -627,7 +632,7 @@ class ERTForward2p5D:
             if g is not None
         ]
         pairs = scatter(torch.cat(signed, dim=-1).to(_CUDA, self.dtype))
-        return pairs.reshape(*normal.shape[:-1], sources, sources)
+        return pairs.reshape(*normal.shape[:-1], slots, slots)[..., :sources, :sources]
 
     def _adjoint_rhs(self, pairs: Tensor) -> Tensor:
         """Adjoint right-hand sides of ``(Q, E, E)`` electrode-potential cotangents → ``(W, Q*E, dofs)``."""
@@ -663,7 +668,9 @@ class ERTForward2p5D:
     def _numerical_geometric_factors(self) -> Tensor:
         d = self.geometric_discretization
         integrated = self._integrate(self._unit_potentials(d))
-        potentials = integrated @ d.electrode_matrix.to(integrated.dtype).T
+        potentials = with_remote_slot(
+            integrated @ d.electrode_matrix.to(integrated.dtype).T
+        )
         a, b, m, n = self._abmn()
         rows = torch.arange(self.survey.measurement_count)
         sources = potentials[a] - potentials[b]
@@ -903,12 +910,7 @@ class ERTForward2p5D:
         weights = measurement_vector(
             cotangent, self.survey.measurement_count, phi.dtype
         )
-        a, b, m, n = self._abmn()
-        sources = self.survey.electrode_count
-        pairs = torch.zeros(sources * sources, dtype=phi.dtype).index_add_(
-            0, torch.cat((m * sources + a, m * sources + b, n * sources + a, n * sources + b)),
-            torch.cat((weights, -weights, -weights, weights)),
-        ).reshape(sources, sources).to(device)  # fmt: skip
+        pairs = self._pair_cotangent(weights[None])[0].T.to(device)
         current = torch.einsum("ef,wfn->wen", pairs, phi)
         receiver = self.weights.to(device, phi.dtype)[:, None, None] * phi
         gradient = self._cell_gradient(current, receiver, robin=False, columns=columns)
@@ -940,6 +942,7 @@ class ERTForward2p5D:
             phi,
             -d.pattern.matvec(tangent, phi),
         )
+        gram = with_remote_slot(gram)
         a, b, m, n = self._abmn(device)
         result = (gram[m, a] - gram[m, b] - gram[n, a] + gram[n, b]).cpu()
         check_finite(result, "normal sensitivity jvp")

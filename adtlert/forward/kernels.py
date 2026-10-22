@@ -133,7 +133,14 @@ _SENSITIVITY_SOURCE = r"""
 // One thread owns one (measurement, cell) entry and accumulates it in the fixed order
 // (w, i, j), so results are bitwise repeatable. Blocks cover 32 cells x 4 measurements;
 // consecutive blocks walk the measurements of a cell block first, which keeps that block's
-// field entries in cache.
+// field entries in cache. Row index S (one past the last field row) is a remote electrode,
+// whose potential is zero.
+template <typename T>
+__device__ __forceinline__ T potential(const T* field, int row, int S, long long N, int node)
+{
+    return row < S ? __ldg(field + row * N + node) : T(0);
+}
+
 template <typename T, int K>
 __global__ void __launch_bounds__(BLOCK_CELLS * BLOCK_DATA) normal_sensitivity(
     const T* __restrict__ phi, const int* __restrict__ a, const int* __restrict__ b,
@@ -148,8 +155,7 @@ __global__ void __launch_bounds__(BLOCK_CELLS * BLOCK_DATA) normal_sensitivity(
     int nodes[K];
 #pragma unroll
     for (int k = 0; k < K; ++k) nodes[k] = __ldg(cells + (long long)c * K + k);
-    const long long sa = __ldg(a + d) * N, sb = __ldg(b + d) * N;
-    const long long sm = __ldg(m + d) * N, sn = __ldg(n + d) * N;
+    const int ia = __ldg(a + d), ib = __ldg(b + d), im = __ldg(m + d), in = __ldg(n + d);
     T acc = 0;
     for (int w = 0; w < W; ++w) {
         const T* field = phi + (long long)w * S * N;
@@ -157,10 +163,11 @@ __global__ void __launch_bounds__(BLOCK_CELLS * BLOCK_DATA) normal_sensitivity(
         T current[K];
 #pragma unroll
         for (int j = 0; j < K; ++j)
-            current[j] = __ldg(field + sa + nodes[j]) - __ldg(field + sb + nodes[j]);
+            current[j] = potential(field, ia, S, N, nodes[j]) - potential(field, ib, S, N, nodes[j]);
 #pragma unroll
         for (int i = 0; i < K; ++i) {
-            const T receiver = __ldg(field + sm + nodes[i]) - __ldg(field + sn + nodes[i]);
+            const T receiver =
+                potential(field, im, S, N, nodes[i]) - potential(field, in, S, N, nodes[i]);
 #pragma unroll
             for (int j = 0; j < K; ++j)
                 acc += receiver * (__ldg(weights + i * K + j) * current[j]);
@@ -224,7 +231,8 @@ def normal_sensitivity(
     """``out[d, c] = -sum_w (u_M - u_N)_c^T T_wc (u_A - u_B)_c`` for every measurement and cell.
 
     ``phi`` is ``(W, E, N)``, ``cell_dofs`` ``(C, K)``, ``templates`` ``(W, C, K, K)``; the
-    gather and contraction are fused, so no ``W x D x C x K`` field blocks are formed.
+    gather and contraction are fused, so no ``W x D x C x K`` field blocks are formed. An
+    electrode index ``E`` is a remote electrode with zero potential.
     """
 
     from cuda.core import LaunchConfig, launch
