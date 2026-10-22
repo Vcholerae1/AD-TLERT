@@ -641,14 +641,19 @@ class ERTForward2p5D:
 
     @staticmethod
     def _combine(normal: Tensor, reciprocal: Tensor) -> Tensor:
-        return torch.sqrt(torch.abs(normal * reciprocal))
+        """Reciprocal-averaged transfer resistance, with the polarity of the normal reading."""
+
+        return torch.sign(normal) * torch.sqrt(torch.abs(normal * reciprocal))
 
     @staticmethod
     def _combine_scale(normal: Tensor, reciprocal: Tensor) -> tuple[Tensor, Tensor]:
-        """``sign(n r)`` and the floored combined resistance used by the reciprocal chain rule."""
+        """Sign and floored magnitude for the chain rule of :meth:`_combine`.
+
+        ``d[sign(n) sqrt|n r|] = sign(r) (r dn + n dr) / (2 sqrt|n r|)``.
+        """
 
         combined = torch.sqrt(torch.abs(normal * reciprocal))
-        return torch.sign(normal * reciprocal), torch.clamp_min(combined, 1e-30)
+        return torch.sign(reciprocal), torch.clamp_min(combined, 1e-30)
 
     def _geometric_factors(self) -> Tensor:
         if not self.use_numerical_geometric_factors:
@@ -674,9 +679,7 @@ class ERTForward2p5D:
         current = torch.as_tensor(currents, dtype=FLOAT_DTYPE)
         electrode_matrix = self.discretization.electrode_matrix.to(integrated.dtype)
         return ForwardResponse(
-            apparent_resistivity=torch.abs(self._geometric_factors())
-            * resistance
-            / current,
+            apparent_resistivity=self._geometric_factors() * resistance / current,
             resistance=resistance,
             electrode_potentials=integrated @ electrode_matrix.T,
             integrated_potentials=integrated,
@@ -706,11 +709,7 @@ class ERTForward2p5D:
         """Return apparent resistivity values without allocating a ForwardResponse."""
 
         current = torch.as_tensor(currents, dtype=FLOAT_DTYPE)
-        return (
-            torch.abs(self._geometric_factors())
-            * self.resistance(conductivity)
-            / current
-        )
+        return self._geometric_factors() * self.resistance(conductivity) / current
 
     def resistance_series(self, conductivities) -> Tensor:
         """Reciprocal-averaged resistances of a ``(n_steps, n_cells)`` model series, ``(n_steps, n_data)``.
@@ -728,9 +727,7 @@ class ERTForward2p5D:
 
         current = torch.as_tensor(currents, dtype=FLOAT_DTYPE)
         return (
-            torch.abs(self._geometric_factors())
-            * self.resistance_series(conductivities)
-            / current
+            self._geometric_factors() * self.resistance_series(conductivities) / current
         )
 
     def _series(self, conductivities) -> Tensor:

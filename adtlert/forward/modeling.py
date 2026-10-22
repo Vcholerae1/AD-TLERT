@@ -147,8 +147,7 @@ def log_response_and_jacobian(
         conductivity, **solve_kwargs
     )
     apparent_jacobian = (
-        torch.abs(torch.as_tensor(operator._geometric_factors()))[:, None]
-        * resistance_jacobian
+        torch.as_tensor(operator._geometric_factors())[:, None] * resistance_jacobian
     )
     chain = (
         conductivity
@@ -317,8 +316,7 @@ class ERTForwardModeling:
             conductivity, **options
         )
         jacobian = (
-            torch.abs(torch.as_tensor(forward._geometric_factors()))[:, None]
-            * resistance_jacobian
+            torch.as_tensor(forward._geometric_factors())[:, None] * resistance_jacobian
         )
         jacobian = jacobian * (-(conductivity**2)[None, :])
         return np.asarray(response.apparent_resistivity, dtype=float), np.asarray(

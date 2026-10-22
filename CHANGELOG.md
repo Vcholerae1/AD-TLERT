@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Measurements whose receiver polarity gives a negative geometric factor (M and N exchanged)
+  now give the same apparent resistivity and derivatives as the positive ordering. Apparent
+  resistivity is `k R` with the signed geometric factor, and the 2.5D reciprocal-averaged
+  resistance keeps the polarity of the normal reading. Previously 3D returned a negative
+  apparent resistivity for such rows, and the 2.5D normal-sensitivity Jacobian and the
+  matrix-free normal VJP had the wrong sign. Rows with a positive geometric factor are
+  unchanged.
+
+### Changed
+
+- `ERTForward2p5D.resistance` (and `ForwardResponse.resistance`) is signed: negative for
+  reversed receiver polarity, as in 3D.
+
 ## 0.2.2 - 2026-10-23
 
 ### Added

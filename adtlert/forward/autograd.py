@@ -85,7 +85,7 @@ class ERT2p5DApparentResistivityFunction(torch.autograd.Function):
 
         conductivity_work = conductivity.detach().to(device="cpu", dtype=FLOAT_DTYPE)
         currents_work = currents.detach().to(device="cpu", dtype=FLOAT_DTYPE)
-        geometric_scale = forward_operator._geometric_factors().detach().abs()
+        geometric_scale = forward_operator._geometric_factors().detach()
         resistance = forward_operator.resistance_series(
             conductivity_work.reshape(-1, conductivity_work.shape[-1])
         ).reshape(*conductivity_work.shape[:-1], -1)

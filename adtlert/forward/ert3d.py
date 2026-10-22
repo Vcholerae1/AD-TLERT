@@ -607,7 +607,7 @@ class ERTForward3D:
             device="cpu", dtype=FLOAT_DTYPE
         )
         apparent = (
-            torch.abs(self._geometric_factors())
+            self._geometric_factors()
             * resistance
             / torch.as_tensor(currents, dtype=FLOAT_DTYPE)
         )
@@ -647,14 +647,14 @@ class ERTForward3D:
     def apparent_resistivity_values(
         self, conductivity: torch.Tensor | float, currents: torch.Tensor | float = 1.0
     ) -> torch.Tensor:
-        factors = torch.abs(self._geometric_factors())
+        factors = self._geometric_factors()
         current = torch.as_tensor(currents, dtype=FLOAT_DTYPE)
         return factors * self.resistance(conductivity) / current
 
     def apparent_resistivity_series(
         self, conductivities: torch.Tensor, currents: torch.Tensor | float = 1.0
     ) -> torch.Tensor:
-        factors = torch.abs(self._geometric_factors())
+        factors = self._geometric_factors()
         resistance = self.resistance_series(conductivities)
         current = torch.as_tensor(currents, dtype=FLOAT_DTYPE)
         if (

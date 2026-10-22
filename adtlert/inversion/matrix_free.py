@@ -61,9 +61,7 @@ def _normal_log_response_vjp_series(
         or cotangents.shape != predicted.shape
     ):
         raise ValueError("matrix-free VJP series inputs must be compatible 2D arrays")
-    factors = np.abs(np.asarray(operator._geometric_factors(), dtype=float)).reshape(
-        1, -1
-    )
+    factors = np.asarray(operator._geometric_factors(), dtype=float).reshape(1, -1)
     resistance_cotangents = cotangents * factors / np.exp(predicted)
     parameterized = isinstance(forward, ParameterizedERTForward2p5D)
     fused = parameterized and forward.background_mode == "pygimli_prolongation"
