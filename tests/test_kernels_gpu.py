@@ -1,9 +1,8 @@
-"""The fused Triton sensitivity kernel and the deterministic reductions."""
+"""The fused CUDA (NVRTC) sensitivity kernel and the deterministic reductions."""
 
 import numpy as np
 import pytest
 import torch
-import triton
 
 from adtlert.forward import ERTForward2p5D, kernels
 from tests.conftest import conductivity
@@ -28,28 +27,31 @@ def reference(phi, a, b, m, n, cells, templates):
     return -torch.einsum("wdci,wcij,wdcj->dc", receiver, templates, current)
 
 
-@pytest.mark.parametrize("k", [3, 4, 6])
+@pytest.mark.parametrize("k", [3, 4, 6, 10])
 @pytest.mark.parametrize("dtype, tol", [(torch.float64, 1e-12), (torch.float32, 1e-4)])
-def test_triton_sensitivity_matches_the_einsum_reference(k, dtype, tol):
+def test_sensitivity_kernel_matches_the_einsum_reference(k, dtype, tol):
     problem = random_problem(k, dtype)
     expected, actual = reference(*problem), kernels.normal_sensitivity(*problem)
     assert actual.shape == expected.shape
     assert float((actual - expected).abs().max() / expected.abs().max()) < tol
 
 
-def test_every_autotune_configuration_gives_identical_results():
-    phi, a, b, m, n, cells, templates = random_problem(4, torch.float64)
-    outputs = []
-    for config in kernels._CONFIGS:
-        out = torch.empty((a.shape[0], cells.shape[0]), dtype=phi.dtype, device=CUDA)
-        block_d, block_c = config.kwargs["BLOCK_D"], config.kwargs["BLOCK_C"]
-        grid = (triton.cdiv(a.shape[0], block_d), triton.cdiv(cells.shape[0], block_c))
-        kernels._normal_sensitivity_kernel.fn[grid](
-            phi, a.int(), b.int(), m.int(), n.int(), cells.int(), templates, out, *phi.shape, a.shape[0], cells.shape[0],
-            K=4, BLOCK_D=block_d, BLOCK_C=block_c, num_warps=config.num_warps,
-        )  # fmt: skip
-        outputs.append(out)
-    assert all(torch.equal(outputs[0], other) for other in outputs[1:])
+def test_sensitivity_kernel_is_repeatable_and_follows_the_current_stream():
+    problem = random_problem(10, torch.float64, C=301, D=33)
+    first = kernels.normal_sensitivity(*problem)
+    assert all(
+        torch.equal(first, kernels.normal_sensitivity(*problem)) for _ in range(5)
+    )
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        on_stream = kernels.normal_sensitivity(*problem)
+    stream.synchronize()
+    assert torch.equal(on_stream, first)
+    phi, a, b, m, n, cells, templates = problem
+    empty = kernels.normal_sensitivity(
+        phi, a[:0], b[:0], m[:0], n[:0], cells, templates
+    )
+    assert empty.shape == (0, cells.shape[0])
 
 
 def test_sensitivity_kernel_handles_ragged_tiles():

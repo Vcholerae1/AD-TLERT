@@ -2,6 +2,8 @@
 
 from adtlert.forward.autograd import (
     ERT2p5DApparentResistivityFunction,
+    ERT3DApparentResistivityFunction,
+    ERTApparentResistivityFunction,
     apparent_resistivity_autograd,
 )
 from adtlert.forward.ert2p5d import ERTForward2p5D, ForwardResponse
@@ -20,6 +22,8 @@ from adtlert.forward.modeling import (
 __all__ = [
     "CosineTransformWeights",
     "ERT2p5DApparentResistivityFunction",
+    "ERT3DApparentResistivityFunction",
+    "ERTApparentResistivityFunction",
     "ERTForward2p5D",
     "ERTForward3D",
     "ERTForwardModeling",

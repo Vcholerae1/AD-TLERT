@@ -5,9 +5,13 @@ from importlib.metadata import PackageNotFoundError, version
 from adtlert.fem import P1ElementData, build_p1_element_data, p1_shape_functions
 from adtlert.forward import (
     ERT2p5DApparentResistivityFunction,
+    ERT3DApparentResistivityFunction,
+    ERTApparentResistivityFunction,
     ERTForward2p5D,
+    ERTForward3D,
     ERTForwardModeling,
     ForwardResponse,
+    ForwardResponse3D,
     apparent_resistivity_autograd,
 )
 from adtlert.inversion import (
@@ -16,7 +20,7 @@ from adtlert.inversion import (
     TimeLapseERTInversion,
     WindowedTimeLapseERTInversion,
 )
-from adtlert.mesh import Mesh
+from adtlert.mesh import Mesh, Mesh3D
 from adtlert.survey import Survey
 
 try:
@@ -26,12 +30,17 @@ except PackageNotFoundError:  # pragma: no cover - source tree without installat
 
 __all__ = [
     "ERT2p5DApparentResistivityFunction",
+    "ERT3DApparentResistivityFunction",
+    "ERTApparentResistivityFunction",
     "ERTForward2p5D",
+    "ERTForward3D",
     "ERTForwardModeling",
     "ERTInversion",
     "ForwardResponse",
+    "ForwardResponse3D",
     "InversionConfig",
     "Mesh",
+    "Mesh3D",
     "P1ElementData",
     "Survey",
     "TimeLapseERTInversion",

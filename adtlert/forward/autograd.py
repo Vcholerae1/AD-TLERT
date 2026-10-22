@@ -1,4 +1,4 @@
-"""PyTorch automatic-differentiation bridge for the 2.5D ERT solver."""
+"""PyTorch automatic-differentiation bridge for the 2.5D and 3D ERT solvers."""
 
 from __future__ import annotations
 
@@ -8,16 +8,21 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from adtlert.forward.ert2p5d import ERTForward2p5D
+from adtlert.forward.ert3d import ERTForward3D
 from adtlert.utils.dtypes import FLOAT_DTYPE
+
+ERTForwardOperator = ERTForward2p5D | ERTForward3D
 
 
 def _validate_inputs(
     conductivity: torch.Tensor,
     currents: torch.Tensor,
-    forward_operator: ERTForward2p5D,
+    forward_operator: ERTForwardOperator,
 ) -> None:
-    if not isinstance(forward_operator, ERTForward2p5D):
-        raise TypeError("forward_operator must be an ERTForward2p5D instance")
+    if not isinstance(forward_operator, (ERTForward2p5D, ERTForward3D)):
+        raise TypeError(
+            "forward_operator must be an ERTForward2p5D or ERTForward3D instance"
+        )
     if (
         not isinstance(conductivity, torch.Tensor)
         or not conductivity.is_floating_point()
@@ -59,15 +64,14 @@ def _reduce_current_gradient(gradient: torch.Tensor, shape: torch.Size) -> torch
 
 
 class ERT2p5DApparentResistivityFunction(torch.autograd.Function):
-    """Expose the matrix-free 2.5D solver to PyTorch forward and reverse AD.
+    """Expose the matrix-free 2.5D and 3D solvers to PyTorch forward and reverse AD.
 
     The primal computation returns apparent resistivity of one model ``(n_cells,)`` or of a
     series ``(n_steps, n_cells)``; a series is solved in batches whose factorizations the
-    backward pass reuses (:meth:`ERTForward2p5D.vjp_series`). Reverse-mode AD calls
-    :meth:`ERTForward2p5D.vjp`; forward-mode AD calls
-    :meth:`ERTForward2p5D.jvp`. Gradients are available for both cell
-    conductivity and scalar/per-datum currents. The solver itself remains an
-    opaque numerical operation, so second-order derivatives are not supported.
+    backward pass reuses (``vjp_series``). Reverse-mode AD calls ``vjp``; forward-mode AD
+    calls ``jvp``. Gradients are available for both cell conductivity and scalar/per-datum
+    currents. The solver itself remains an opaque numerical operation, so second-order
+    derivatives are not supported.
     """
 
     @staticmethod
@@ -75,18 +79,17 @@ class ERT2p5DApparentResistivityFunction(torch.autograd.Function):
         ctx: Any,
         conductivity: torch.Tensor,
         currents: torch.Tensor,
-        forward_operator: ERTForward2p5D,
+        forward_operator: ERTForwardOperator,
     ) -> torch.Tensor:
         _validate_inputs(conductivity, currents, forward_operator)
 
         conductivity_work = conductivity.detach().to(device="cpu", dtype=FLOAT_DTYPE)
         currents_work = currents.detach().to(device="cpu", dtype=FLOAT_DTYPE)
+        geometric_scale = forward_operator._geometric_factors().detach().abs()
         resistance = forward_operator.resistance_series(
             conductivity_work.reshape(-1, conductivity_work.shape[-1])
         ).reshape(*conductivity_work.shape[:-1], -1)
-        geometric_scale = forward_operator._geometric_factors().detach().abs()
         apparent_resistivity = geometric_scale * resistance / currents_work
-
         ctx.forward_operator = forward_operator
         ctx.conductivity_device = conductivity.device
         ctx.conductivity_dtype = conductivity.dtype
@@ -178,12 +181,16 @@ class ERT2p5DApparentResistivityFunction(torch.autograd.Function):
         return tangent.to(device=ctx.conductivity_device, dtype=ctx.conductivity_dtype)
 
 
+ERT3DApparentResistivityFunction = ERT2p5DApparentResistivityFunction
+ERTApparentResistivityFunction = ERT2p5DApparentResistivityFunction
+
+
 def apparent_resistivity_autograd(
     conductivity: torch.Tensor,
-    forward_operator: ERTForward2p5D,
+    forward_operator: ERTForwardOperator,
     currents: torch.Tensor | float = 1.0,
 ) -> torch.Tensor:
-    """Compute differentiable 2.5D apparent resistivity.
+    """Compute differentiable 2.5D or 3D apparent resistivity.
 
     ``conductivity`` is one model ``(n_cells,)`` or a series ``(n_steps, n_cells)`` (output
     ``(n_data,)`` or ``(n_steps, n_data)``) and determines the output device and dtype. ``currents`` may
@@ -200,4 +207,9 @@ def apparent_resistivity_autograd(
     )
 
 
-__all__ = ["ERT2p5DApparentResistivityFunction", "apparent_resistivity_autograd"]
+__all__ = [
+    "ERT2p5DApparentResistivityFunction",
+    "ERT3DApparentResistivityFunction",
+    "ERTApparentResistivityFunction",
+    "apparent_resistivity_autograd",
+]

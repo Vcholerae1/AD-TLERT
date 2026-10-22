@@ -21,12 +21,22 @@ requirements.
 ## Install
 
 ADTLERT is a CUDA library: every sparse solve runs on NVIDIA cuDSS and the
-adjoint contractions run on the GPU. It requires Linux, an NVIDIA GPU, and a
-driver that supports CUDA 12. cuDSS and nvmath-python are installed as regular
-dependencies; the fused sensitivity kernels are written in Triton, which ships
-with PyTorch:
+adjoint contractions run on the GPU. It requires an NVIDIA GPU and a driver
+that supports CUDA 12. cuDSS and nvmath-python are installed as regular
+dependencies. The fused sensitivity kernel is CUDA C++ compiled at first use
+by NVRTC (installed as a wheel), so no compiler toolchain or Triton is needed
+and Linux and Windows run the same code:
 
 ```bash
+python -m pip install adtlert
+```
+
+It is tested on Linux (including WSL2). Native Windows is untested, although
+every dependency has a Windows wheel. PyTorch's Windows wheels on PyPI are
+CPU-only, so install a CUDA build from the PyTorch index first:
+
+```bash
+python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
 python -m pip install adtlert
 ```
 
@@ -45,8 +55,8 @@ uv run pytest -m "not gpu"
 ```
 
 The suite checks mesh/FEM building blocks, adjoint consistency (dot tests), the exact Jacobian
-against finite differences and the resistivity-scaling identity, the Triton sensitivity kernel
-against an einsum reference (bitwise identical across autotune configurations), deterministic
+against finite differences and the resistivity-scaling identity, the CUDA sensitivity kernel
+against an einsum reference (bitwise repeatable), deterministic
 reductions, the inversion loops, and the implicit-neural-representation training.
 
 ## Core Forward API
@@ -107,17 +117,19 @@ forward3d = ERTForward3D.from_mesh_survey(
 )
 ```
 
-For large explicit sensitivities, `jacobian(..., batch_size=32,
-cell_batch_size=20000)` bounds temporary field memory. Assembly routing,
+For large explicit sensitivities, `jacobian(..., batch_size=32)` bounds the
+number of measurement rows computed per kernel launch. Assembly routing,
 active AB/MN electrode sets, numerical geometric factors, sparse plans, and
 fixed GPU right-hand sides are cached across inversion iterations.
 
-The initial 3D implementation supports flat-surface half-space models,
-four-node tetrahedral geometry, P1 or ten-node P2 basis functions, NVIDIA cuDSS
-sparse factorization, analytic or terrain-aware numerical
-geometric factors, exact adjoint cell sensitivities, first-order face-neighbor
-regularization, and the existing single-time inversion API. Large-scale
-matrix-free time-lapse inversion remains on the 3D roadmap.
+The 3D implementation supports flat-surface half-space models, four-node
+tetrahedral geometry, P1 or ten-node P2 basis functions, NVIDIA cuDSS sparse
+factorization with series reuse (`series_batch_steps`, default 1 in 3D because
+batching large 3D factorizations costs memory and time), analytic or terrain-aware numerical
+geometric factors, exact (`vjp`/`jvp`) and normal-sensitivity
+(`normal_vjp`/`normal_jvp`) matrix-free derivatives, `apparent_resistivity_autograd`,
+first-order face-neighbor regularization, and both linearized and matrix-free
+single-time, time-lapse, and INR inversions.
 
 `ERTForwardModeling` provides a small wrapper for mesh/data-like objects:
 

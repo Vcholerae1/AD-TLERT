@@ -31,6 +31,10 @@ def tetrahedron_volumes(nodes, cells) -> Tensor:
     return _float(np.abs(np.linalg.det(_edge_matrices(cell_nodes))) / 6.0)
 
 
+def _facing_up(normals: np.ndarray) -> np.ndarray:
+    return normals[:, 2] > 1.0e-8
+
+
 def _boundary_topology(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Sorted boundary faces and their owning cells."""
 
@@ -143,10 +147,8 @@ class Mesh3D:
             raise ValueError("cells must define non-degenerate tetrahedra")
         faces, face_cells = _boundary_topology(cells)
         centers, areas, normals = _boundary_geometry(nodes, cells, faces, face_cells)
-        if (
-            surface_face_mask is None
-        ):  # height-field terrain: exterior faces whose outward normal points up
-            surface_mask = normals[:, 2] > 1.0e-8
+        if surface_face_mask is None:
+            surface_mask = _facing_up(normals)
         else:
             surface_mask = np.asarray(surface_face_mask, dtype=bool).reshape(-1)
             if surface_mask.shape != (faces.shape[0],):

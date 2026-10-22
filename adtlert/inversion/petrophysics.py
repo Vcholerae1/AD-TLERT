@@ -420,10 +420,8 @@ def build_petrophysical_transform(
 ) -> PetrophysicalTransform:
     """Resolve and instantiate a petrophysical transform."""
 
-    if hasattr(name, "log_resistivity_from_state") and hasattr(
-        name, "d_log_resistivity_d_state"
-    ):
-        return name  # type: ignore[return-value]
+    if not isinstance(name, str):
+        return name
     key = str(name).strip().lower().replace("-", "_")
     kind = next(
         (

@@ -311,8 +311,6 @@ class ERTForwardModeling:
             if normal_sensitivity is None
             else normal_sensitivity,
         }
-        if isinstance(forward, ERTForward3D):
-            options["include_fields"] = False
         if log_transform:
             return log_response_and_jacobian(forward, conductivity, **options)
         response, resistance_jacobian = forward.solve_with_jacobian(

@@ -1,4 +1,4 @@
-"""Physics and derivative checks of the 2.5D operator (cuDSS, Triton)."""
+"""Physics and derivative checks of the 2.5D operator (cuDSS, NVRTC)."""
 
 import numpy as np
 import pytest

@@ -36,9 +36,6 @@ from tests.test_mesh_fem import grid_triangles
 RNG = np.random.default_rng(0)
 
 
-# -- petrophysics ---------------------------------------------------------------------------------
-
-
 def transforms(n):
     saturation = {
         "rho_sat": np.full(n, 20.0),
@@ -102,9 +99,6 @@ def test_petrophysical_transform_validation():
         )
 
 
-# -- data misfits ---------------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "name", ["weighted_log_l2", "weighted_log_l1", "weighted_log_huber"]
 )
@@ -147,9 +141,6 @@ def test_misfit_registry():
     assert build_data_misfit("L2") is build_data_misfit("weighted_log_l2")
     with pytest.raises(ValueError, match="unknown data_misfit"):
         build_data_misfit("nope")
-
-
-# -- regularization -------------------------------------------------------------------------------
 
 
 def test_first_order_operator_annihilates_constants_and_weights_vertical_jumps():
@@ -236,9 +227,6 @@ def test_regularization_registries_resolve_aliases():
         build_spatial_regularization("nope")
 
 
-# -- optimizers -----------------------------------------------------------------------------------
-
-
 def least_squares_problem(n=30, m=60):
     matrix = sp.csr_matrix(RNG.normal(size=(m, n)))
     truth = RNG.normal(size=n)
@@ -310,9 +298,6 @@ def test_first_order_step_validates_input():
     )
 
 
-# -- configuration and windows --------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "overrides, message",
     [
@@ -336,9 +321,6 @@ def test_window_start_indices_cover_the_tail():
     assert _window_start_indices(5, 5, 1) == [0]
     with pytest.raises(ValueError):
         _window_start_indices(2, 3, 1)
-
-
-# -- parameter mesh -------------------------------------------------------------------------------
 
 
 def stub_forward(mesh):

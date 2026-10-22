@@ -120,9 +120,9 @@ def build_optimization_algorithm(
     return _lookup(_OPTIMIZATION_ALGORITHMS, name, OptimizationAlgorithm, "optimizer")
 
 
-# ---------------------------------------------------------------------------
-# Update rules. ``config`` is an ``InversionConfig``.
-# ---------------------------------------------------------------------------
+def _polak_ribiere_plus(grad: np.ndarray, previous_grad: np.ndarray) -> float:
+    denominator = max(float(np.dot(previous_grad, previous_grad)), np.finfo(float).eps)
+    return max(0.0, float(np.dot(grad, grad - previous_grad)) / denominator)
 
 
 def limit_step(delta: np.ndarray, max_step: float | None) -> np.ndarray:
@@ -190,23 +190,14 @@ def first_order_step(
         else config.optimizer_max_step
     )
 
-    if algorithm == "nonlinear_cg":  # Polak-Ribiere+
+    if algorithm == "nonlinear_cg":
         previous_grad, previous_dir = (
             state.get("nonlinear_cg_gradient"),
             state.get("nonlinear_cg_direction"),
         )
         direction = -grad
         if previous_grad is not None and previous_dir is not None:
-            beta = max(
-                0.0,
-                float(
-                    np.dot(grad, grad - previous_grad)
-                    / max(
-                        float(np.dot(previous_grad, previous_grad)), np.finfo(float).eps
-                    )
-                ),
-            )
-            direction = -grad + beta * previous_dir
+            direction = -grad + _polak_ribiere_plus(grad, previous_grad) * previous_dir
         direction = _descent(direction, grad)
         state["nonlinear_cg_gradient"], state["nonlinear_cg_direction"] = (
             grad.copy(),

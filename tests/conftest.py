@@ -12,7 +12,7 @@ from adtlert.workflows import ParflowGrid, build_terrain_forward_case  # noqa: E
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "gpu: needs an NVIDIA GPU (cuDSS, Triton)")
+    config.addinivalue_line("markers", "gpu: needs an NVIDIA GPU (cuDSS, NVRTC)")
 
 
 def pytest_collection_modifyitems(config, items):

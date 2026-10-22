@@ -12,7 +12,7 @@ import scipy.sparse as sp
 import torch
 from scipy.spatial import cKDTree
 
-from adtlert.forward import ERTForward2p5D
+from adtlert.forward import ERTForward2p5D, ERTForward3D
 from adtlert.forward.modeling import log_response_and_jacobian
 from adtlert.inversion.config import ArrayLike
 from adtlert.inversion.forward_calls import (
@@ -20,10 +20,8 @@ from adtlert.inversion.forward_calls import (
     _forward_log_response,
 )
 from adtlert.inversion.inputs import _as_log_model
-from adtlert.inversion.regularization import (
-    cell_edges,
-)
-from adtlert.mesh import Mesh
+from adtlert.inversion.regularization import _neighbor_pairs
+from adtlert.mesh import Mesh, Mesh3D
 from adtlert.utils.dtypes import FLOAT_DTYPE
 
 
@@ -37,10 +35,10 @@ class ParameterizedERTForward2p5D:
 
     def __init__(
         self,
-        forward: ERTForward2p5D,
+        forward: ERTForward2p5D | ERTForward3D,
         parameter_cell_ids: ArrayLike,
         *,
-        regularization_mesh: Mesh | None = None,
+        regularization_mesh: Mesh | Mesh3D | None = None,
         forward_cell_parameter_ids: ArrayLike | None = None,
         background_mode: str = "pygimli_prolongation",
     ) -> None:
@@ -131,19 +129,20 @@ class ParameterizedERTForward2p5D:
     @classmethod
     def from_mesh_survey(
         cls,
-        mesh: Mesh,
+        mesh: Mesh | Mesh3D,
         survey,
         parameter_cell_ids: ArrayLike,
         *,
-        regularization_mesh: Mesh | None = None,
+        regularization_mesh: Mesh | Mesh3D | None = None,
         background_mode: str = "pygimli_prolongation",
         **forward_kwargs: Any,
     ) -> ParameterizedERTForward2p5D:
         forward_cell_parameter_ids = forward_kwargs.pop(
             "forward_cell_parameter_ids", None
         )
+        operator_cls = ERTForward3D if isinstance(mesh, Mesh3D) else ERTForward2p5D
         return cls(
-            ERTForward2p5D.from_mesh_survey(mesh, survey, **forward_kwargs),
+            operator_cls.from_mesh_survey(mesh, survey, **forward_kwargs),
             parameter_cell_ids,
             regularization_mesh=regularization_mesh,
             forward_cell_parameter_ids=forward_cell_parameter_ids,
@@ -212,21 +211,12 @@ class ParameterizedERTForward2p5D:
         if self.background_cell_ids.size == 0:
             return sp.csr_matrix(matrix)
 
-        nodes = np.asarray(self.mesh.nodes, dtype=float)
-        edge_cells: dict[tuple[int, ...], list[int]] = {}
-        for cell_id, cell in enumerate(np.asarray(self.mesh.cells, dtype=np.int32)):
-            for edge in cell_edges(cell):
-                edge_cells.setdefault(tuple(sorted(edge)), []).append(cell_id)
         neighbors: list[list[tuple[int, float]]] = [[] for _ in range(cell_count)]
-        for edge, owners in edge_cells.items():
-            tangent = nodes[edge[1]] - nodes[edge[0]]
-            length = float(np.linalg.norm(tangent))
-            if len(owners) != 2 or length <= 0.0:
-                continue
-            weight = abs(float(tangent[1])) / length + 1.0e-6
-            neighbors[owners[0]].append((owners[1], weight))
-            neighbors[owners[1]].append((owners[0], weight))
-
+        pairs, normal_z = _neighbor_pairs(self.mesh)
+        horizontal = np.sqrt(np.clip(1.0 - normal_z**2, 0.0, None))
+        for (first, second), weight in zip(pairs, horizontal + 1.0e-6, strict=True):
+            neighbors[first].append((second, float(weight)))
+            neighbors[second].append((first, float(weight)))
         known = self._active_forward_mask.copy()
         unknown = set(self.background_cell_ids.tolist())
         while unknown:
@@ -324,7 +314,6 @@ class ParameterizedERTForward2p5D:
         robin = bool(include_robin_boundary_derivative)
         normal = True if normal_sensitivity is None else bool(normal_sensitivity)
         if self.background_mode == "pygimli_prolongation" and normal and not robin:
-            # Fused aggregation of forward-cell sensitivities into parameter columns.
             return log_response_and_jacobian(
                 self.forward_operator,
                 torch.as_tensor(np.exp(-full_log), dtype=FLOAT_DTYPE),

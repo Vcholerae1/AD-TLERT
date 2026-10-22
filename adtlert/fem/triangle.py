@@ -18,8 +18,7 @@ _P1_RULES = {
         [1.0 / 6.0] * 3,
     ),
 }
-# Degree-4 rule, exact for P2 mass matrices.
-_P2_RULE = (
+_DEGREE4_RULE = (
     [
         [0.445948490915965, 0.445948490915965],
         [0.445948490915965, 0.108103018168070],
@@ -137,7 +136,7 @@ def build_p1_element_data(mesh, quadrature_order: int = 2) -> P1ElementData:
 def triangle_quadrature_p2() -> tuple[Tensor, Tensor]:
     """Return a degree-4 triangle rule exact for P2 mass matrices."""
 
-    return tuple(torch.tensor(values, dtype=FLOAT_DTYPE) for values in _P2_RULE)
+    return tuple(torch.tensor(values, dtype=FLOAT_DTYPE) for values in _DEGREE4_RULE)
 
 
 def p2_shape_functions(points) -> Tensor:
@@ -201,35 +200,9 @@ def build_p2_element_data(mesh) -> P2ElementData:
     )
 
 
-def _scalar(value) -> float | None:
-    try:
-        array = np.asarray(value)
-    except Exception:  # e.g. tensors that require grad
-        return None
-    return float(array) if array.ndim == 0 else None
+def _local(spec: str, left, right, data, coefficients) -> Tensor:
+    """``einsum(spec, left, right, coefficient * 2 |T| w_q)`` over cells and quadrature points."""
 
-
-def _local(
-    spec: str, left, right, data, coefficients, *, numpy_scalars: bool
-) -> Tensor:
-    """``einsum(spec, left, right, coefficient * 2 |T| w_q)`` over cells and quadrature points.
-
-    Scalar coefficients of P1 data are contracted in NumPy, as the templates always were.
-    """
-
-    scalar = _scalar(coefficients) if numpy_scalars else None
-    if scalar is not None:
-        weights = 2.0 * np.asarray(data.cell_areas, dtype=NP_FLOAT_DTYPE)[:, None]
-        weights = (
-            weights * np.asarray(data.quadrature_weights, dtype=NP_FLOAT_DTYPE)[None, :]
-        )
-        operands = (
-            np.asarray(left, dtype=NP_FLOAT_DTYPE),
-            np.asarray(right, dtype=NP_FLOAT_DTYPE),
-        )
-        return torch.as_tensor(
-            np.einsum(spec, *operands, scalar * weights), dtype=FLOAT_DTYPE
-        )
     cells, quadrature = data.cell_areas.shape[0], data.quadrature_weights.shape[0]
     values = torch.as_tensor(coefficients, dtype=FLOAT_DTYPE)
     if values.shape == (cells,):
@@ -252,7 +225,6 @@ def assemble_local_stiffness(element_data: P1ElementData, conductivity) -> Tenso
         gradients,
         element_data,
         conductivity,
-        numpy_scalars=True,
     )
 
 
@@ -260,9 +232,7 @@ def assemble_local_mass(element_data: P1ElementData, coefficients=1.0) -> Tensor
     """Elementwise P1 mass matrices ``int c phi_i phi_j``."""
 
     values = element_data.shape_values
-    return _local(
-        "qi,qj,eq->eij", values, values, element_data, coefficients, numpy_scalars=True
-    )
+    return _local("qi,qj,eq->eij", values, values, element_data, coefficients)
 
 
 def assemble_local_stiffness_p2(element_data: P2ElementData, conductivity) -> Tensor:
@@ -275,7 +245,6 @@ def assemble_local_stiffness_p2(element_data: P2ElementData, conductivity) -> Te
         gradients,
         element_data,
         conductivity,
-        numpy_scalars=False,
     )
 
 
@@ -283,6 +252,4 @@ def assemble_local_mass_p2(element_data: P2ElementData, coefficients=1.0) -> Ten
     """Elementwise P2 mass matrices."""
 
     values = element_data.shape_values
-    return _local(
-        "qi,qj,eq->eij", values, values, element_data, coefficients, numpy_scalars=False
-    )
+    return _local("qi,qj,eq->eij", values, values, element_data, coefficients)

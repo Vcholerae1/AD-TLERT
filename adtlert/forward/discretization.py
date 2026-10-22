@@ -221,17 +221,19 @@ def _serendipity(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _quad_templates(mesh: Mesh, quadratic: bool) -> tuple[Tensor, Tensor, Tensor]:
-    """Unit-conductivity stiffness, mass, and boundary-mass templates on bilinear quads."""
+    """Unit-conductivity stiffness, mass, and boundary-mass templates on bilinear quads.
 
-    high = quadratic and torch.get_default_dtype() == torch.float64
-    dtype = np.float64 if high else NP_FLOAT_DTYPE
+    Quadratic (terrain primary-field) templates are integrated in float64.
+    """
+
+    dtype = np.float64 if quadratic else NP_FLOAT_DTYPE
     if quadratic:
         gauss, gauss_weights = np.polynomial.legendre.leggauss(3)
         points = np.asarray([[x, y] for y in gauss for x in gauss], dtype=dtype)
         weights = np.asarray(
             [wx * wy for wy in gauss_weights for wx in gauss_weights], dtype=dtype
         )
-    else:  # 2x2 Gauss points in counter-clockwise corner order
+    else:
         g = 1.0 / np.sqrt(3.0)
         points = np.asarray([[-g, -g], [g, -g], [g, g], [-g, g]], dtype=dtype)
         weights = np.ones(4, dtype=dtype)
@@ -259,7 +261,7 @@ def _quad_templates(mesh: Mesh, quadratic: bool) -> tuple[Tensor, Tensor, Tensor
     boundary_mass = (
         np.asarray(mesh.boundary_edge_lengths, dtype=dtype)[:, None, None] * reference
     )
-    out = torch.float64 if high else FLOAT_DTYPE
+    out = torch.float64 if quadratic else FLOAT_DTYPE
     return tuple(
         torch.as_tensor(array, dtype=out) for array in (stiffness, mass, boundary_mass)
     )
@@ -493,11 +495,10 @@ def build_discretization(
 ) -> Discretization:
     """Build the input-mesh discretization (``auxiliary=False``) or a terrain auxiliary one."""
 
-    structured = _structured_quads(mesh) if auxiliary else None
+    terrain_strips = _structured_quads(mesh) if auxiliary else None
     parents = np.arange(mesh.cell_count)
-    if structured is not None:
-        # Terrain strips: bilinear geometry, natural (zero Robin) outer boundaries.
-        geometry = structured
+    if terrain_strips is not None:
+        geometry = terrain_strips
         if refine:
             geometry, parents = _refine_quads(geometry)
         if quadratic:

@@ -10,7 +10,7 @@ differentiable runs through PyTorch tensors; sparse solves use NVIDIA cuDSS.
 | `adtlert.mesh` | Triangle/quadrilateral (`Mesh`) and tetrahedral (`Mesh3D`) meshes: boundary topology, surface detection, point location, refinement. |
 | `adtlert.fem` | Local element matrices (P1/P2 triangles, P1/P2 tetrahedra) and Robin boundary coefficients. |
 | `adtlert.survey` | Electrodes, ABMN quadruples, analytic geometric factors. |
-| `adtlert.forward` | The forward operators. `discretization` builds the element space and sparse pattern; `cudss` plans and reuses batched cuDSS solvers; `kernels` holds the Triton sensitivity kernel, the SDDMM wrapper and deterministic reductions; `ert2p5d`/`ert3d` are the operators; `autograd` exposes the exact VJP/JVP to PyTorch; `modeling` is the facade used by inversions. |
+| `adtlert.forward` | The forward operators. `discretization` builds the element space and sparse pattern; `cudss` plans and reuses batched cuDSS solvers; `kernels` holds the CUDA (NVRTC) sensitivity kernel, the SDDMM wrapper and deterministic reductions (`GroupSum`, `CellAggregation`); `field_cache` (LRU of solved fields, batched series solves, factorization names) and `inputs` (model, cotangent and parameter-map validation) are shared by `ert2p5d`/`ert3d`, the operators; `autograd` exposes the exact VJP/JVP to PyTorch; `modeling` is the facade used by inversions. |
 | `adtlert.inversion` | Log-space inversion. `config` (settings, results, validation), `inputs`, `state` (petrophysical maps), `terms` (`RegularizationTerms`), `objective` (misfits, coverage, line search), `matrix_free` (gradients), `optimizers`, `parameterized` (parameter mesh coarser than the solve mesh) and `core` (the engine and public entry points). |
 | `adtlert.inr` | Coordinate networks (`networks`), the autograd physics bridge (`physics`) and the training loop (`train`). |
 | `adtlert.workflows` | ParFlow slices -> terrain-following cases, `.dat` I/O, series forward runs, triangle inversion meshes. |
@@ -45,8 +45,9 @@ cache keys: the operators are symmetric, so the adjoint solve of the same batch 
 ## Conventions
 
 - Precision: `FLOAT_DTYPE` is fixed at import (float32, or float64 with `ADTLERT_ENABLE_FLOAT64=1`).
-  Terrain solves are always float64, which also switches Torch's default dtype for the process.
-- Determinism: our own GPU reductions are bitwise repeatable (`GroupSum`, a fixed Triton summation
+  Terrain solves and quadratic (terrain primary-field) templates are always float64; no
+  module changes Torch's default dtype.
+- Determinism: our own GPU reductions are bitwise repeatable (`GroupSum`, a fixed CUDA-kernel summation
   order). cuDSS is not by default; see the changelog.
 - Cell models are ordered like the mesh cells; time-lapse models are `(n_cells, n_times)`, data
   are `(n_times, n_measurements)`.
@@ -55,5 +56,5 @@ cache keys: the operators are symmetric, so the adjoint solve of the same batch 
 
 `uv run pytest` runs everything the machine supports; `-m "not gpu"` runs the CPU-only subset.
 The GPU suite checks adjoint consistency (dot tests), the exact Jacobian
-against finite differences and the resistivity-scaling identity, the Triton kernel against an
+against finite differences and the resistivity-scaling identity, the CUDA kernel against an
 einsum reference, deterministic reductions, the inversion loops and INR training.

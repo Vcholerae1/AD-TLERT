@@ -113,7 +113,6 @@ class BatchedSolver:
         else:
             for matrix, value in zip(plan["matrices"], values, strict=True):
                 matrix.values().copy_(value)
-            # The stored values no longer match any named matrices.
             plan["factorization"] = None
             plan["rhs"].copy_(rhs)
             plan["solver"].reset_operands(b=plan["view"])
@@ -126,6 +125,6 @@ class BatchedSolver:
         """Release the solvers (best effort)."""
 
         for plan in self._plans.values():
-            with contextlib.suppress(Exception):  # teardown must not raise
+            with contextlib.suppress(Exception):
                 plan["solver"].free()
         self._plans.clear()

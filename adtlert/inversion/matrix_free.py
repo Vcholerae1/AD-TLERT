@@ -8,28 +8,28 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from adtlert.forward import ERTForward2p5D, ERTForwardModeling
+from adtlert.forward import ERTForward2p5D, ERTForward3D, ERTForwardModeling
 from adtlert.inversion.config import InversionConfig
 from adtlert.inversion.parameterized import ParameterizedERTForward2p5D
 from adtlert.utils.dtypes import FLOAT_DTYPE
 
 
-def _operator(forward) -> ERTForward2p5D | None:
-    """2.5D operator whose cells map onto the inversion model (``None`` for other forwards)."""
+def _operator(forward) -> ERTForward2p5D | ERTForward3D | None:
+    """Native operator whose cells map onto the inversion model (``None`` for other forwards)."""
 
-    if isinstance(forward, ERTForward2p5D):
+    if isinstance(forward, (ERTForward2p5D, ERTForward3D)):
         return forward
     if isinstance(forward, (ERTForwardModeling, ParameterizedERTForward2p5D)):
         return (
             forward.forward_operator
-            if isinstance(forward.forward_operator, ERTForward2p5D)
+            if isinstance(forward.forward_operator, (ERTForward2p5D, ERTForward3D))
             else None
         )
     return None
 
 
 def _supports_normal_matrix_free(forward, config: InversionConfig) -> bool:
-    """Whether the exact normal-sensitivity VJP is available (2.5D, no Robin derivative)."""
+    """Whether the exact normal-sensitivity VJP is available (no Robin derivative)."""
 
     return (
         config.normal_sensitivity
@@ -50,7 +50,7 @@ def _normal_log_response_vjp_series(
     operator = _operator(forward)
     if operator is None:
         raise TypeError(
-            "matrix-free normal VJP is currently available for 2.5D ERT only"
+            "matrix-free normal VJP requires an ERTForward2p5D or ERTForward3D operator"
         )
     parameter_logs = np.asarray(log_resistivity, dtype=float)
     predicted = np.asarray(predicted_log, dtype=float)

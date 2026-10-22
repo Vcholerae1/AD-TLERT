@@ -90,6 +90,10 @@ def tetrahedron_faces(cell: np.ndarray) -> list[tuple[int, int, int]]:
     return [(b, c, d), (a, d, c), (a, b, d), (a, c, b)]
 
 
+def _edge_normal(tangent: np.ndarray) -> np.ndarray:
+    return np.asarray((-tangent[1], tangent[0]))
+
+
 def _neighbor_pairs(mesh: Mesh | Mesh3D) -> tuple[list[tuple[int, int]], np.ndarray]:
     """Cells sharing an interior edge/face and the |z|-component of that interface's normal."""
 
@@ -104,15 +108,15 @@ def _neighbor_pairs(mesh: Mesh | Mesh3D) -> tuple[list[tuple[int, int]], np.ndar
         if len(cells) != 2:
             continue
         points = nodes[list(entity)]
-        if three_d:
-            normal = np.cross(points[1] - points[0], points[2] - points[0])
-            length, component = float(np.linalg.norm(normal)), abs(float(normal[2]))
-        else:  # the edge normal's z-component is the tangent's x-component
-            tangent = points[1] - points[0]
-            length, component = float(np.linalg.norm(tangent)), abs(float(tangent[0]))
+        normal = (
+            np.cross(points[1] - points[0], points[2] - points[0])
+            if three_d
+            else _edge_normal(points[1] - points[0])
+        )
+        length = float(np.linalg.norm(normal))
         if length > 0.0:
             pairs.append((cells[0], cells[1]))
-            normal_z.append(component / length)
+            normal_z.append(abs(float(normal[-1])) / length)
     return pairs, np.asarray(normal_z)
 
 

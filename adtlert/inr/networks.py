@@ -35,6 +35,10 @@ def fourier_frequency_bank(levels: int, spacing: str = "log_uniform") -> torch.T
     return math.pi * torch.as_tensor(multipliers, dtype=torch.float32)
 
 
+_DEFAULT_SPATIAL_DIMENSIONS = {1: 0, 2: 2, 3: 2, 4: 3}
+"""Spatial axes per input width when not given: (t), (x, z), (x, z, t), (x, y, z, t)."""
+
+
 class MultiscaleFourierEncoder(nn.Module):
     """Deterministic Fourier encoding with separate spatial/time bandwidths.
 
@@ -50,17 +54,32 @@ class MultiscaleFourierEncoder(nn.Module):
         spatial_levels: int = 4,
         temporal_levels: int = 3,
         frequency_spacing: str = "log_uniform",
+        *,
+        spatial_dimensions: int | None = None,
     ) -> None:
         super().__init__()
-        if input_dimensions not in (1, 2, 3):
+        input_dimensions = int(input_dimensions)
+        if spatial_dimensions is None:
+            spatial_dimensions = _DEFAULT_SPATIAL_DIMENSIONS.get(input_dimensions, -1)
+        spatial_dimensions = int(spatial_dimensions)
+        if (input_dimensions, spatial_dimensions) not in (
+            (1, 0),
+            (2, 2),
+            (3, 2),
+            (3, 3),
+            (4, 3),
+        ):
             raise ValueError(
-                "input_dimensions must be 1 (time), 2 (space), or 3 (space-time)"
+                "input_dimensions must be 1 (time), 2 (2D space), 3 (2D space-time, or 3D "
+                "space with spatial_dimensions=3), or 4 (3D space-time)"
             )
         if spatial_levels < 0 or temporal_levels < 0:
             raise ValueError("Fourier levels must be non-negative")
-        self.input_dimensions = int(input_dimensions)
-        self.spatial_levels = int(spatial_levels if input_dimensions >= 2 else 0)
-        self.temporal_levels = int(temporal_levels if input_dimensions in (1, 3) else 0)
+        self.input_dimensions = input_dimensions
+        self.spatial_dimensions = spatial_dimensions
+        has_time = input_dimensions > spatial_dimensions
+        self.spatial_levels = int(spatial_levels if spatial_dimensions else 0)
+        self.temporal_levels = int(temporal_levels if has_time else 0)
         self.frequency_spacing = str(frequency_spacing)
         for name, levels in (
             ("spatial", self.spatial_levels),
@@ -76,12 +95,8 @@ class MultiscaleFourierEncoder(nn.Module):
 
     @property
     def output_dimensions(self) -> int:
-        spatial_features = (
-            2 * 2 * self.spatial_levels if self.input_dimensions >= 2 else 0
-        )
-        temporal_features = (
-            2 * self.temporal_levels if self.input_dimensions in (1, 3) else 0
-        )
+        spatial_features = 2 * self.spatial_dimensions * self.spatial_levels
+        temporal_features = 2 * self.temporal_levels
         return self.input_dimensions + spatial_features + temporal_features
 
     def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
@@ -90,16 +105,19 @@ class MultiscaleFourierEncoder(nn.Module):
                 f"coordinates must end with {self.input_dimensions} dimensions"
             )
         features = [coordinates]
-        if self.input_dimensions >= 2 and self.spatial_levels:
-            spatial_phase = coordinates[..., :2, None] * self.spatial_frequencies
+        if self.spatial_dimensions and self.spatial_levels:
+            spatial_phase = (
+                coordinates[..., : self.spatial_dimensions, None]
+                * self.spatial_frequencies
+            )
             features.extend(
                 (
                     torch.sin(spatial_phase).flatten(-2),
                     torch.cos(spatial_phase).flatten(-2),
                 )
             )
-        if self.input_dimensions in (1, 3) and self.temporal_levels:
-            temporal_index = 0 if self.input_dimensions == 1 else 2
+        if self.temporal_levels:
+            temporal_index = self.spatial_dimensions
             temporal_phase = (
                 coordinates[..., temporal_index : temporal_index + 1]
                 * self.temporal_frequencies
@@ -111,11 +129,11 @@ class MultiscaleFourierEncoder(nn.Module):
         """Return feature weights in the exact order produced by ``forward``."""
 
         parts = [torch.ones(self.input_dimensions, dtype=dtype, device=device)]
-        if self.input_dimensions >= 2:
+        if self.spatial_dimensions and self.spatial_levels:
             spatial = self.spatial_level_weights.to(device=device, dtype=dtype)
-            for _ in range(4):
+            for _ in range(2 * self.spatial_dimensions):
                 parts.append(spatial)
-        if self.input_dimensions in (1, 3):
+        if self.temporal_levels:
             temporal = self.temporal_level_weights.to(device=device, dtype=dtype)
             parts.extend((temporal, temporal))
         return torch.cat(parts)
@@ -271,6 +289,7 @@ class MultiscaleINR(_BoundedLogResistivity):
         self,
         *,
         input_dimensions: int = 2,
+        spatial_dimensions: int | None = None,
         spatial_levels: int = 4,
         temporal_levels: int = 3,
         hidden_width: int = 64,
@@ -289,6 +308,7 @@ class MultiscaleINR(_BoundedLogResistivity):
             spatial_levels=spatial_levels,
             temporal_levels=temporal_levels,
             frequency_spacing=frequency_spacing,
+            spatial_dimensions=spatial_dimensions,
         )
         self.mlp = _mlp(
             self.encoder.output_dimensions,
@@ -302,6 +322,10 @@ class MultiscaleINR(_BoundedLogResistivity):
     def input_dimensions(self) -> int:
         return self.encoder.input_dimensions
 
+    @property
+    def spatial_dimensions(self) -> int:
+        return self.encoder.spatial_dimensions
+
     def encode(self, coordinates: torch.Tensor) -> torch.Tensor:
         return self.encoder(coordinates)
 
@@ -313,6 +337,7 @@ class MultiscaleINR(_BoundedLogResistivity):
 
         return {
             "input_dimensions": self.input_dimensions,
+            "spatial_dimensions": self.spatial_dimensions,
             "spatial_levels": self.encoder.spatial_levels,
             "temporal_levels": self.encoder.temporal_levels,
             "hidden_width": self.hidden_width,
@@ -329,13 +354,20 @@ class MultiscaleINR(_BoundedLogResistivity):
 
 
 class JointSpatioTemporalINR(MultiscaleINR):
-    """A single Fourier-feature MLP representing ``log rho(x, z, t)``."""
+    """A single Fourier-feature MLP representing ``log rho(x, z, t)`` (``(x, y, z, t)`` in 3D)."""
 
     def __init__(self, **kwargs: object) -> None:
         input_dimensions = int(kwargs.pop("input_dimensions", 3))
-        if input_dimensions != 3:
-            raise ValueError("JointSpatioTemporalINR requires input_dimensions=3")
-        super().__init__(input_dimensions=3, **kwargs)
+        spatial_dimensions = kwargs.pop("spatial_dimensions", input_dimensions - 1)
+        if input_dimensions not in (3, 4) or spatial_dimensions != input_dimensions - 1:
+            raise ValueError(
+                "JointSpatioTemporalINR requires input_dimensions=3 or 4 with time last"
+            )
+        super().__init__(
+            input_dimensions=input_dimensions,
+            spatial_dimensions=spatial_dimensions,
+            **kwargs,
+        )
 
 
 class DualNetworkINR(_BoundedLogResistivity):
@@ -350,6 +382,7 @@ class DualNetworkINR(_BoundedLogResistivity):
     def __init__(
         self,
         *,
+        spatial_dimensions: int = 2,
         spatial_levels: int = 5,
         temporal_levels: int = 4,
         spatial_hidden_width: int = 64,
@@ -361,6 +394,8 @@ class DualNetworkINR(_BoundedLogResistivity):
         frequency_spacing: str = "log_uniform",
     ) -> None:
         super().__init__()
+        if spatial_dimensions not in (2, 3):
+            raise ValueError("spatial_dimensions must be 2 or 3")
         if (
             min(
                 spatial_hidden_width,
@@ -371,12 +406,13 @@ class DualNetworkINR(_BoundedLogResistivity):
             < 1
         ):
             raise ValueError("hidden widths and layer counts must be positive")
+        self.spatial_dimensions = int(spatial_dimensions)
         self.spatial_hidden_width = int(spatial_hidden_width)
         self.temporal_hidden_width = int(temporal_hidden_width)
         self.spatial_hidden_layers = int(spatial_hidden_layers)
         self.temporal_hidden_layers = int(temporal_hidden_layers)
         self.spatial_encoder = MultiscaleFourierEncoder(
-            2,
+            self.spatial_dimensions,
             spatial_levels=spatial_levels,
             temporal_levels=0,
             frequency_spacing=frequency_spacing,
@@ -402,15 +438,17 @@ class DualNetworkINR(_BoundedLogResistivity):
 
     @property
     def input_dimensions(self) -> int:
-        return 3
+        return self.spatial_dimensions + 1
 
     def encode(self, coordinates: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if coordinates.ndim != 3 or coordinates.shape[-1] != 3:
+        if coordinates.ndim != 3 or coordinates.shape[-1] != self.input_dimensions:
             raise ValueError(
-                "DualNetworkINR coordinates must have shape (time, cell, 3)"
+                f"DualNetworkINR coordinates must have shape (time, cell, {self.input_dimensions})"
             )
-        spatial_coordinates = coordinates[0, :, :2]
-        temporal_coordinates = coordinates[:, 0, 2:3]
+        spatial_coordinates = coordinates[0, :, : self.spatial_dimensions]
+        temporal_coordinates = coordinates[
+            :, 0, self.spatial_dimensions : self.spatial_dimensions + 1
+        ]
         return self.spatial_encoder(spatial_coordinates), self.temporal_encoder(
             temporal_coordinates
         )
@@ -419,7 +457,7 @@ class DualNetworkINR(_BoundedLogResistivity):
         return self.spatial_encoder, self.temporal_encoder
 
     def configuration(self) -> dict[str, object]:
-        return {
+        config: dict[str, object] = {
             "spatial_levels": self.spatial_encoder.spatial_levels,
             "temporal_levels": self.temporal_encoder.temporal_levels,
             "spatial_hidden_width": self.spatial_hidden_width,
@@ -430,6 +468,9 @@ class DualNetworkINR(_BoundedLogResistivity):
             "resistivity_bounds": self.resistivity_bounds,
             "frequency_spacing": self.spatial_encoder.frequency_spacing,
         }
+        if self.spatial_dimensions != 2:
+            config["spatial_dimensions"] = self.spatial_dimensions
+        return config
 
     def forward_encoded(
         self, encoded_coordinates: tuple[torch.Tensor, torch.Tensor]

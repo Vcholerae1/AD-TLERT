@@ -7,8 +7,7 @@ import torch
 from scipy.special import k0 as besselk0
 from scipy.special import k1 as besselk1
 
-from adtlert.fem.triangle import _scalar
-from adtlert.utils.dtypes import FLOAT_DTYPE, NP_FLOAT_DTYPE
+from adtlert.utils.dtypes import FLOAT_DTYPE
 
 _LINEAR_EDGE_MASS = [[2.0, 1.0], [1.0, 2.0]]
 _QUADRATIC_EDGE_MASS = [[4.0, 2.0, -1.0], [2.0, 16.0, 2.0], [-1.0, 2.0, 4.0]]
@@ -17,17 +16,10 @@ _QUADRATIC_EDGE_MASS = [[4.0, 2.0, -1.0], [2.0, 16.0, 2.0], [-1.0, 2.0, 4.0]]
 def _edge_mass(
     lengths, coefficients, reference: list[list[float]], denominator: float
 ) -> torch.Tensor:
-    scalar = _scalar(coefficients)
-    if scalar is not None:
-        local = np.asarray(reference, dtype=NP_FLOAT_DTYPE) / denominator
-        local = (
-            scalar
-            * np.asarray(lengths, dtype=NP_FLOAT_DTYPE)[:, None, None]
-            * local[None, :, :]
-        )
-        return torch.as_tensor(local, dtype=FLOAT_DTYPE)
     lengths = torch.as_tensor(lengths, dtype=FLOAT_DTYPE)
     values = torch.as_tensor(coefficients, dtype=FLOAT_DTYPE)
+    if values.ndim == 0:
+        values = values.expand(lengths.shape)
     if values.shape != lengths.shape:
         raise ValueError(
             "boundary coefficients must be scalar or shape (num_boundary_edges,)"
@@ -78,12 +70,6 @@ def robin_boundary_coefficients(
     ) / r2_abs[stable] * besselk1(r2_abs[stable] * wavenumber)
     geometry[stable] = wavenumber * numerator / denominator[denominator > 1e-12]
 
-    scalar = _scalar(conductivity)
-    if scalar is not None:
-        return torch.as_tensor(
-            np.full(centers.shape[0], scalar, dtype=NP_FLOAT_DTYPE) * geometry,
-            dtype=FLOAT_DTYPE,
-        )
     sigma = torch.as_tensor(conductivity, dtype=FLOAT_DTYPE)
     sigma = sigma.expand(mesh.cell_count) if sigma.ndim == 0 else sigma
     if sigma.shape != (mesh.cell_count,):

@@ -147,9 +147,7 @@ class RegularizationTerms:
                     self.roughness_all, scale, identity=self.spatial.name == "identity"
                 )
             )
-        elif (
-            self.config.regularization > 0.0
-        ):  # IRLS-reweighted robust self.spatial terms, one block per timestep
+        elif self.config.regularization > 0.0:
             per_time = []
             for t in range(self.n_times):
                 domain_t = np.asarray(domain[:, t], dtype=float)

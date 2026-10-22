@@ -14,6 +14,9 @@ from adtlert.mesh import Mesh
 from adtlert.survey import Survey
 from adtlert.utils.dtypes import FLOAT_DTYPE
 
+GIMLI_COORDINATE_TOLERANCE = 1.0e-12
+"""Sensor coordinates are rounded to this grid, as GIMLi does when reading ``.dat`` files."""
+
 
 @dataclass(frozen=True)
 class ParflowGrid:
@@ -176,11 +179,6 @@ class TerrainForwardRunner:
         self.forward.close()
 
 
-# ---------------------------------------------------------------------------
-# ParFlow inputs
-# ---------------------------------------------------------------------------
-
-
 def parse_resistivity_slice_name(path: str | Path) -> tuple[int, int]:
     """Parse ``(y_index, timestep)`` from ``resistivity2d_y{y}_t{step}.npy`` (or ``resistivity_t{step}.npy`` → ``y=-1``)."""
 
@@ -317,11 +315,6 @@ def build_wenner_alpha_measurements(electrode_count: int) -> np.ndarray:
     )
 
 
-# ---------------------------------------------------------------------------
-# ERT .dat files
-# ---------------------------------------------------------------------------
-
-
 def load_terrain_forward_dat(path: str | Path) -> TerrainForwardData:
     """Read the unified ERT ``.dat`` format (sensors, then ``a b m n ... rhoa`` rows, 1-based)."""
 
@@ -352,7 +345,7 @@ def load_terrain_forward_dat(path: str | Path) -> TerrainForwardData:
             for line in lines[cursor : cursor + sensor_count]
         ]
     )
-    sensors = np.rint(sensors / 1.0e-12) * 1.0e-12  # GIMLi's tolerance rounding
+    sensors = np.rint(sensors / GIMLI_COORDINATE_TOLERANCE) * GIMLI_COORDINATE_TOLERANCE
     cursor = skip_comments(cursor + sensor_count)
     if cursor >= len(lines):
         raise ValueError(f"{path}: missing measurement count")
@@ -475,11 +468,6 @@ def save_terrain_forward_npz(
         layer_thickness=case.layer_thickness,
         y_index=np.asarray([case.y_index], dtype=np.int32),
     )
-
-
-# ---------------------------------------------------------------------------
-# Source-position triangle inversion mesh
-# ---------------------------------------------------------------------------
 
 
 def _smooth_triangle_nodes(
@@ -762,11 +750,6 @@ def build_source_position_triangle_inversion_case(
         layer_thickness=layer_thickness,
         y_index=int(y_index),
     )
-
-
-# ---------------------------------------------------------------------------
-# Terrain forward modelling
-# ---------------------------------------------------------------------------
 
 
 def _terrain_resistivity_vector(rho_2d: np.ndarray, grid: ParflowGrid) -> np.ndarray:

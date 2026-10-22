@@ -32,7 +32,12 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 
 @dataclass(frozen=True)
 class InversionConfig:
-    """Controls for nonlinear log-resistivity inversion."""
+    """Controls for nonlinear log-resistivity inversion.
+
+    ``freeze_first_timestep`` keeps the first time-lapse state at its initial value
+    (baseline-anchored inversion). ``sensor_constraint`` weights the soft constraint
+    ``lambda_s * ||H parameter[:, t] - targets[:, t]||^2`` from external observations.
+    """
 
     max_iterations: int = 8
     data_std: float | ArrayLike = 0.05
@@ -75,9 +80,7 @@ class InversionConfig:
     cgls_tolerance: float = 1.0e-8
     include_robin_boundary_derivative: bool = False
     normal_sensitivity: bool = True
-    # Keep the first time-lapse state fixed at its initial value (baseline-anchored inversion).
     freeze_first_timestep: bool = False
-    # Soft constraint from external observations: lambda_s * ||H parameter[:, t] - targets[:, t]||^2.
     sensor_constraint: float = 0.0
     sensor_constraint_operator: ArrayLike | None = field(
         default=None, repr=False, compare=False

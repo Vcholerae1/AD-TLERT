@@ -10,20 +10,20 @@ from collections import OrderedDict
 import numpy as np
 import torch
 
-from adtlert.forward import ERTForward2p5D
+from adtlert.forward import ERTForward2p5D, ERTForward3D
 from adtlert.forward.modeling import log_response_and_jacobian
 from adtlert.utils.dtypes import FLOAT_DTYPE
 
 
 def _forward_log_response(forward, log_resistivity: np.ndarray) -> np.ndarray:
-    if isinstance(forward, ERTForward2p5D):
+    if isinstance(forward, (ERTForward2p5D, ERTForward3D)):
         conductivity = torch.as_tensor(1.0 / np.exp(log_resistivity), dtype=FLOAT_DTYPE)
         return np.log(
             np.asarray(forward.apparent_resistivity_values(conductivity), dtype=float)
         )
     if not hasattr(forward, "forward"):
         raise TypeError(
-            "forward must be ERTForward2p5D, ERTForwardModeling, or expose forward"
+            "forward must be ERTForward2p5D, ERTForward3D, ERTForwardModeling, or expose forward"
         )
     return np.asarray(forward.forward(log_resistivity, log_transform=True), dtype=float)
 
@@ -41,7 +41,7 @@ def _forward_and_jacobian_log(
     forward, log_resistivity: np.ndarray, *, robin: bool = False, normal: bool = True
 ):
     options = {"include_robin_boundary_derivative": robin, "normal_sensitivity": normal}
-    if isinstance(forward, ERTForward2p5D):
+    if isinstance(forward, (ERTForward2p5D, ERTForward3D)):
         return log_response_and_jacobian(
             forward,
             torch.as_tensor(1.0 / np.exp(log_resistivity), dtype=FLOAT_DTYPE),
@@ -49,7 +49,7 @@ def _forward_and_jacobian_log(
         )
     if not hasattr(forward, "forward_and_jacobian"):
         raise TypeError(
-            "forward must be ERTForward2p5D, ERTForwardModeling, or expose forward_and_jacobian"
+            "forward must be ERTForward2p5D, ERTForward3D, ERTForwardModeling, or expose forward_and_jacobian"
         )
     return forward.forward_and_jacobian(log_resistivity, log_transform=True, **options)
 

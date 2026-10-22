@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `ERTForward3D` supports `resistance_series`, `vjp`, `vjp_series`, `jvp`, `normal_vjp`,
+  `normal_vjp_series` and `normal_jvp`, with batched series solves and factorization reuse like
+  the 2.5D operator. `apparent_resistivity_autograd` (also exported as
+  `ERT3DApparentResistivityFunction`/`ERTApparentResistivityFunction`) accepts 3D operators, and
+  the matrix-free single-time, time-lapse, parameterized and INR inversions run on 3D meshes
+  (`MultiscaleINR(input_dimensions=3, spatial_dimensions=3)`, `DualNetworkINR(spatial_dimensions=3)`).
+
+### Breaking
+
+- Building a terrain `ERTForward2p5D` no longer calls `torch.set_default_dtype(torch.float64)`.
+  Terrain solves are still float64; quadratic templates now choose float64 explicitly instead of
+  reading the global default. Scripts that relied on the side effect must set the default
+  dtype themselves.
+- `ERTForward3D`: `jacobian`/`solve_with_jacobian` no longer take `cell_batch_size`;
+  `from_mesh_survey` rejects unknown options instead of ignoring them;
+  `solve_with_jacobian` returns potentials only with `include_fields=True` (default `False`), and
+  `ForwardResponse3D.electrode_potentials`/`node_potentials` are `None` when absent instead of
+  empty arrays.
+- `ERTForward2p5D` rejects non-positive or non-finite conductivity models like `ERTForward3D`.
+
+### Changed
+
+- The 2.5D and 3D operators share one implementation of the field LRU cache and batched series
+  solves (`forward.field_cache`), input validation (`forward.inputs`) and parameter aggregation
+  (`kernels.CellAggregation`). Scalar FEM and boundary coefficients go through the same Torch
+  path as arrays. Results agree with the previous code to within cuDSS run-to-run noise.
+
+- The fused sensitivity kernel is CUDA C++ compiled by NVRTC through `cuda.core` instead of
+  Triton, so Linux and Windows run the same code without a compiler toolchain (PyTorch's
+  Windows wheels do not ship Triton). Results are bitwise identical to the Triton kernel, and
+  steady-state time is within 4% of it (2.5D P1/P2, 3D P1/P2, RTX 4070). The first call
+  compiles in about 0.05 s instead of 2-17 s of autotuning, and the GPU suite runs in 10 s
+  instead of 110 s. `triton` is no longer used.
+- `ERTForward3D.jacobian` uses the fused sensitivity kernel on the GPU instead of a host einsum
+  (98k-cell P2 mesh: 2.2 s -> 0.07 s).
+- `nvidia-cuda-nvrtc-cu12` is a direct dependency (it was already installed through
+  nvmath-python).
+- `ERTForward3D.series_batch_steps` defaults to 1. On a 139k-DOF P2 mesh, eight models per
+  cuDSS batch needed 10.8 GiB and 145 s, compared with 4.1 GiB and 12 s one at a time
+  (forward + adjoint, RTX 4070).
+- `MultiscaleFourierEncoder` and `MultiscaleINR` take `spatial_dimensions`. Without it,
+  `input_dimensions=3` means 2D space-time (as in 0.2.1), so a static 3D network needs
+  `spatial_dimensions=3`. `fit_timelapse_inr` checks that the last input is time.
+
 ## 0.2.1 - 2026-10-04
 
 ### Added

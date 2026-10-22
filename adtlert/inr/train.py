@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import torch
@@ -27,7 +27,13 @@ from adtlert.inversion.regularization import (
 )
 
 ProgressCallback = Callable[[dict[str, Any]], None]
-PenaltyCallback = Callable[[torch.Tensor, int], torch.Tensor]
+
+
+class PenaltyCallback(Protocol):
+    def __call__(self, log_resistivity: torch.Tensor, iteration: int) -> torch.Tensor:
+        """A term added to the INR objective."""
+        ...
+
 
 _OPTIMIZERS = {
     "adam": torch.optim.Adam,
@@ -149,7 +155,6 @@ class INRConfig:
     progress_callback: ProgressCallback | None = field(
         default=None, repr=False, compare=False
     )
-    # Added to the objective; receives the network output (log resistivity) and the iteration.
     extra_penalty: PenaltyCallback | None = field(
         default=None, repr=False, compare=False
     )
@@ -467,8 +472,6 @@ def _prepare(
         )
 
     schedule = _Schedule(n_times, config, device)
-    # The VJP reuses forward fields from the operator's LRU cache; one smaller than a
-    # forward/VJP batch evicts them and silently re-solves every forward during backward.
     entries = getattr(forward_operator(forward), "normal_field_cache_max_entries", None)
     if entries is not None and int(entries) < schedule.batch_size:
         raise ValueError(
@@ -548,9 +551,8 @@ def _fit(
                 and iteration > 0
                 and iteration % config.snapshot_interval == 0
             )
-            full = (
-                None  # (chi2, rms) over every timestep, when evaluated this iteration
-            )
+            full_chi2: float | None = None
+            full_rms: float | None = None
             if schedule.windowed and (
                 iteration in (0, config.max_iterations)
                 or iteration % config.windows.full_evaluation_interval == 0
@@ -566,9 +568,11 @@ def _fit(
                         problem.std,
                         torch.ones_like(schedule.weights),
                     )
-                full = tuple(torch.stack(full_misfit).tolist())
+                full_chi2, full_rms = torch.stack(full_misfit).tolist()
                 record.timesteps["forward"] += problem.n_times
-                record.remember(iteration, full[0], log_model, full_prediction, network)
+                record.remember(
+                    iteration, full_chi2, log_model, full_prediction, network
+                )
 
             window = schedule.window(iteration)
             rows = schedule.rows(window)
@@ -593,10 +597,9 @@ def _fit(
         for name, value in zip(record.series, values, strict=True):
             record.series[name].append(value)
         if not schedule.windowed:
-            full = (chi2, rms)
+            full_chi2, full_rms = chi2, rms
             record.remember(iteration, chi2, log_model, prediction, network)
 
-        full_chi2, full_rms = full or (None, None)
         target_reached = (
             config.target_chi2 is not None
             and full_chi2 is not None
@@ -741,8 +744,11 @@ def fit_timelapse_inr(
     The network, its global time coordinates, and the optimizer state persist for the run.
     """
 
-    if network.input_dimensions != 3:
-        raise ValueError("time-lapse INR requires a network with input_dimensions=3")
+    if network.input_dimensions != network.spatial_dimensions + 1:
+        raise ValueError(
+            "time-lapse INR requires a network whose last input is time "
+            "(input_dimensions=3 for 2D, 4 for 3D)"
+        )
     return _fit(
         forward=forward,
         network=network,

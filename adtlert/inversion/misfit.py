@@ -205,8 +205,8 @@ def available_data_misfits() -> tuple[str, ...]:
 def build_data_misfit(name: str | DataMisfit) -> DataMisfit:
     """Resolve a data-misfit object from a registered name."""
 
-    if hasattr(name, "residual") and hasattr(name, "linearized_rhs"):
-        return name  # type: ignore[return-value]
+    if not isinstance(name, str):
+        return name
     try:
         return _DATA_MISFITS[str(name).strip().lower().replace("-", "_")]
     except KeyError as exc:

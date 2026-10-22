@@ -13,20 +13,22 @@ from typing import Any
 import numpy as np
 import torch
 
-from adtlert.forward import ERTForward2p5D, ERTForwardModeling
+from adtlert.forward import ERTForward2p5D, ERTForward3D, ERTForwardModeling
 from adtlert.forward.autograd import apparent_resistivity_autograd
 from adtlert.inversion.parameterized import ParameterizedERTForward2p5D
 
 
-def forward_operator(forward: Any) -> ERTForward2p5D:
-    """Resolve the native 2.5D operator used by an inversion facade."""
+def forward_operator(forward: Any) -> ERTForward2p5D | ERTForward3D:
+    """Resolve the native 2.5D or 3D operator used by an inversion facade."""
 
-    if isinstance(forward, ERTForward2p5D):
+    if isinstance(forward, (ERTForward2p5D, ERTForward3D)):
         return forward
     operator = getattr(forward, "forward_operator", None)
-    if isinstance(operator, ERTForward2p5D):
+    if isinstance(operator, (ERTForward2p5D, ERTForward3D)):
         return operator
-    raise TypeError("INR physics requires an ADTLERT ERTForward2p5D operator")
+    raise TypeError(
+        "INR physics requires an ADTLERT ERTForward2p5D or ERTForward3D operator"
+    )
 
 
 def _conductivity(forward: Any, log_resistivity: torch.Tensor) -> torch.Tensor:
@@ -34,10 +36,10 @@ def _conductivity(forward: Any, log_resistivity: torch.Tensor) -> torch.Tensor:
 
     if isinstance(forward, ParameterizedERTForward2p5D):
         return torch.exp(-forward.log_model_to_full(log_resistivity))
-    if isinstance(forward, (ERTForward2p5D, ERTForwardModeling)):
+    if isinstance(forward, (ERTForward2p5D, ERTForward3D, ERTForwardModeling)):
         return torch.exp(-log_resistivity.to(torch.float64))
     raise TypeError(
-        "INR physics requires ERTForward2p5D, ERTForwardModeling, or ParameterizedERTForward2p5D"
+        "INR physics requires ERTForward2p5D, ERTForward3D, ERTForwardModeling, or ParameterizedERTForward2p5D"
     )
 
 

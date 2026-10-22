@@ -15,7 +15,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
-from collections import OrderedDict
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,11 +30,26 @@ from adtlert.forward.discretization import (
     build_discretization,
     exact_node_indices,
 )
+from adtlert.forward.field_cache import (
+    FieldCache,
+    factorization_name,
+    newest_batches_first,
+)
+from adtlert.forward.inputs import (
+    cell_vector,
+    check_finite,
+    conductivity_model,
+    conductivity_series,
+    cotangent_series,
+    measurement_vector,
+    option,
+    parameter_targets,
+)
 from adtlert.forward.integration import (
     build_inverse_cosine_weights,
     survey_wavenumber_bounds,
 )
-from adtlert.forward.kernels import GroupSum, normal_sensitivity
+from adtlert.forward.kernels import CellAggregation, GroupSum, normal_sensitivity
 from adtlert.mesh import Mesh
 from adtlert.survey import Survey
 from adtlert.utils.dtypes import FLOAT_DTYPE, NP_FLOAT_DTYPE
@@ -42,6 +57,10 @@ from adtlert.utils.dtypes import FLOAT_DTYPE, NP_FLOAT_DTYPE
 Tensor = torch.Tensor
 
 _TERRAIN_CACHE_VERSION = "terrain_auxiliary_v2"
+
+PYGIMLI_ELECTRODE_RADIUS_FRACTION = 1.0 / 6.0
+"""pyGIMLi evaluates the 2.5D primary field at an electrode node with ``K0`` at this
+fraction of the distance to the nearest neighboring node."""
 
 
 @dataclass(frozen=True)
@@ -54,41 +73,6 @@ class ForwardResponse:
     integrated_potentials: Tensor
     wavenumbers: Tensor
     weights: Tensor
-
-
-# ---------------------------------------------------------------------------
-# Small helpers
-# ---------------------------------------------------------------------------
-
-
-def _choice(value: str, choices: tuple[str, ...], name: str) -> str:
-    normalized = str(value).strip().lower()
-    if normalized not in choices:
-        raise ValueError(f"{name} must be one of: {', '.join(sorted(choices))}")
-    return normalized
-
-
-def _cell_vector(values, count: int) -> Tensor:
-    array = torch.as_tensor(values, dtype=FLOAT_DTYPE)
-    if array.ndim == 0:
-        return array.expand(count)
-    if array.shape != (count,):
-        raise ValueError(f"conductivity must be scalar or shape ({count},)")
-    return array
-
-
-def _measurement_vector(values, count: int, dtype) -> Tensor:
-    array = torch.as_tensor(values, dtype=FLOAT_DTYPE)
-    if array.ndim == 0:
-        array = array.expand(count)
-    elif array.shape != (count,):
-        raise ValueError(f"cotangent must be scalar or shape ({count},)")
-    return array.to(dtype)
-
-
-def _check_finite(values: Tensor, context: str) -> None:
-    if not bool(torch.isfinite(values).all()):
-        raise FloatingPointError(f"{context} produced non-finite values")
 
 
 def _halfspace_primary(
@@ -144,9 +128,6 @@ class ERTForward2p5D:
     _solver: BatchedSolver = field(
         default_factory=BatchedSolver, init=False, repr=False
     )
-    _field_cache: OrderedDict = field(
-        default_factory=OrderedDict, init=False, repr=False
-    )
 
     @classmethod
     def from_mesh_survey(
@@ -165,7 +146,7 @@ class ERTForward2p5D:
             raise RuntimeError(
                 "ADTLERT requires an NVIDIA GPU with CUDA (cuDSS sparse solves)"
             )
-        gf_mode = _choice(
+        gf_mode = option(
             topographic_geometric_factor_mode,
             ("analytic", "numerical"),
             "topographic_geometric_factor_mode",
@@ -189,8 +170,6 @@ class ERTForward2p5D:
         terrain = not mesh.is_flat_surface
         potential = geometric = None
         if terrain:
-            # Terrain solves run in float64; historically this also switches Torch's default dtype.
-            torch.set_default_dtype(torch.float64)
             discretization = build(
                 "primary", auxiliary=True, refine=numerical_h2_refined
             )
@@ -236,8 +215,6 @@ class ERTForward2p5D:
             series_batch_steps=int(series_batch_steps),
         )
 
-    # -- configuration ------------------------------------------------------
-
     @property
     def use_numerical_primary(self) -> bool:
         return self.primary_potential_discretization is not None
@@ -273,8 +250,6 @@ class ERTForward2p5D:
             "abmn", lambda: self.survey.measurements.long(), torch.device(device)
         )
         return quads[:, 0], quads[:, 1], quads[:, 2], quads[:, 3]
-
-    # -- assembly -----------------------------------------------------------
 
     def _volume_templates(
         self, d: Discretization, device: torch.device | str = "cpu"
@@ -341,9 +316,16 @@ class ERTForward2p5D:
         )
 
     def _sigma(self, conductivity) -> Tensor:
-        return _cell_vector(conductivity, self.mesh.cell_count)
+        return conductivity_model(conductivity, self.mesh.cell_count)
 
-    # -- linear solves ------------------------------------------------------
+    def _cell_direction(self, delta_conductivity) -> Tensor:
+        return cell_vector(delta_conductivity, self.mesh.cell_count)
+
+    @property
+    def _field_cache(self) -> FieldCache[_Fields]:
+        return self._cached(
+            "field_cache", lambda: FieldCache(self.normal_field_cache_max_entries)
+        )
 
     def _solve(
         self,
@@ -365,8 +347,6 @@ class ERTForward2p5D:
             refactorize=refactorize,
             factorization=factorization,
         )
-
-    # -- primary fields and terrain caches ----------------------------------
 
     def _disk_path(self, name: str, d: Discretization) -> Path | None:
         if self.terrain_cache_dir is None:
@@ -407,16 +387,9 @@ class ERTForward2p5D:
                 self.survey.electrode_count,
                 d.dof_count,
             )
-            if path is not None and path.exists():
-                try:
-                    with np.load(path, allow_pickle=False) as payload:
-                        cached = payload["value"]
-                    if cached.shape == shape:
-                        return torch.as_tensor(cached, dtype=self.dtype)
-                except (
-                    Exception
-                ):  # corrupt or partial cache files are simply recomputed
-                    pass
+            cached = None if path is None else _read_terrain_cache(path, shape)
+            if cached is not None:
+                return torch.as_tensor(cached, dtype=self.dtype)
             value = compute().cpu()
             if path is not None:
                 try:
@@ -484,14 +457,15 @@ class ERTForward2p5D:
         for w, wavenumber in enumerate(self.wavenumbers.double().tolist()):
             for s, (source, node) in enumerate(zip(positions, node_ids, strict=True)):
                 primary[w, s] = _halfspace_primary(nodes, source, wavenumber, surface)
-                if (
-                    node >= 0
-                ):  # pyGIMLi's singular value: K0 at one sixth of the nearest-neighbor distance
+                if node >= 0:
                     radius = radii[node]
                     primary[w, s, node] = (
                         0.0
                         if radius is None
-                        else besselk0(radius / 6.0 * wavenumber) / np.pi
+                        else besselk0(
+                            radius * PYGIMLI_ELECTRODE_RADIUS_FRACTION * wavenumber
+                        )
+                        / np.pi
                     )
         return torch.as_tensor(primary, dtype=FLOAT_DTYPE)
 
@@ -538,36 +512,10 @@ class ERTForward2p5D:
         )
         return torch.where(node_ids >= 0, node_rho, 1.0 / sigma[cell_ids])
 
-    # -- field solves -------------------------------------------------------
-
-    def _field_cache_key(self, sigma: Tensor) -> bytes | None:
-        if self.normal_field_cache_max_entries < 1:
-            return None
-        host = np.ascontiguousarray(sigma.detach().cpu().numpy())
-        return (
-            hashlib.blake2b(host.view(np.uint8), digest_size=16).digest()
-            + host.dtype.str.encode()
-        )
-
     def _fields(self, conductivity) -> _Fields:
         """Total fields for a conductivity model, served from an LRU cache when possible."""
 
         return self._fields_series(self._sigma(conductivity)[None])[0][0]
-
-    def _step_batches(self, steps) -> list[list[int]]:
-        """Split steps into near-equal batches of at most ``series_batch_steps``."""
-
-        steps = list(steps)
-        count = -(-len(steps) // self.series_batch_steps)
-        return (
-            [batch.tolist() for batch in np.array_split(steps, count)] if steps else []
-        )
-
-    @staticmethod
-    def _factorization(keys) -> tuple | None:
-        """Name of the operators of a batch of models (``None`` when the field cache is off)."""
-
-        return None if any(key is None for key in keys) else tuple(keys)
 
     def _fields_series(
         self, models: Tensor
@@ -579,59 +527,37 @@ class ERTForward2p5D:
         adjoint solve of the same batch (:meth:`vjp_series`) reuses it.
         """
 
-        keys = [self._field_cache_key(sigma) for sigma in models]
-        fields: list[_Fields | None] = []
-        for key in keys:
-            if key is not None:
-                hit = key in self._field_cache
-                counter = "hits" if hit else "misses"
-                self._cache[counter] = self._cache.get(counter, 0) + 1
-                if hit:
-                    self._field_cache.move_to_end(key)
-            fields.append(self._field_cache.get(key) if key is not None else None)
+        return self._field_cache.solve_series(
+            models, self.series_batch_steps, self._solve_fields
+        )
 
+    def _solve_fields(self, sigmas: Tensor, factorization) -> list[_Fields]:
         d = self.discretization
         count = self.wavenumbers.shape[0]
-        missing = [step for step, found in enumerate(fields) if found is None]
-        for batch in self._step_batches(missing):
-            sigmas = models[batch].to(_CUDA)
-            values = [self._assemble(d, sigma) for sigma in sigmas]
-            primaries = [
-                self._unit_primary() * self._source_resistivities(sigma)[None, :, None]
-                for sigma in sigmas
-            ]
-            rhs = [
-                self._reference_rhs() - d.pattern.matvec(value, primary)
-                for value, primary in zip(values, primaries, strict=True)
-            ]
-            secondary = self._solve(
-                d,
-                torch.cat(values),
-                torch.cat(rhs),
-                factorization=self._factorization([keys[step] for step in batch]),
-            )
-            for i, step in enumerate(batch):
-                total = secondary[i * count : (i + 1) * count] + primaries[i]
-                _check_finite(total, "total fields")
-                fields[step] = _Fields(values[i], total)
-                if keys[step] is not None:
-                    self._field_cache[keys[step]] = fields[step]
-                    self._field_cache.move_to_end(keys[step])
-            while len(self._field_cache) > self.normal_field_cache_max_entries:
-                self._field_cache.popitem(last=False)
-        return fields, keys
+        sigmas = sigmas.to(_CUDA)
+        values = [self._assemble(d, sigma) for sigma in sigmas]
+        primaries = [
+            self._unit_primary() * self._source_resistivities(sigma)[None, :, None]
+            for sigma in sigmas
+        ]
+        rhs = [
+            self._reference_rhs() - d.pattern.matvec(value, primary)
+            for value, primary in zip(values, primaries, strict=True)
+        ]
+        secondary = self._solve(
+            d, torch.cat(values), torch.cat(rhs), factorization=factorization
+        )
+        fields = []
+        for i, (value, primary) in enumerate(zip(values, primaries, strict=True)):
+            total = secondary[i * count : (i + 1) * count] + primary
+            check_finite(total, "total fields")
+            fields.append(_Fields(value, total))
+        return fields
 
     def normal_field_cache_info(self) -> dict[str, int]:
         """Return LRU field-cache counters for profiling and regression tests."""
 
-        return {
-            "entries": len(self._field_cache),
-            "max_entries": self.normal_field_cache_max_entries,
-            "hits": self._cache.get("hits", 0),
-            "misses": self._cache.get("misses", 0),
-        }
-
-    # -- measurement maps ---------------------------------------------------
+        return self._field_cache.info()
 
     def _integrate(self, fields: Tensor) -> Tensor:
         return torch.tensordot(
@@ -761,10 +687,8 @@ class ERTForward2p5D:
     def _measure(self, conductivity) -> tuple[_Fields, Tensor, Tensor, Tensor]:
         fields = self._fields(conductivity)
         integrated = self._integrate(fields.total)
-        _check_finite(integrated, "integrated potentials")
+        check_finite(integrated, "integrated potentials")
         return fields, integrated, *self._normal_reciprocal(integrated)
-
-    # -- public forward API -------------------------------------------------
 
     def solve(self, conductivity, currents=1.0) -> ForwardResponse:
         """Solve the multi-wavenumber 2.5D forward problem for a conductivity model."""
@@ -796,7 +720,7 @@ class ERTForward2p5D:
 
         fields, _ = self._fields_series(self._series(conductivities))
         integrated = torch.stack([self._integrate(f.total) for f in fields])
-        _check_finite(integrated, "integrated potentials")
+        check_finite(integrated, "integrated potentials")
         return self._combine(*self._normal_reciprocal(integrated)).cpu()
 
     def apparent_resistivity_series(self, conductivities, currents=1.0) -> Tensor:
@@ -810,12 +734,7 @@ class ERTForward2p5D:
         )
 
     def _series(self, conductivities) -> Tensor:
-        models = torch.as_tensor(conductivities, dtype=FLOAT_DTYPE)
-        if models.ndim != 2 or models.shape[1] != self.mesh.cell_count:
-            raise ValueError(
-                f"conductivities must have shape (n_steps, {self.mesh.cell_count})"
-            )
-        return models
+        return conductivity_series(conductivities, self.mesh.cell_count)
 
     def prepare(self, conductivity=None, *, include_solver_state: bool = True) -> None:
         """Populate geometry, primary-field, and (optionally) solver/field caches before timed solves."""
@@ -831,59 +750,27 @@ class ERTForward2p5D:
                 else conductivity
             )
 
-    # -- derivatives --------------------------------------------------------
+    def _columns(
+        self, cell_parameter_ids=None, parameter_count=None
+    ) -> CellAggregation:
+        """Reduction of discretization-cell values into mesh cells or inversion parameters."""
 
-    def _target_cells(
-        self, cell_parameter_ids, parameter_count
-    ) -> tuple[np.ndarray, int]:
-        """Map discretization cells to output columns (forward cells or inversion parameters)."""
-
-        parents = self.discretization.parent_cell_ids.numpy()
-        if cell_parameter_ids is None:
-            if parameter_count is not None:
-                raise ValueError("parameter_count requires cell_parameter_ids")
-            return parents, self.mesh.cell_count
-        ids = np.asarray(
-            cell_parameter_ids.cpu()
-            if isinstance(cell_parameter_ids, Tensor)
-            else cell_parameter_ids
+        ids, count = parameter_targets(
+            cell_parameter_ids, parameter_count, self.mesh.cell_count
         )
-        ids = ids.astype(np.int64).reshape(-1)
-        if ids.shape != (self.mesh.cell_count,):
-            raise ValueError(
-                f"cell_parameter_ids must have shape ({self.mesh.cell_count},)"
-            )
-        if np.any(ids < -1) or not np.any(ids >= 0):
-            raise ValueError(
-                "cell_parameter_ids may only contain -1 or non-negative ids, with at least one active"
-            )
-        count = int(ids.max()) + 1 if parameter_count is None else int(parameter_count)
-        if count <= int(ids.max()):
-            raise ValueError(
-                "parameter_count is smaller than the largest cell parameter id"
-            )
-        return ids[parents], count
-
-    def _aggregation(
-        self, targets: np.ndarray, count: int
-    ) -> tuple[Tensor | None, GroupSum]:
-        """Active discretization cells (``None`` when all are) and their reduction into ``count`` columns."""
-
+        targets = ids[self.discretization.parent_cell_ids.numpy()]
         digest = hashlib.blake2b(targets.tobytes(), digest_size=16).digest()
-
-        def build():
-            active = np.flatnonzero(targets >= 0)
-            cells = (
-                None
-                if active.size == targets.size
-                else torch.as_tensor(active, device=_CUDA)
-            )
-            return cells, GroupSum(targets[active], count, _CUDA)
-
-        return self._cached(("aggregation", digest, count), build)
+        return self._cached(
+            ("columns", digest, count), lambda: CellAggregation(targets, count, _CUDA)
+        )
 
     def _cell_gradient(
-        self, phi: Tensor, lam: Tensor, *, robin: bool = True, targets=None, count=None
+        self,
+        phi: Tensor,
+        lam: Tensor,
+        *,
+        robin: bool = True,
+        columns: CellAggregation | None = None,
     ) -> Tensor:
         """``-sum_{w,s} lam_ws^T dA_w/dsigma phi_ws`` per output column; ``lam`` may lead with a batch axis.
 
@@ -893,16 +780,12 @@ class ERTForward2p5D:
         """
 
         d = self.discretization
-        if targets is None:
-            targets, count = d.parent_cell_ids.numpy(), self.mesh.cell_count
-        active, reduce = self._aggregation(targets, count)
+        columns = self._columns() if columns is None else columns
         phi, lam = phi.to(_CUDA), lam.to(_CUDA)
         if lam.ndim == 4:
             return torch.stack(
                 [
-                    self._cell_gradient(
-                        phi, block, robin=robin, targets=targets, count=count
-                    )
+                    self._cell_gradient(phi, block, robin=robin, columns=columns)
                     for block in lam.unbind(1)
                 ]
             )
@@ -941,12 +824,12 @@ class ERTForward2p5D:
                 lambda: GroupSum(d.boundary_cells.numpy(), d.cell_dofs.shape[0], _CUDA),
             )
             gradient = gradient + to_cells(boundary)
-        return reduce(gradient if active is None else gradient[active]).cpu()
+        return columns(gradient).cpu()
 
     def vjp(self, conductivity, cotangent) -> Tensor:
         """Apply the transposed resistance Jacobian to a measurement cotangent."""
 
-        cotangent = _measurement_vector(
+        cotangent = measurement_vector(
             cotangent, self.survey.measurement_count, FLOAT_DTYPE
         )
         return self.vjp_series(self._sigma(conductivity)[None], cotangent[None])[0]
@@ -960,16 +843,13 @@ class ERTForward2p5D:
         """
 
         models = self._series(conductivities)
-        cotangents = torch.as_tensor(cotangents, dtype=FLOAT_DTYPE)
-        if tuple(cotangents.shape) != (models.shape[0], self.survey.measurement_count):
-            raise ValueError(
-                f"cotangents must have shape {(models.shape[0], self.survey.measurement_count)}"
-            )
+        cotangents = cotangent_series(
+            cotangents, models.shape[0], self.survey.measurement_count
+        )
         fields, keys = self._fields_series(models)
         d, count = self.discretization, self.wavenumbers.shape[0]
-        gradients: list[Tensor | None] = [None] * len(fields)
-        # The last forward batch's factorization is the one still held: solve it first.
-        for batch in reversed(self._step_batches(range(len(fields)))):
+        gradients: dict[int, Tensor] = {}
+        for batch in newest_batches_first(len(fields), self.series_batch_steps):
             totals = [fields[step].total for step in batch]
             normal, reciprocal = self._normal_reciprocal(
                 torch.stack([self._integrate(total) for total in totals])
@@ -981,15 +861,15 @@ class ERTForward2p5D:
                 d,
                 torch.cat([fields[step].values for step in batch]),
                 torch.cat([self._adjoint_rhs(pair[None]) for pair in pairs]),
-                factorization=self._factorization([keys[step] for step in batch]),
+                factorization=factorization_name([keys[step] for step in batch]),
             )
-            _check_finite(lam, "adjoint fields")
+            check_finite(lam, "adjoint fields")
             for i, step in enumerate(batch):
                 gradients[step] = self._cell_gradient(
                     totals[i], lam[i * count : (i + 1) * count]
                 )
-        gradient = torch.stack(gradients)
-        _check_finite(gradient, "conductivity gradient")
+        gradient = torch.stack([gradients[step] for step in range(len(fields))])
+        check_finite(gradient, "conductivity gradient")
         return gradient
 
     def jvp(self, conductivity, delta_conductivity) -> Tensor:
@@ -998,13 +878,13 @@ class ERTForward2p5D:
         d = self.discretization
         fields, _, normal, reciprocal = self._measure(conductivity)
         tangent_rhs = -d.pattern.matvec(
-            self._assemble(d, self._sigma(delta_conductivity)), fields.total
+            self._assemble(d, self._cell_direction(delta_conductivity)), fields.total
         )
-        key = self._field_cache_key(self._sigma(conductivity))
+        key = self._field_cache.key(self._sigma(conductivity))
         delta = self._solve(
-            d, fields.values, tangent_rhs, factorization=self._factorization([key])
+            d, fields.values, tangent_rhs, factorization=factorization_name([key])
         )
-        _check_finite(delta, "tangent fields")
+        check_finite(delta, "tangent fields")
         delta_normal, delta_reciprocal = self._normal_reciprocal(self._integrate(delta))
         sign, scale = self._combine_scale(normal, reciprocal)
         return (
@@ -1017,13 +897,13 @@ class ERTForward2p5D:
         """Transpose of the normal-quadrupole sensitivity (see :meth:`normal_jvp`).
 
         ``cell_parameter_ids`` fuses the aggregation from forward cells into inversion
-        parameters; cells with id ``-1`` are ignored.
+        parameters; cells with id ``-1`` are dropped.
         """
 
-        targets, count = self._target_cells(cell_parameter_ids, parameter_count)
+        columns = self._columns(cell_parameter_ids, parameter_count)
         device = self._device
         phi = self._fields(conductivity).on(device)
-        weights = _measurement_vector(
+        weights = measurement_vector(
             cotangent, self.survey.measurement_count, phi.dtype
         )
         a, b, m, n = self._abmn()
@@ -1034,10 +914,8 @@ class ERTForward2p5D:
         ).reshape(sources, sources).to(device)  # fmt: skip
         current = torch.einsum("ef,wfn->wen", pairs, phi)
         receiver = self.weights.to(device, phi.dtype)[:, None, None] * phi
-        gradient = self._cell_gradient(
-            current, receiver, robin=False, targets=targets, count=count
-        )
-        _check_finite(gradient, "normal sensitivity vjp")
+        gradient = self._cell_gradient(current, receiver, robin=False, columns=columns)
+        check_finite(gradient, "normal sensitivity vjp")
         return gradient
 
     def normal_jvp(self, conductivity, delta_conductivity) -> Tensor:
@@ -1049,7 +927,7 @@ class ERTForward2p5D:
 
         d, device = self.discretization, self._device
         phi = self._fields(conductivity).on(device)
-        direction = self._sigma(delta_conductivity).to(device, phi.dtype)[
+        direction = self._cell_direction(delta_conductivity).to(device, phi.dtype)[
             d.parent_cell_ids.to(device)
         ]
         volume = direction[None, :, None, None] * self._volume_templates(d, device)
@@ -1067,7 +945,7 @@ class ERTForward2p5D:
         )
         a, b, m, n = self._abmn(device)
         result = (gram[m, a] - gram[m, b] - gram[n, a] + gram[n, b]).cpu()
-        _check_finite(result, "normal sensitivity jvp")
+        check_finite(result, "normal sensitivity jvp")
         return result
 
     def normal_vjp_series(
@@ -1081,11 +959,9 @@ class ERTForward2p5D:
         """Apply :meth:`normal_vjp` to every step of a model series."""
 
         models = self._series(conductivities)
-        cotangents = torch.as_tensor(cotangents, dtype=FLOAT_DTYPE)
-        if tuple(cotangents.shape) != (models.shape[0], self.survey.measurement_count):
-            raise ValueError(
-                f"cotangents must have shape {(models.shape[0], self.survey.measurement_count)}"
-            )
+        cotangents = cotangent_series(
+            cotangents, models.shape[0], self.survey.measurement_count
+        )
         return torch.stack(
             [
                 self.normal_vjp(
@@ -1097,8 +973,6 @@ class ERTForward2p5D:
                 for model, cotangent in zip(models, cotangents, strict=True)
             ]
         )
-
-    # -- explicit Jacobians -------------------------------------------------
 
     def _batch_size(self, batch_size: int | None, direct: bool) -> int:
         if batch_size is None:
@@ -1114,22 +988,22 @@ class ERTForward2p5D:
         return int(batch_size)
 
     def _normal_jacobian(
-        self, fields: _Fields, batch_size: int, targets: np.ndarray, count: int
+        self, fields: _Fields, batch_size: int, columns: CellAggregation
     ) -> Tensor:
-        """Direct normal sensitivity ``-sum_w w_w (u_M - u_N)^T dA_w (u_A - u_B)`` (fused Triton kernel)."""
+        """Direct normal sensitivity ``-sum_w w_w (u_M - u_N)^T dA_w (u_A - u_B)`` (fused CUDA kernel)."""
 
         d = self.discretization
-        active, reduce = self._aggregation(targets, count)
         templates = self.weights.to(_CUDA, self.dtype)[
             :, None, None, None
         ] * self._volume_templates(d, _CUDA)
-        cell_dofs = self._on(f"{d.name}.cell_dofs", lambda: d.cell_dofs, _CUDA)
-        if active is not None:
-            templates, cell_dofs = templates[:, active], cell_dofs[active]
+        templates = columns.select(templates, 1)
+        cell_dofs = columns.select(
+            self._on(f"{d.name}.cell_dofs", lambda: d.cell_dofs, _CUDA), 0
+        )
         phi = fields.on(_CUDA)
         a, b, m, n = self._abmn(_CUDA)
         rows = [
-            reduce(
+            columns.columns(
                 normal_sensitivity(
                     phi, a[chunk], b[chunk], m[chunk], n[chunk], cell_dofs, templates
                 )
@@ -1204,10 +1078,10 @@ class ERTForward2p5D:
         direct = normal_sensitivity and not include_robin_boundary_derivative
         batch_size = self._batch_size(batch_size, direct)
         if direct:
-            targets, count = self._target_cells(
+            columns = self._columns(
                 jacobian_cell_parameter_ids, jacobian_parameter_count
             )
-            jacobian = self._normal_jacobian(fields, batch_size, targets, count)
+            jacobian = self._normal_jacobian(fields, batch_size, columns)
         else:
             jacobian = self._adjoint_jacobian(
                 fields,
@@ -1242,8 +1116,6 @@ class ERTForward2p5D:
         basis = torch.eye(self.mesh.cell_count, dtype=FLOAT_DTYPE)
         return torch.stack([self.jvp(conductivity, column) for column in basis], dim=1)
 
-    # -- resources ----------------------------------------------------------
-
     def close(self) -> None:
         """Drop cached fields and release cuDSS solver resources."""
 
@@ -1251,10 +1123,19 @@ class ERTForward2p5D:
         self._solver.close()
 
     def __del__(self) -> None:
-        with contextlib.suppress(
-            Exception
-        ):  # interpreter shutdown may have torn things down
+        with contextlib.suppress(Exception):
             self.close()
+
+
+def _read_terrain_cache(path: Path, shape: tuple[int, ...]) -> np.ndarray | None:
+    """The cached array, or ``None`` when it is missing, unreadable or of another shape."""
+
+    try:
+        with np.load(path, allow_pickle=False) as payload:
+            cached = payload["value"]
+    except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile):
+        return None
+    return cached if cached.shape == shape else None
 
 
 def _terrain_cache_dir(cache_dir: str | Path | None) -> Path | None:

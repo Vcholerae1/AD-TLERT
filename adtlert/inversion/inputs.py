@@ -161,9 +161,7 @@ def _config_for_time_window(
             updates[name] = array[:, start:end].copy()
         elif array.ndim == 1 and array.shape[0] == n_times:
             updates[name] = array[start:end].copy()
-    if (
-        config.freeze_first_timestep
-    ):  # only the window containing the global first timestep is anchored
+    if config.freeze_first_timestep:
         updates["freeze_first_timestep"] = start == 0
     return replace(config, **updates) if updates else config
 

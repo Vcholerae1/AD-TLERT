@@ -27,8 +27,6 @@ from adtlert.inr.train import _huber_mean, _misfit, _Schedule
 from adtlert.inversion import ParameterizedERTForward2p5D
 from tests.conftest import quad_case
 
-# -- networks and coordinates (no GPU needed) ------------------------------------------------------
-
 
 def test_frequency_banks():
     octave = fourier_frequency_bank(4, "octave")
@@ -40,6 +38,21 @@ def test_frequency_banks():
     assert fourier_frequency_bank(0).numel() == 0
     with pytest.raises(ValueError):
         fourier_frequency_bank(2, "nope")
+
+
+def test_encoder_spatial_dimensions_are_explicit():
+    assert MultiscaleFourierEncoder(3).spatial_dimensions == 2  # (x, z, t)
+    static = MultiscaleFourierEncoder(3, spatial_levels=4, spatial_dimensions=3)
+    assert static.temporal_levels == 0 and static.output_dimensions == 3 + 24
+    assert MultiscaleFourierEncoder(4, spatial_levels=4).output_dimensions == 4 + 24 + 6
+    for bad in ((2, 3), (4, 4), (3, 1)):
+        with pytest.raises(ValueError, match="spatial_dimensions"):
+            MultiscaleFourierEncoder(bad[0], spatial_dimensions=bad[1])
+    network = MultiscaleINR(input_dimensions=3, spatial_dimensions=3)
+    rebuilt = MultiscaleINR.from_configuration(network.configuration())
+    assert rebuilt.spatial_dimensions == 3 and rebuilt.encoder.temporal_levels == 0
+    with pytest.raises(ValueError, match="time last"):
+        JointSpatioTemporalINR(input_dimensions=3, spatial_dimensions=3)
 
 
 def test_encoder_features_and_progressive_levels():
@@ -130,9 +143,6 @@ def test_cell_centers():
     case = quad_case(0.0, nx=4, nz=3, n_electrodes=4)
     centers = cell_centers(case.mesh)
     assert centers.shape == (case.mesh.cell_count, 2) and centers.dtype == np.float32
-
-
-# -- training pieces ---------------------------------------------------------------------------------
 
 
 def test_window_schedule_covers_every_step_and_alternates_direction():
