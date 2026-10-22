@@ -51,7 +51,10 @@ cache keys: the operators are symmetric, so the adjoint solve of the same batch 
   order). cuDSS is not by default; see the changelog.
 - ABMN index -1 (`REMOTE_ELECTRODE`) is an electrode at infinity. Operators map it to one extra
   zero-potential slot after the last electrode (`Survey.measurement_slots`), and the
-  sensitivity kernel reads that row index as zero; 2.5D terrain rejects it.
+  sensitivity kernel reads that row index as zero.
+- Outer boundaries: the ground surface is natural; sides and bottom carry the far-field mixed
+  (Robin) condition, in 2.5D (flat and terrain, coefficients per wavenumber from the electrode
+  centroid and its image at the mean surface elevation) and in 3D.
 - Cell models are ordered like the mesh cells; time-lapse models are `(n_cells, n_times)`, data
   are `(n_times, n_measurements)`.
 

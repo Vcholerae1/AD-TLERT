@@ -43,6 +43,15 @@ def flat():
     )
 
 
+def terrain():
+    case = quad_case(0.03)
+    survey = with_poles(case.survey)
+    forward = ERTForward2p5D.from_mesh_survey(
+        case.mesh, survey, topographic_geometric_factor_mode="numerical"
+    )
+    return case.mesh, survey, conductivity(case), forward, 2e-2
+
+
 def three_d(relief=0.0):
     nodes, tets = box_mesh(relief=relief)
     mesh = Mesh3D.from_arrays(nodes, tets)
@@ -57,7 +66,12 @@ def three_d(relief=0.0):
     return mesh, survey, torch.as_tensor(sigma), ERTForward3D(mesh, survey), 1e-6
 
 
-CASES = {"flat": flat, "3d": three_d, "3d-terrain": lambda: three_d(relief=0.8)}
+CASES = {
+    "flat": flat,
+    "terrain": terrain,
+    "3d": three_d,
+    "3d-terrain": lambda: three_d(relief=0.8),
+}
 
 
 @pytest.fixture(scope="module", params=list(CASES))
@@ -104,12 +118,6 @@ def test_jvp_matches_finite_differences_with_remote_electrodes(case):
     assert_close(forward.jvp(sigma, direction).numpy(), numeric.numpy(), tol=1e-5)
 
 
-def test_terrain_2p5d_rejects_remote_electrodes():
-    case = quad_case(0.03)
-    with pytest.raises(ValueError, match="remote electrodes need absolute potentials"):
-        ERTForward2p5D.from_mesh_survey(case.mesh, with_poles(case.survey))
-
-
 def test_a_dipole_is_the_difference_of_two_poles_in_3d():
     mesh, _, sigma, _, _ = three_d()
     nodes, _ = box_mesh()
@@ -127,3 +135,36 @@ def test_a_dipole_is_the_difference_of_two_poles_in_3d():
     )
     jacobian = pole.jacobian(sigma)
     assert_close(dipole.jacobian(sigma), jacobian[:count] - jacobian[count:], tol=1e-10)
+
+
+def test_terrain_discretizations_have_robin_far_field_boundaries():
+    """Sides and bottom carry the 2.5D mixed condition, as in pyGIMLi; the ground surface does not.
+
+    With natural outer boundaries a pole-pole reading on this terrain came out ~1000x too large.
+    """
+
+    flat_case, terrain_case = (
+        quad_case(0.0, anomaly=False),
+        quad_case(0.03, anomaly=False),
+    )
+    forward = ERTForward2p5D.from_mesh_survey(
+        terrain_case.mesh, with_poles(terrain_case.survey)
+    )
+    for d in (forward.discretization, forward.primary_potential_discretization):
+        surface = np.asarray(d.geometry.surface_edge_mask, dtype=bool)
+        robin = np.asarray(d.boundary_geometries)
+        assert np.all(robin[:, surface] == 0) and np.all(
+            np.abs(robin[:, ~surface]).max(axis=0) > 0
+        )
+
+    def pole_pole(case):
+        survey = with_poles(case.survey)
+        sigma = torch.full((case.mesh.cell_count,), 0.01, dtype=torch.float64)
+        resistance = ERTForward2p5D.from_mesh_survey(case.mesh, survey).resistance(
+            sigma
+        )
+        quads = np.asarray(survey.measurements)
+        return resistance.numpy()[(quads[:, 1] == R) & (quads[:, 3] == R)]
+
+    flat, terrain = pole_pole(flat_case), pole_pole(terrain_case)
+    assert np.all(np.abs(terrain - flat) < 0.5 * flat)

@@ -51,7 +51,7 @@ from adtlert.forward.integration import (
 )
 from adtlert.forward.kernels import CellAggregation, GroupSum, normal_sensitivity
 from adtlert.mesh import Mesh
-from adtlert.survey import REMOTE_ELECTRODE, Survey, with_remote_slot
+from adtlert.survey import Survey, with_remote_slot
 from adtlert.utils.dtypes import FLOAT_DTYPE, NP_FLOAT_DTYPE
 
 Tensor = torch.Tensor
@@ -168,12 +168,6 @@ class ERTForward2p5D:
             )
 
         terrain = not mesh.is_flat_surface
-        if terrain and bool(torch.any(survey.measurements == REMOTE_ELECTRODE)):
-            raise ValueError(
-                "remote electrodes need absolute potentials, which the 2.5D terrain "
-                "discretization (natural outer boundaries) does not resolve; use a "
-                "flat-surface mesh or ERTForward3D"
-            )
         potential = geometric = None
         if terrain:
             discretization = build(

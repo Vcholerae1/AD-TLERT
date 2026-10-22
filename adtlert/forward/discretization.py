@@ -516,9 +516,6 @@ def build_discretization(
             int(dof_nodes.shape[0]),
             survey.electrode_positions,
         )
-        boundary_geometries = torch.zeros(
-            (wavenumbers.shape[0], geometry.boundary_edges.shape[0]), dtype=FLOAT_DTYPE
-        )
     else:
         geometry = mesh
         if (
@@ -549,15 +546,15 @@ def build_discretization(
         electrode_matrix = _interpolation(
             geometry, cell_dofs, int(dof_nodes.shape[0]), survey.electrode_positions
         )
-        center = np.mean(
-            np.asarray(survey.electrode_positions, dtype=float), axis=0
-        ).astype(NP_FLOAT_DTYPE)
-        boundary_geometries = torch.stack(
-            [
-                robin_boundary_coefficients(geometry, 1.0, center, float(k))
-                for k in wavenumbers.tolist()
-            ]
-        )
+    center = np.mean(
+        np.asarray(survey.electrode_positions, dtype=float), axis=0
+    ).astype(NP_FLOAT_DTYPE)
+    boundary_geometries = torch.stack(
+        [
+            robin_boundary_coefficients(geometry, 1.0, center, float(k))
+            for k in wavenumbers.tolist()
+        ]
+    )
 
     return Discretization(
         name=name,

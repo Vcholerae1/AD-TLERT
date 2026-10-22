@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0 - 2026-10-23
+
+### Changed (numerical results)
+
+- 2.5D terrain: the auxiliary (terrain-strip) discretizations now apply the 2.5D mixed
+  (Robin) far-field condition on their side and bottom boundaries, as the flat path and
+  pyGIMLi do, instead of natural (zero-flux) ones. Every 2.5D terrain response changes. On
+  the terrain test case, resistances against a converged pyGIMLi reference (same mesh, mixed
+  boundaries, H2-refined three times) improve from a median deviation of 21% (max 111%) to
+  0.2% (max 1.3%); flat 2.5D and 3D results are unchanged.
+- The image source of the 2.5D Robin coefficient is mirrored at the mesh's mean surface
+  elevation instead of at zero elevation (no change for meshes whose surface is at zero).
+
+### Added
+
+- Remote electrodes on 2.5D terrain: with absolute potentials resolved, pole configurations
+  run on every 2.5D and 3D operator.
+
 ## 0.2.4 - 2026-10-23
 
 ### Added

@@ -45,13 +45,16 @@ def robin_boundary_coefficients(
 ) -> torch.Tensor:
     """2.5D mixed-boundary coefficients ``sigma k (r.n / r) K1(k r) / K0(k r)`` (source plus image).
 
-    The top (ground) surface is a natural boundary and gets zero.
+    The image is mirrored at the mesh's mean surface elevation. The top (ground) surface is
+    a natural boundary and gets zero.
     """
 
     centers = np.asarray(mesh.boundary_edge_centers, dtype=float)
     normals = np.asarray(mesh.boundary_edge_normals, dtype=float)
     source = np.asarray(source_center, dtype=float)
-    r1, r2 = centers - source, centers - np.asarray([source[0], -source[1]])
+    surface = float(mesh.surface_reference_level)
+    image = np.asarray([source[0], 2.0 * surface - source[1]])
+    r1, r2 = centers - source, centers - image
     r1_abs, r2_abs = np.linalg.norm(r1, axis=1), np.linalg.norm(r2, axis=1)
     geometry = np.zeros(centers.shape[0])
     valid = np.flatnonzero(
